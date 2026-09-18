@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use cairo::ImageSurface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation }
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur }
 
 impl Kind {
     pub fn name(self) -> &'static str {
@@ -17,10 +17,16 @@ impl Kind {
             Kind::AddNoise => "Add Noise", Kind::Grain => "Grain", Kind::LensCorrection => "Lens Correction",
             Kind::GradientMap => "Gradient Map", Kind::Levels => "Levels", Kind::ContentAwareFill => "Content-Aware Fill",
             Kind::SpotHeal => "Heal Selection", Kind::Exposure => "Exposure", Kind::HueSaturation => "Hue/Saturation",
+            Kind::GaussianBlur => "Gaussian Blur", Kind::MotionBlur => "Motion Blur",
         }
     }
     /// Filters that work on the selection itself rather than the layer's colors, and need one.
     pub fn needs_selection(self) -> bool { matches!(self, Kind::ContentAwareFill | Kind::SpotHeal) }
+    /// The room a blur needs around the layer to spread into: about three standard deviations, or half a
+    /// streak (`FilterEdit.blurMargin`).
+    pub fn margin(self, settings: &Settings) -> usize {
+        match self { Kind::GaussianBlur => (settings.radius * 3.0 + 2.0).ceil() as usize, Kind::MotionBlur => (settings.distance / 2.0 + 2.0).ceil() as usize, _ => 0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,11 +45,17 @@ pub struct Settings {
     pub seed: u32,
     pub exposure: Exposure,
     pub hue_saturation: HueSaturation,
+    /// Gaussian Blur radius in layer pixels (the blur's standard deviation), 0.1 to 250.
+    pub radius: f64,
+    /// Motion Blur direction in degrees, counterclockwise from horizontal as in Photoshop, -90 to 90.
+    pub angle: f64,
+    /// Motion Blur streak length in layer pixels, 1 to 2000.
+    pub distance: f64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default() }
+        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0 }
     }
 }
 
@@ -52,6 +64,9 @@ impl Settings {
         let mut s = self.clone();
         s.amount = clamp(s.amount, 0.1, 400.0, 10.0);
         s.distortion = clamp(s.distortion, -100.0, 100.0, 0.0);
+        s.radius = clamp(s.radius, 0.1, 250.0, 1.0);
+        s.angle = clamp(s.angle, -90.0, 90.0, 0.0);
+        s.distance = clamp(s.distance, 1.0, 2000.0, 10.0);
         s.grain = s.grain.normalized();
         s.levels = s.levels.normalized();
         s
@@ -203,6 +218,8 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
             heal_region(&mut pixels, mask, w, h, settings.heal_mode, settings.seed)?;
             return argb_from_packed(w as i32, h as i32, pixels);
         }
+        Kind::GaussianBlur => crate::blur::gaussian(&mut pixels, w, h, 4, settings.radius),
+        Kind::MotionBlur => motion_blur(&mut pixels, w, h, settings.angle, settings.distance),
         Kind::Exposure => Adjustment::Exposure(settings.exposure.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
         Kind::HueSaturation => Adjustment::HueSaturation(settings.hue_saturation.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
     }
@@ -223,6 +240,40 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
         })?;
     }
     argb_from_packed(w as i32, h as i32, pixels)
+}
+
+/// Motion Blur: each pixel becomes the average of the pixels along a streak of `distance` through it at
+/// `angle` (counterclockwise from horizontal, as Photoshop measures it), sampled evenly, transparent beyond
+/// the image. Rows are split across threads.
+pub fn motion_blur(pixels: &mut [u8], w: usize, h: usize, angle: f64, distance: f64) {
+    if distance < 1.0 || w == 0 || h == 0 { return; }
+    let samples = (distance.ceil() as usize).clamp(2, 96);
+    let (dx, dy) = (angle.to_radians().cos(), -angle.to_radians().sin());
+    let source = pixels.to_vec();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let chunk_rows = (h / threads).max(1);
+    std::thread::scope(|scope| {
+        for (chunk, out) in pixels.chunks_mut(chunk_rows * w * 4).enumerate() {
+            let y0 = chunk * chunk_rows;
+            let source = &source;
+            scope.spawn(move || {
+                for (i, orow) in out.chunks_mut(w * 4).enumerate() {
+                    let y = y0 + i;
+                    for x in 0..w {
+                        let mut acc = [0u32; 4];
+                        for s in 0..samples {
+                            let t = (s as f64 + 0.5) / samples as f64 - 0.5;
+                            let (sx, sy) = ((x as f64 + 0.5 + dx * distance * t).floor(), (y as f64 + 0.5 + dy * distance * t).floor());
+                            if sx < 0.0 || sy < 0.0 || sx >= w as f64 || sy >= h as f64 { continue; }
+                            let p = (sy as usize * w + sx as usize) * 4;
+                            for k in 0..4 { acc[k] += source[p + k] as u32; }
+                        }
+                        for k in 0..4 { orow[x * 4 + k] = ((acc[k] + samples as u32 / 2) / samples as u32) as u8; }
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Remove Distortion at 100 moves the image's corners by this share of their distance from the center.

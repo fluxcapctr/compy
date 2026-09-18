@@ -286,6 +286,13 @@ impl FilterDialog {
                 { let this = self.clone(); colorize.connect_toggled(move |c| { this.settings.borrow_mut().hue_saturation.colorize = c.is_active(); this.schedule(); }); }
                 grid.attach(&colorize, 1, 4, 2, 1);
             }
+            Kind::GaussianBlur => {
+                self.slider(&grid, 0, "Radius", 0.1, 250.0, 0.1, s.radius, |s, v| s.radius = v, self);
+            }
+            Kind::MotionBlur => {
+                self.slider(&grid, 0, "Angle", -90.0, 90.0, 1.0, s.angle, |s, v| s.angle = v, self);
+                self.slider(&grid, 1, "Distance", 1.0, 2000.0, 1.0, s.distance, |s, v| s.distance = v, self);
+            }
             Kind::ContentAwareFill | Kind::SpotHeal => {}
         }
         content.append(&grid);

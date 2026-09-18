@@ -19,6 +19,7 @@ pub struct Document {
     pub active: Option<Uuid>,
     history: History<State>,
     stroke: Option<crate::brush::Stroke>,
+    warp: Option<crate::warp::Warp>,
     stroke_mask: bool,
     mask_target: bool,
     pub document_id: Uuid,
@@ -62,7 +63,7 @@ impl Document {
         let document_id = project.manifest.document_id;
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_mask: false, mask_target: false, document_id, path })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -176,12 +177,50 @@ impl Document {
         Ok(Some(selection.coverage_on_layer(&transform, image.width(), image.height())?))
     }
 
-    fn filtered(&self, kind: Kind, settings: &Settings) -> Result<(Uuid, ImageSurface)> {
+    /// The filter's result on the active layer, and the placement it needs when the filter spread past the
+    /// layer's edge (a blur gets a transparent margin to spread into, then the empty rim is cut away again).
+    fn filtered(&self, kind: Kind, settings: &Settings) -> Result<(Uuid, ImageSurface, Option<Transform>)> {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
-        let coverage = self.active_coverage(id, &image)?;
         if kind.needs_selection() && self.selection.as_ref().is_none_or(|s| s.is_empty()) { bail!("{} needs a selection.", kind.name()); }
-        let result = filters::run(kind, &image, settings, coverage.as_ref())?;
-        Ok((id, result))
+        let margin = kind.margin(&settings.normalized()) as i32;
+        if margin == 0 {
+            let coverage = self.active_coverage(id, &image)?;
+            let result = filters::run(kind, &image, settings, coverage.as_ref())?;
+            return Ok((id, result, None));
+        }
+        let transform = self.renderer.layer(id).transform;
+        let (iw, ih) = (image.width(), image.height());
+        let (gw, gh) = (iw + 2 * margin, ih + 2 * margin);
+        if gw > 30_000 || gh > 30_000 || gw as i64 * gh as i64 > 100_000_000 { bail!("The blur needs more room than the 30,000-pixel side or 100-megapixel limit allows."); }
+        let grown = new_argb(gw, gh)?;
+        {
+            let cr = Context::new(&grown)?;
+            cr.set_source_surface(&image, margin as f64, margin as f64)?;
+            cr.paint()?;
+        }
+        let mut grown_transform = transform;
+        grown_transform.size = crate::format::Size(transform.size.0 * gw as f64 / iw as f64, transform.size.1 * gh as f64 / ih as f64);
+        let c = transform.center();
+        grown_transform.origin = crate::format::Point(c.0 - grown_transform.size.0 / 2.0, c.1 - grown_transform.size.1 / 2.0);
+        let coverage = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&grown_transform, gw, gh)?), None => None };
+        let blurred = filters::run(kind, &grown, settings, coverage.as_ref())?;
+        // Trim the transparent rim the blur did not reach.
+        let bounds = with_bytes(&blurred, |data, stride| crate::ffi::alpha_bounds(data, gw as usize, gh as usize, stride))?;
+        let Some((x0, y0, x1, y1)) = bounds else { return Ok((id, blurred, Some(grown_transform))) };
+        let (cw, ch) = ((x1 - x0) as i32, (y1 - y0) as i32);
+        let cropped = new_argb(cw, ch)?;
+        {
+            let cr = Context::new(&cropped)?;
+            cr.set_source_surface(&blurred, -(x0 as f64), -(y0 as f64))?;
+            cr.set_operator(cairo::Operator::Source);
+            cr.paint()?;
+        }
+        let to_document = crate::render::pixel_to_document(&grown_transform, gw, gh);
+        let (mx, my) = to_document.transform_point((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
+        let mut placed = grown_transform;
+        placed.size = crate::format::Size(cw as f64 * grown_transform.size.0 / gw as f64, ch as f64 * grown_transform.size.1 / gh as f64);
+        placed.origin = crate::format::Point(mx - placed.size.0 / 2.0, my - placed.size.1 / 2.0);
+        Ok((id, cropped, if placed.same_placement(&transform) && (cw, ch) == (iw, ih) { None } else { Some(placed) }))
     }
 
     /// Runs a filter on the active layer as one undo step. Settings that would change nothing (no
@@ -197,18 +236,30 @@ impl Document {
             _ => false,
         };
         if identity { self.clear_preview(); return Ok(()); }
-        let (id, result) = self.filtered(kind, settings)?;
+        let (id, result, placed) = self.filtered(kind, settings)?;
         self.renderer.set_preview(id, None);
         self.begin_edit(kind.name());
-        self.renderer.set_image(id, result);
+        if let Some(placed) = placed {
+            // The layer's mask, covering the old grid, is carried onto the new one with its edge tone beyond.
+            let layer = self.renderer.layer(id).clone();
+            let carried = if layer.mask_file.is_some() && layer.mask_placement.is_none() { self.renderer.mask_on_grid(id, &placed, result.width(), result.height())? } else { None };
+            self.renderer.set_image(id, result);
+            self.renderer.set_layer_transform(id, placed);
+            if let Some(mask) = carried { self.renderer.set_mask(id, Some(mask)); }
+        } else {
+            self.renderer.set_image(id, result);
+        }
         self.end_edit();
         Ok(())
     }
 
     /// Shows what the filter would do without committing it.
     pub fn preview_filter(&mut self, kind: Kind, settings: &Settings) -> Result<()> {
-        let (id, result) = self.filtered(kind, settings)?;
-        self.renderer.set_preview(id, Some(result));
+        let (id, result, placed) = self.filtered(kind, settings)?;
+        match placed {
+            Some(t) => self.renderer.set_preview_placed(id, result, t),
+            None => self.renderer.set_preview(id, Some(result)),
+        }
         Ok(())
     }
 
@@ -238,7 +289,54 @@ pub enum StrokeKind {
 }
 
 impl Document {
-    pub fn stroke_active(&self) -> bool { self.stroke.is_some() }
+    pub fn stroke_active(&self) -> bool { self.stroke.is_some() || self.warp.is_some() }
+
+    /// Starts a Smudge or Liquify stroke on the active layer's pixels (never its mask).
+    pub fn begin_warp(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, mode: crate::warp::WarpMode) -> Result<()> {
+        if self.stroke_active() { bail!("a stroke is already in progress"); }
+        let Some((id, _)) = self.active_image() else { bail!("Smudge and Liquify work on a layer's pixels; select an image layer first.") };
+        if self.mask_target { bail!("Smudge and Liquify work on a layer's pixels, not its mask."); }
+        let sample = self.sample(false)?;
+        let surface = crate::raster::argb_from_packed(sample.width as i32, sample.height as i32, sample.pixels)?;
+        let canvas = Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(self.width() as f64, self.height() as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: crate::format::Sampling::High };
+        let mut warp = crate::warp::Warp::new(surface.clone(), mode, settings);
+        warp.append(point)?;
+        self.renderer.set_preview_placed(id, surface, canvas);
+        self.warp = Some(warp);
+        Ok(())
+    }
+
+    fn continue_warp(&mut self, point: (f64, f64)) -> Result<()> {
+        let Some(id) = self.active else { return Ok(()) };
+        let Some(warp) = self.warp.as_mut() else { return Ok(()) };
+        warp.append(point)?;
+        if let Some(rect) = warp.changed { self.renderer.preview_changed(id, rect)?; }
+        Ok(())
+    }
+
+    /// Paints the warp's result into the layer's pixels along the stroke, as one undo step (`finishWarp`).
+    fn finish_warp(&mut self) -> Result<()> {
+        let Some(warp) = self.warp.take() else { return Ok(()) };
+        let Some(id) = self.active else { return Ok(()) };
+        self.renderer.set_preview(id, None);
+        if warp.points.is_empty() { return Ok(()); }
+        let (w, h) = (warp.surface.width() as usize, warp.surface.height() as usize);
+        let pixels = with_bytes(&warp.surface, |data, stride| { let mut out = vec![0u8; w * h * 4]; for y in 0..h { out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&data[y * stride..y * stride + w * 4]); } out })?;
+        let sample = std::rc::Rc::new(crate::brush::Sample { pixels, width: w, height: h });
+        // A hard tip a little wider than the brush covers everything the stroke moved.
+        let settings = crate::brush::BrushSettings { diameter: (warp.diameter + 4.0).min(2000.0), hardness: 1.0, color: [0.0; 3], opacity: 1.0 };
+        let layer = self.renderer.layer(id).clone();
+        let size = self.renderer.image_size(id).unwrap_or((1, 1));
+        let canvas = (self.width() as f64, self.height() as f64);
+        let renderer = &mut self.renderer;
+        let mut stroke = crate::brush::Stroke::new(true, size, &layer.transform, canvas, &settings, crate::brush::Kind::Clone { sample, offset: (0.0, 0.0), replaces: true }, self.selection.clone(), true,
+            |x0, y0, gw, gh, transform| renderer.begin_preview(id, -x0, -y0, gw, gh, transform))?;
+        stroke.replay(&warp.points)?;
+        self.stroke = Some(stroke);
+        self.stroke_mask = false;
+        let name = warp.mode.name();
+        self.finish_stroke_named(name)
+    }
 
     /// A document-size copy of the active layer alone, or of the whole composite.
     fn sample(&mut self, all_layers: bool) -> Result<crate::brush::Sample> {
@@ -271,7 +369,7 @@ impl Document {
             StrokeKind::Paint => crate::brush::Kind::Paint,
             StrokeKind::Erase => crate::brush::Kind::Erase,
             StrokeKind::Heal { mode } => crate::brush::Kind::Heal { mode },
-            StrokeKind::Clone { offset, all_layers } => crate::brush::Kind::Clone { sample: std::rc::Rc::new(self.sample(all_layers)?), offset },
+            StrokeKind::Clone { offset, all_layers } => crate::brush::Kind::Clone { sample: std::rc::Rc::new(self.sample(all_layers)?), offset, replaces: false },
             StrokeKind::Blur => {
                 let sigma = (settings.diameter / 10.0).clamp(1.5, 30.0);
                 let sample = self.sample(false)?;
@@ -290,6 +388,7 @@ impl Document {
     }
 
     pub fn continue_stroke(&mut self, point: (f64, f64)) -> Result<()> {
+        if self.warp.is_some() { return self.continue_warp(point); }
         let Some(id) = self.active else { return Ok(()) };
         let Some(mut stroke) = self.stroke.take() else { return Ok(()) };
         let result = stroke.append(point);
@@ -304,6 +403,7 @@ impl Document {
 
     pub fn cancel_stroke(&mut self) {
         self.stroke = None;
+        self.warp = None;
         if let Some(id) = self.active { self.renderer.set_preview(id, None); self.renderer.end_mask_preview(id); }
         self.stroke_mask = false;
     }
@@ -311,6 +411,11 @@ impl Document {
     /// Ends the stroke: the final curve piece, healing if that is what it was, then the layer's pixels (and
     /// its transform, when painting reached past its edge) replaced as one undo step.
     pub fn finish_stroke(&mut self) -> Result<()> {
+        if self.warp.is_some() { return self.finish_warp(); }
+        self.finish_stroke_named("")
+    }
+
+    fn finish_stroke_named(&mut self, name: &str) -> Result<()> {
         let Some(mut stroke) = self.stroke.take() else { return Ok(()) };
         let Some(id) = self.active else { return Ok(()) };
         if std::mem::take(&mut self.stroke_mask) {
@@ -356,7 +461,7 @@ impl Document {
                 }
                 _ => None,
             };
-            self.begin_edit(stroke.kind.name());
+            self.begin_edit(if name.is_empty() { stroke.kind.name() } else { name });
             let adopted = if whole { self.renderer.adopt_preview(id) } else { self.renderer.adopt_preview_cropped(id, x0 as i32, y0 as i32, x1 as i32, y1 as i32)? };
             if !adopted {
                 let image = new_argb(w, h)?;

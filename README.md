@@ -51,7 +51,8 @@ undo step. Every pixel operation is the original C code; only byte order and pre
 here. `--wand x,y` and `--filter levels` script those for screenshots.
 
 **Painting (phase 4).** Brush (B), Eraser (E), Spot Healing Brush (J), Clone Stamp (S, Alt-click sets the
-source) and Blur (R) share size, hardness and opacity in the options bar; `[` and `]` step the size, `{`
+source) and Smear (R, with Liquify, Blur and Smudge modes: Liquify pushes pixels along the drag, Smudge
+drags color, Blur softens) share size, hardness and opacity in the options bar; `[` and `]` step the size, `{`
 and `}` the hardness, and the number keys set opacity. Shift-click paints a straight line from where the
 last stroke ended. Strokes follow a smoothed curve through the pointer samples, accumulate coverage in
 256-pixel tiles with the opacity as a cap on the whole stroke, respect the selection, and commit as one undo
@@ -91,10 +92,14 @@ Image Size (layers are resampled in place at the new size, rotation baked, masks
 Selection, and Hue/Saturation and Exposure as filters. Select has Expand and Contract, computed with a
 Euclidean distance transform so corners round as Photoshop's do.
 
+The Filter menu also has Gaussian Blur and Motion Blur, which give the layer a transparent margin to spread
+into and trim the rim they did not reach, so a blurred layer grows a little, as in the reference.
+
 Not built: the GPU brush (the software path meets the phase 4 budget), Remove Background (needs an ONNX
 runtime and a bundled model; the mask plumbing it would feed is in place), free distort, multi-layer
-selection, a Curves editor (curve points load, save and render, but there is no widget to edit them), and
-HEIC import.
+selection, a Curves editor (curve points load, save and render, but there is no widget to edit them), the
+Gradient, Shape and Eyedropper tools, a Crop tool with handles (Crop to Selection exists), moving pixels
+inside a selection, Merge Down, drag-to-reorder in the layer panel, Flip Canvas, and HEIC import.
 
 The tool icons are drawn as line glyphs in the style of the Mac app's SF Symbols, in the theme's text color.
 
@@ -140,6 +145,7 @@ src/brush    the stroke engine: tips, dab spacing, curve smoothing, tiles, compo
 src/transform drag modes (move, eight handles, rotate) with the modifier rules, snapping, hit testing
 src/ui/dialogs New Canvas, Canvas Size, Image Size, Expand/Contract, Rename, JPEG export, unsaved prompt
 src/blur     Gaussian blur as threaded box passes, and the Blur tool's lazily blurred tiles
+src/warp     Smudge and Liquify: the working copy at document size, dabbed and painted back along the stroke
 src/history  value-snapshot undo with entry and byte limits
 src/viewport the canvas view math (fit, zoom around a point, pan), a port of CanvasViewport
 src/ui/      the GTK4 app: window and tabs, canvas widget, layers panel

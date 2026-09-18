@@ -24,13 +24,16 @@ fn main() {
                     "--wand" => script.wand = rest.next().and_then(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }),
                     "--tool" => script.tool = rest.next().and_then(|t| ui::Tool::ALL.into_iter().find(|tool| format!("{tool:?}").to_lowercase() == *t)),
                     "--ellipse" => script.ellipse = true,
+                    "--blur-mode" => script.blur_mode = rest.next().and_then(|m| m.parse().ok()),
+                    "--layer" => script.layer = rest.next().cloned(),
                     "--adjustment" => script.adjustment = rest.next().cloned(),
                     "--size" => { if let Some(size) = rest.next().and_then(|v| v.parse::<f64>().ok()) { script.brush_size = Some(size); } }
                     "--stroke" => script.stroke = rest.next().map(|s| s.split(';').filter_map(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }).collect()).unwrap_or_default(),
                     "--filter" => script.filter = rest.next().and_then(|f| match f.as_str() {
                         "noise" => Some(compositor::filters::Kind::AddNoise), "grain" => Some(compositor::filters::Kind::Grain),
                         "lens" => Some(compositor::filters::Kind::LensCorrection), "gradient" => Some(compositor::filters::Kind::GradientMap),
-                        "levels" => Some(compositor::filters::Kind::Levels), _ => None }),
+                        "levels" => Some(compositor::filters::Kind::Levels), "gaussian" => Some(compositor::filters::Kind::GaussianBlur),
+                        "motion" => Some(compositor::filters::Kind::MotionBlur), _ => None }),
                     _ => paths.push(PathBuf::from(arg)),
                 }
             }

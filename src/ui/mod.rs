@@ -53,6 +53,8 @@ pub struct Doc {
     pub lock_ratio: bool,
     pub auto_select: bool,
     pub mask_paint_white: bool,
+    /// The Blur tool's mode: 0 Liquify, 1 Blur, 2 Smudge, as the Mac orders them.
+    pub blur_mode: u32,
     /// Guides drawn while a move is snapped: an x and a y across the whole canvas.
     pub snap_guides: (Option<f64>, Option<f64>),
     pub syncing_inspector: bool,
@@ -93,7 +95,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }
     }
 }
 
@@ -103,7 +105,7 @@ pub fn open_document(path: &Path) -> Result<Doc> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok(Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false })
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false })
 }
 
 /// Scripted checks: a zoom to set, a wand click to make (document pixels), and a PNG to save the window to
@@ -118,6 +120,9 @@ pub struct Script {
     /// A tool to select and a stroke to paint with it (document points), timing each step.
     pub tool: Option<Tool>,
     pub brush_size: Option<f64>,
+    pub blur_mode: Option<u32>,
+    /// A layer to make active, by name.
+    pub layer: Option<String>,
     pub stroke: Vec<(f64, f64)>,
     pub ellipse: bool,
     /// An adjustment layer to add and open for editing.
@@ -130,16 +135,18 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         let state = build_window(app);
         for path in &paths { state.open_path(path); }
         state.window.present();
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout, so the fit has happened.
             glib::timeout_add_local_once(Duration::from_millis(300), move || {
                 state.with_current(|p| {
+                    if let Some(name) = &script.layer { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.renderer.layers().iter().find(|l| l.name == *name).map(|l| l.id) { d.document.active = Some(id); } }
                     if let Some(zoom) = script.zoom { p.canvas.zoom_to(zoom); }
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
                     if let Some(size) = script.brush_size { p.canvas.doc().borrow_mut().brush.diameter = size; p.canvas.sync_brush_options(); }
+                    if let Some(mode) = script.blur_mode { p.canvas.doc().borrow_mut().blur_mode = mode; }
                     if !script.stroke.is_empty() { p.canvas.scripted_stroke(&script.stroke); }
                 });
                 if let Some(kind) = script.filter { state.open_filter(kind); }
@@ -281,7 +288,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
             let Some(name) = parameter.and_then(|v| v.get::<String>()) else { return };
             let kind = match name.as_str() {
                 "noise" => Kind::AddNoise, "grain" => Kind::Grain, "lens" => Kind::LensCorrection,
-                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, _ => return,
+                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, _ => return,
             };
             state.open_filter(kind);
         });
@@ -390,6 +397,8 @@ fn menu() -> gio::Menu {
     image.append(Some("Grain…"), Some("win.filter::grain"));
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
+    filter.append(Some("Gaussian Blur…"), Some("win.filter::gaussian"));
+    filter.append(Some("Motion Blur…"), Some("win.filter::motion"));
     filter.append(Some("Add Noise…"), Some("win.filter::noise"));
     filter.append(Some("Lens Correction…"), Some("win.filter::lens"));
     filter.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));

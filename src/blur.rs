@@ -77,6 +77,7 @@ fn box_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, channels: usize, r: usi
     });
     for (b, out) in results.iter().enumerate() {
         let x0 = b * band_width;
+        if x0 >= w { break; }
         let bw = ((b + 1) * band_width).min(w).saturating_sub(x0);
         for y in 0..h { dst[(y * w + x0) * channels..(y * w + x0 + bw) * channels].copy_from_slice(&out[y * bw * channels..(y + 1) * bw * channels]); }
     }

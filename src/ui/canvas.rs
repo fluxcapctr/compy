@@ -582,7 +582,9 @@ impl Canvas {
             let start = if shift { d.last_brush_point.unwrap_or(point) } else { point };
             let mask = d.document.mask_target() && matches!(d.tool, Tool::Brush | Tool::Eraser);
             let white = d.mask_paint_white && d.tool == Tool::Brush;
-            let mut result = if mask { d.document.begin_mask_stroke(start, &settings, white) } else { d.document.begin_stroke(start, &settings, kind) };
+            let warp = match (d.tool, d.blur_mode) { (Tool::Blur, 0) => Some(crate::warp::WarpMode::Liquify), (Tool::Blur, 2) => Some(crate::warp::WarpMode::Smudge), _ => None };
+            let mut result = if let Some(mode) = warp { d.document.begin_warp(start, &settings, mode) }
+                else if mask { d.document.begin_mask_stroke(start, &settings, white) } else { d.document.begin_stroke(start, &settings, kind) };
             if result.is_ok() && start != point { result = d.document.continue_stroke(point); }
             if result.is_ok() { d.last_brush_point = Some(point); }
             result

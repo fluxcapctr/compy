@@ -184,6 +184,21 @@ impl Renderer {
         self.placed.remove(&(id, true));
     }
 
+    /// Shows `surface` in place of the layer's pixels, placed on the document by `transform` rather than the
+    /// layer's own (a warp's document-size working copy, or a blur that grew the layer).
+    pub fn set_preview_placed(&mut self, id: Uuid, surface: ImageSurface, transform: Transform) {
+        self.set_preview(id, Some(surface));
+        self.preview_transforms.insert(id, transform);
+    }
+
+    /// The layer's mask resampled onto a `width` x `height` grid placed by `grid`, the mask's edge tone
+    /// beyond it (`LayerMask.clipImage` over a grown layer). None without a mask.
+    pub fn mask_on_grid(&mut self, id: Uuid, grid: &Transform, width: i32, height: i32) -> Result<Option<ImageSurface>> {
+        if !self.masks.contains_key(&id) { return Ok(None); }
+        let placement = self.layer(id).mask_placement.unwrap_or(self.layer(id).transform);
+        Ok(Some(self.place_mask(id, &placement, grid, width, height)?))
+    }
+
     /// Starts a live preview grid for a stroke: `width` x `height` pixels placed by `transform`, holding
     /// the layer's pixels at (`ox`, `oy`). Its reduced copies are assembled from the layer's own cached
     /// halvings (the grid's origin is aligned so they line up), so even a huge layer starts at once.

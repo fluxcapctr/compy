@@ -59,7 +59,8 @@ pub enum Kind {
     /// Shows a dark wash while painting; `heal` rebuilds the area from its surroundings at the end.
     Heal { mode: i32 },
     /// Clone Stamp: the sample shifted by `offset` document pixels, painted through the tip.
-    Clone { sample: Rc<Sample>, offset: (f64, f64) },
+    /// `replaces` copies the sample's alpha too (a warp's result), rather than drawing over what is there.
+    Clone { sample: Rc<Sample>, offset: (f64, f64), replaces: bool },
     /// Blur: the layer softened, painted in place through the tip.
     Blur { sample: Rc<LazyBlur> },
 }
@@ -143,6 +144,9 @@ pub struct Stroke {
     tail_backup: HashMap<usize, Option<Vec<u8>>>,
     /// Grid pixels changed by the last `append` or `flush`: what the canvas needs to refresh.
     pub changed: Option<(i32, i32, i32, i32)>,
+    /// Set while replaying a known path: no provisional tails, and composing waits for the end.
+    replaying: bool,
+    pending: HashSet<usize>,
 }
 
 impl Stroke {
@@ -183,7 +187,7 @@ impl Stroke {
         Ok(Stroke {
             settings: settings.clone(), kind, width, height, source, has_image, to_document, from_document, transform: expanded, canvas, preview,
             selection, tip_size, tip, spacing, tiles: HashMap::new(), columns: width.div_ceil(TILE),
-            samples: Vec::new(), previous: None, distance_to_next: 0.0, tail_backup: HashMap::new(), changed: None,
+            samples: Vec::new(), previous: None, distance_to_next: 0.0, tail_backup: HashMap::new(), changed: None, replaying: false, pending: HashSet::new(),
         })
     }
 
@@ -202,7 +206,25 @@ impl Stroke {
             let (before, start, end, after) = (self.samples[n.saturating_sub(4)], self.samples[n - 3], self.samples[n - 2], self.samples[n - 1]);
             self.curve(start, end, before, after, &mut changed);
         }
-        if n >= 2 { let from = self.samples[n - 2]; self.draw_tail(from, point, &mut changed); }
+        if n >= 2 && !self.replaying { let from = self.samples[n - 2]; self.draw_tail(from, point, &mut changed); }
+        if self.replaying { self.pending.extend(changed); return Ok(()); }
+        self.publish(&changed)
+    }
+
+    /// Lays the whole stroke through `points` at once, as a finished path: no provisional tails, every tile
+    /// composed once at the end. What a warp uses to paint its result back into the layer.
+    pub fn replay(&mut self, points: &[(f64, f64)]) -> Result<()> {
+        self.replaying = true;
+        for &point in points { self.append(point)?; }
+        let mut changed = self.remove_tail();
+        let n = self.samples.len();
+        if n >= 2 {
+            let (before, start, end) = (self.samples[n.saturating_sub(3)], self.samples[n - 2], self.samples[n - 1]);
+            self.curve(start, end, before, end, &mut changed);
+            self.samples = vec![end];
+        }
+        changed.extend(std::mem::take(&mut self.pending));
+        self.replaying = false;
         self.publish(&changed)
     }
 
@@ -379,10 +401,14 @@ impl Stroke {
                         Kind::Paint => over([color[2] * 255.0, color[1] * 255.0, color[0] * 255.0, 255.0], a, o),
                         Kind::Erase => { for k in 0..4 { o[k] = (base[k] as f64 * (1.0 - a)).round() as u8; } }
                         Kind::Heal { .. } => over([0.12 * 255.0, 0.12 * 255.0, 0.12 * 255.0, 255.0], cov * 0.45, o),
-                        Kind::Clone { sample, offset } => {
-                            let (dx, dy) = self.to_document.transform_point(tile.x as f64 + lx as f64 + 0.5, tile.y as f64 + ly as f64 + 0.5);
+                        Kind::Clone { sample, offset, replaces } => {
+                            // The grid point's document position, from the matrix directly (a call per pixel is slow).
+                            let (gx, gy) = (tile.x as f64 + lx as f64 + 0.5, tile.y as f64 + ly as f64 + 0.5);
+                            let m = &self.to_document;
+                            let (dx, dy) = (m.xx() * gx + m.xy() * gy + m.x0(), m.yx() * gx + m.yy() * gy + m.y0());
                             let p = sample.pixel(dx + offset.0, dy + offset.1);
-                            over([p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64], a, o);
+                            if *replaces { for k in 0..4 { o[k] = (p[k] as f64 * a + base[k] as f64 * (1.0 - a)).round().clamp(0.0, 255.0) as u8; } }
+                            else { over([p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64], a, o); }
                         }
                         Kind::Blur { .. } => {
                             // Filled below from the blurred region, one block per tile rather than per pixel.
@@ -407,7 +433,9 @@ impl Stroke {
                             if let Some(sel) = &tile.selection { cov *= sel[i] as f64 / 255.0; }
                             if cov <= 0.0 { continue; }
                             let a = cov * opacity;
-                            let (dx, dy) = self.to_document.transform_point(tile.x as f64 + (x0 + c) as f64 + 0.5, tile.y as f64 + (y0 + r) as f64 + 0.5);
+                            let (gx, gy) = (tile.x as f64 + (x0 + c) as f64 + 0.5, tile.y as f64 + (y0 + r) as f64 + 0.5);
+                            let m = &self.to_document;
+                            let (dx, dy) = (m.xx() * gx + m.xy() * gy + m.x0(), m.yx() * gx + m.yy() * gy + m.y0());
                             let (sx, sy) = (dx.floor() as isize - rx as isize, dy.floor() as isize - ry as isize);
                             if sx < 0 || sy < 0 || sx as usize >= bw || sy as usize >= ry1 - ry { continue; }
                             let s = &block[(sy as usize * bw + sx as usize) * 4..][..4];

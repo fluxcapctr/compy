@@ -21,7 +21,7 @@ impl Tool {
             Tool::Eraser => "Eraser (E): drag to clear pixels",
             Tool::Heal => "Spot Healing Brush (J): paint over a blemish; it is rebuilt from its surroundings",
             Tool::Clone => "Clone Stamp (S): Alt-click a source, then paint copies of it",
-            Tool::Blur => "Blur (R): drag to soften",
+            Tool::Blur => "Smear (R): Liquify pushes pixels, Blur softens, Smudge drags color",
             Tool::Hand => "Hand (H): drag to pan",
             Tool::Zoom => "Zoom (Z): click to zoom in, Alt-click to zoom out",
         }
@@ -196,7 +196,13 @@ impl OptionsBar {
         paint.append(&color);
         extra.add_named(&paint, Some("brush"));
         extra.add_named(&gtk::Box::new(gtk::Orientation::Horizontal, 0), Some("eraser"));
-        extra.add_named(&gtk::Box::new(gtk::Orientation::Horizontal, 0), Some("blur"));
+        let blur = row();
+        blur.append(&gtk::Label::new(Some("Mode")));
+        let blur_mode = gtk::DropDown::from_strings(&["Liquify", "Blur", "Smudge"]);
+        blur_mode.set_tooltip_text(Some("Liquify pushes pixels along the drag, Blur softens under the tip, Smudge drags color along"));
+        { let doc = doc.clone(); blur_mode.connect_selected_notify(move |m| { if let Ok(mut d) = doc.try_borrow_mut() { d.blur_mode = m.selected(); } }); }
+        blur.append(&blur_mode);
+        extra.add_named(&blur, Some("blur"));
         let heal = row();
         heal.append(&gtk::Label::new(Some("Type")));
         let mode = gtk::DropDown::from_strings(&["Content-Aware", "Create Texture", "Proximity Match"]);
