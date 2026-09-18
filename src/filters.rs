@@ -1,0 +1,640 @@
+//! Whole-layer filters and adjustments on a layer's pixels: each takes the image, its settings and, with a
+//! selection, the selection's coverage on the layer grid, and returns a new image. The pixel work is the C
+//! core's; this module handles byte order, premultiplication and blending the result back through the
+//! selection (`PixelFilter.run`, `LevelsFilter`, `ContentFill`, and the healing part of `BrushStroke`).
+
+use crate::ffi;
+use crate::raster::{argb_from_packed, with_bytes};
+use anyhow::{Result, bail};
+use cairo::ImageSurface;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation }
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::AddNoise => "Add Noise", Kind::Grain => "Grain", Kind::LensCorrection => "Lens Correction",
+            Kind::GradientMap => "Gradient Map", Kind::Levels => "Levels", Kind::ContentAwareFill => "Content-Aware Fill",
+            Kind::SpotHeal => "Heal Selection", Kind::Exposure => "Exposure", Kind::HueSaturation => "Hue/Saturation",
+        }
+    }
+    /// Filters that work on the selection itself rather than the layer's colors, and need one.
+    pub fn needs_selection(self) -> bool { matches!(self, Kind::ContentAwareFill | Kind::SpotHeal) }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    /// Add Noise strength as Photoshop's percentage, 0.1 to 400.
+    pub amount: f64,
+    pub gaussian: bool,
+    pub monochromatic: bool,
+    /// Lens Correction's Remove Distortion, -100 to 100.
+    pub distortion: f64,
+    pub grain: Grain,
+    pub gradient: GradientMap,
+    pub levels: Levels,
+    /// Spot healing: 0 Content-Aware, 1 Create Texture, 2 Proximity Match.
+    pub heal_mode: i32,
+    pub seed: u32,
+    pub exposure: Exposure,
+    pub hue_saturation: HueSaturation,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default() }
+    }
+}
+
+impl Settings {
+    pub fn normalized(&self) -> Settings {
+        let mut s = self.clone();
+        s.amount = clamp(s.amount, 0.1, 400.0, 10.0);
+        s.distortion = clamp(s.distortion, -100.0, 100.0, 0.0);
+        s.grain = s.grain.normalized();
+        s.levels = s.levels.normalized();
+        s
+    }
+}
+
+fn clamp(v: f64, low: f64, high: f64, fallback: f64) -> f64 { if v.is_finite() { v.clamp(low, high) } else { fallback } }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grain { pub amount: f64, pub size: f64, pub roughness: f64 }
+impl Default for Grain { fn default() -> Self { Grain { amount: 25.0, size: 1.5, roughness: 50.0 } } }
+impl Grain {
+    pub fn normalized(&self) -> Grain { Grain { amount: clamp(self.amount, 0.0, 100.0, 25.0), size: clamp(self.size, 0.5, 20.0, 1.5), roughness: clamp(self.roughness, 0.0, 100.0, 50.0) } }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GradientMap { pub shadows: [f64; 3], pub highlights: [f64; 3], pub reversed: bool }
+impl Default for GradientMap { fn default() -> Self { GradientMap { shadows: [0.0; 3], highlights: [1.0; 3], reversed: false } } }
+impl GradientMap {
+    /// 256 x 3 straight sRGB bytes, darkest first.
+    pub fn table(&self) -> [u8; 768] {
+        let (dark, light) = if self.reversed { (self.highlights, self.shadows) } else { (self.shadows, self.highlights) };
+        let mut table = [0u8; 768];
+        for i in 0..256 {
+            let t = i as f64 / 255.0;
+            for c in 0..3 { table[i * 3 + c] = ((dark[c] + (light[c] - dark[c]) * t) * 255.0).round().clamp(0.0, 255.0) as u8; }
+        }
+        table
+    }
+}
+
+/// One channel's levels: input black and white points, gamma, output range (`LevelRange`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Range { pub black: f64, pub gamma: f64, pub white: f64, pub output_black: f64, pub output_white: f64 }
+impl Default for Range { fn default() -> Self { Range { black: 0.0, gamma: 1.0, white: 255.0, output_black: 0.0, output_white: 255.0 } } }
+impl Range {
+    pub fn normalized(&self) -> Range {
+        let mut r = *self;
+        r.black = clamp(r.black, 0.0, 254.0, 0.0);
+        r.white = clamp(r.white, r.black + 1.0, 255.0, 255.0);
+        r.gamma = clamp(r.gamma, 0.1, 9.99, 1.0);
+        r.output_black = clamp(r.output_black, 0.0, 255.0, 0.0);
+        r.output_white = clamp(r.output_white, 0.0, 255.0, 255.0);
+        r
+    }
+    pub fn apply(&self, value: f64) -> f64 {
+        let s = self.normalized();
+        let input = ((value * 255.0 - s.black) / (s.white - s.black)).clamp(0.0, 1.0);
+        (s.output_black + input.powf(1.0 / s.gamma) * (s.output_white - s.output_black)) / 255.0
+    }
+}
+
+/// Levels for RGB together (index 0) and each channel (1 red, 2 green, 3 blue), as `LevelsSettings`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Levels { pub ranges: [Range; 4] }
+impl Levels {
+    pub fn normalized(&self) -> Levels { Levels { ranges: self.ranges.map(|r| r.normalized()) } }
+    pub fn is_identity(&self) -> bool { self.ranges.iter().all(|r| r.normalized() == Range::default()) }
+    /// Individual channels, followed by the composite RGB adjustment.
+    pub fn apply(&self, value: f64, channel: usize) -> f64 { self.ranges[0].apply(self.ranges[channel].apply(value)) }
+    /// Auto Contrast: a shared black and white point clipping 0.1% at each end of every channel.
+    pub fn auto_contrast(histogram: &[[f64; 256]; 4]) -> Levels {
+        fn endpoints(bins: &[f64; 256]) -> Option<(f64, f64)> {
+            let total: f64 = bins.iter().sum();
+            if total <= 0.0 { return None; }
+            let (mut sum, mut low, mut high) = (0.0, 0usize, 255usize);
+            for (i, b) in bins.iter().enumerate() { sum += b; if sum > total * 0.001 { low = i; break; } }
+            sum = 0.0;
+            for (i, b) in bins.iter().enumerate().rev() { sum += b; if sum > total * 0.001 { high = i; break; } }
+            (low < high).then_some((low as f64, high as f64))
+        }
+        let mut result = Levels::default();
+        let limits: Vec<(f64, f64)> = histogram[1..].iter().filter_map(endpoints).collect();
+        if let (Some(low), Some(high)) = (limits.iter().map(|l| l.0).reduce(f64::min), limits.iter().map(|l| l.1).reduce(f64::max)) {
+            if low < high { result.ranges[0] = Range { black: low, white: high, ..Range::default() }; }
+        }
+        result
+    }
+}
+
+/// A packed copy of a surface's pixels (stride = width * 4).
+fn packed(source: &ImageSurface) -> Result<(Vec<u8>, usize, usize)> {
+    let (w, h) = (source.width() as usize, source.height() as usize);
+    let mut out = vec![0u8; w * h * 4];
+    with_bytes(source, |data, stride| {
+        for y in 0..h { out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&data[y * stride..y * stride + w * 4]); }
+    })?;
+    Ok((out, w, h))
+}
+
+/// A packed (width x height) copy of an A8 coverage surface.
+pub fn packed_gray(coverage: &ImageSurface) -> Result<Vec<u8>> {
+    let (w, h) = (coverage.width() as usize, coverage.height() as usize);
+    let mut out = vec![0u8; w * h];
+    with_bytes(coverage, |data, stride| {
+        for y in 0..h { out[y * w..(y + 1) * w].copy_from_slice(&data[y * stride..y * stride + w]); }
+    })?;
+    Ok(out)
+}
+
+/// Runs `kind` on `source` and returns the result as a new image. `coverage` is the selection on the
+/// layer's grid: colour filters blend their result through it, the fill and heal work inside it.
+pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Option<&ImageSurface>) -> Result<ImageSurface> {
+    let settings = settings.normalized();
+    let (mut pixels, w, h) = packed(source)?;
+    let stride = w * 4;
+    let coverage = coverage.map(packed_gray).transpose()?;
+    if kind.needs_selection() && coverage.is_none() { bail!("{} needs a selection", kind.name()); }
+    match kind {
+        Kind::AddNoise => ffi::noise(&mut pixels, w, h, stride, settings.amount as f32, settings.gaussian, settings.monochromatic, settings.seed),
+        Kind::Grain => {
+            if settings.grain.amount > 0.0 {
+                ffi::swap_red_blue(&mut pixels, stride, w, h);
+                ffi::grain(&mut pixels, w, h, stride, settings.grain.amount, settings.grain.size, settings.grain.roughness, settings.seed, (0.0, 0.0), 1.0);
+                ffi::swap_red_blue(&mut pixels, stride, w, h);
+            }
+        }
+        Kind::LensCorrection => {
+            let source_pixels = pixels.clone();
+            ffi::lens(&source_pixels, &mut pixels, w, h, stride, settings.distortion / 100.0 * LENS_STRENGTH);
+        }
+        Kind::GradientMap => {
+            ffi::swap_red_blue(&mut pixels, stride, w, h);
+            ffi::gradient_map(&mut pixels, w, h, stride, &settings.gradient.table());
+            ffi::swap_red_blue(&mut pixels, stride, w, h);
+        }
+        Kind::Levels => {
+            if !settings.levels.is_identity() {
+                // Tables in the buffer's own order, blue first; the reference builds them red first for RGBA.
+                let mut tables = [0f32; 768];
+                for (slot, channel) in [3usize, 2, 1].into_iter().enumerate() {
+                    for v in 0..256 { tables[slot * 256 + v] = settings.levels.apply(v as f64 / 255.0, channel) as f32; }
+                }
+                // Soft edges are adjusted like the colour they are: unpremultiplied around the lookup.
+                unpremultiply_partial(&mut pixels);
+                ffi::levels(&mut pixels, w * h, &tables);
+                premultiply_partial(&mut pixels);
+            }
+        }
+        Kind::ContentAwareFill => {
+            let mask = coverage.as_ref().unwrap();
+            if !ffi::fill(&mut pixels, stride, mask, w, w, h)? {
+                bail!("Not enough unselected, opaque image pixels to synthesize a fill. Use a smaller selection with some surrounding image.");
+            }
+            return argb_from_packed(w as i32, h as i32, pixels);
+        }
+        Kind::SpotHeal => {
+            let mask = coverage.as_ref().unwrap();
+            heal_region(&mut pixels, mask, w, h, settings.heal_mode, settings.seed)?;
+            return argb_from_packed(w as i32, h as i32, pixels);
+        }
+        Kind::Exposure => Adjustment::Exposure(settings.exposure.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::HueSaturation => Adjustment::HueSaturation(settings.hue_saturation.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+    }
+    if let Some(mask) = &coverage {
+        // coverage x adjusted + (1 - coverage) x original, per byte; both sides are premultiplied.
+        with_bytes(source, |original, ostride| {
+            for y in 0..h {
+                for x in 0..w {
+                    let c = mask[y * w + x] as u32;
+                    if c == 255 { continue; }
+                    for k in 0..4 {
+                        let i = y * stride + x * 4 + k;
+                        let o = original[y * ostride + x * 4 + k] as u32;
+                        pixels[i] = ((pixels[i] as u32 * c + o * (255 - c) + 127) / 255) as u8;
+                    }
+                }
+            }
+        })?;
+    }
+    argb_from_packed(w as i32, h as i32, pixels)
+}
+
+/// Remove Distortion at 100 moves the image's corners by this share of their distance from the center.
+pub const LENS_STRENGTH: f64 = 0.35;
+
+fn unpremultiply_partial(pixels: &mut [u8]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a == 0 || a == 255 { continue; }
+        for k in 0..3 { p[k] = ((p[k] as u32 * 255 + a / 2) / a).min(255) as u8; }
+    }
+}
+
+fn premultiply_partial(pixels: &mut [u8]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a == 0 || a == 255 { continue; }
+        for k in 0..3 { p[k] = ((p[k] as u32 * a + 127) / 255) as u8; }
+    }
+}
+
+/// Spot healing over the covered pixels, run on a region around them with room for the patch search (about
+/// three spot-widths, as `BrushStroke.heal` allows), and copied back.
+fn heal_region(pixels: &mut [u8], coverage: &[u8], w: usize, h: usize, mode: i32, seed: u32) -> Result<()> {
+    let Some((left, top, right, bottom)) = ffi::gray_bounds(coverage, w, h, w) else { return Ok(()) };
+    let reach = (((right - left).max(bottom - top) + 32) as f64 * 3.2).ceil() as usize;
+    let (x0, y0) = (left.saturating_sub(reach), top.saturating_sub(reach));
+    let (x1, y1) = ((right + reach).min(w), (bottom + reach).min(h));
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    let mut region = vec![0u8; rw * rh * 4];
+    let mut mask = vec![0u8; rw * rh];
+    for y in 0..rh {
+        region[y * rw * 4..(y + 1) * rw * 4].copy_from_slice(&pixels[((y0 + y) * w + x0) * 4..((y0 + y) * w + x1) * 4]);
+        mask[y * rw..(y + 1) * rw].copy_from_slice(&coverage[(y0 + y) * w + x0..(y0 + y) * w + x1]);
+    }
+    ffi::heal(&mut region, &mask, rw, rh, rw * 4, 1.0, mode, seed)?;
+    for y in 0..rh {
+        pixels[((y0 + y) * w + x0) * 4..((y0 + y) * w + x1) * 4].copy_from_slice(&region[y * rw * 4..(y + 1) * rw * 4]);
+    }
+    Ok(())
+}
+
+/// Histograms of a layer's pixels (inside `coverage` when given): [mean of channels, red, green, blue] x 256.
+pub fn histogram(source: &ImageSurface, coverage: Option<&ImageSurface>) -> Result<[[f64; 256]; 4]> {
+    let (pixels, w, h) = packed(source)?;
+    let coverage = coverage.map(packed_gray).transpose()?;
+    let bins = ffi::histogram(&pixels, coverage.as_deref(), w * h);
+    let mut out = [[0f64; 256]; 4];
+    // The buffer is blue first: the C's per-channel bins come back blue, green, red.
+    for (slot, channel) in [0usize, 3, 2, 1].into_iter().enumerate() {
+        out[channel].copy_from_slice(&bins[slot * 256..(slot + 1) * 256]);
+    }
+    Ok(out)
+}
+
+// MARK: Exposure, Hue/Saturation, Curves, and adjustment layers
+
+/// Photoshop's Exposure: stops scale linear light, an offset shifts it, gamma bends the result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exposure { pub exposure: f64, pub offset: f64, pub gamma: f64 }
+impl Default for Exposure { fn default() -> Self { Exposure { exposure: 0.0, offset: 0.0, gamma: 1.0 } } }
+impl Exposure {
+    pub fn normalized(&self) -> Exposure { Exposure { exposure: clamp(self.exposure, -20.0, 20.0, 0.0), offset: clamp(self.offset, -0.5, 0.5, 0.0), gamma: clamp(self.gamma, 0.01, 9.99, 1.0) } }
+    pub fn is_identity(&self) -> bool { self.normalized() == Exposure::default() }
+    /// Each channel's output (0 to 1) for each input byte, decoded to linear light and encoded back.
+    pub fn table(&self) -> [f32; 256] {
+        let s = self.normalized();
+        let scale = 2f64.powf(s.exposure);
+        let mut t = [0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let encoded = i as f64 / 255.0;
+            let mut linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
+            linear = (linear * scale + s.offset).max(0.0).powf(1.0 / s.gamma);
+            let output = if linear <= 0.0031308 { linear * 12.92 } else { 1.055 * linear.powf(1.0 / 2.4) - 0.055 };
+            *v = output.clamp(0.0, 1.0) as f32;
+        }
+        t
+    }
+}
+
+/// A hue band in degrees, wrapping at 360: full strength between `range_start` and `range_end`, fading to
+/// nothing at `falloff_start` and `falloff_end` (`HueBand`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HueBand { pub falloff_start: f64, pub range_start: f64, pub range_end: f64, pub falloff_end: f64 }
+impl HueBand {
+    fn forward(from: f64, to: f64) -> f64 { let d = (to - from) % 360.0; if d < 0.0 { d + 360.0 } else { d } }
+    pub fn weight(&self, hue: f64) -> f64 {
+        let span = Self::forward(self.falloff_start, self.falloff_end);
+        if span <= 0.0 { return 1.0; }
+        let position = Self::forward(self.falloff_start, hue);
+        if position > span { return 0.0; }
+        let ramp_in = Self::forward(self.falloff_start, self.range_start);
+        let plateau_end = Self::forward(self.falloff_start, self.range_end);
+        if position < ramp_in { return if ramp_in > 0.0 { position / ramp_in } else { 1.0 }; }
+        if position <= plateau_end { return 1.0; }
+        let ramp_out = span - plateau_end;
+        if ramp_out > 0.0 { (span - position) / ramp_out } else { 1.0 }
+    }
+}
+
+pub const COLOR_RANGES: [&str; 7] = ["Master", "Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas"];
+pub fn default_band(range: &str) -> HueBand {
+    let b = |a, b, c, d| HueBand { falloff_start: a, range_start: b, range_end: c, falloff_end: d };
+    match range {
+        "Reds" => b(315.0, 345.0, 15.0, 45.0), "Yellows" => b(15.0, 45.0, 75.0, 105.0), "Greens" => b(75.0, 105.0, 135.0, 165.0),
+        "Cyans" => b(135.0, 165.0, 195.0, 225.0), "Blues" => b(195.0, 225.0, 255.0, 285.0), "Magentas" => b(255.0, 285.0, 315.0, 345.0),
+        _ => b(0.0, 0.0, 360.0, 360.0),
+    }
+}
+
+/// Hue/Saturation as Photoshop's Cmd+U: per-range hue shift, saturation and lightness, weighted by how
+/// strongly each range's band claims a pixel's hue, or Colorize (`HueSaturationSettings`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HueSaturation {
+    /// Which range the sliders edit (and Colorize reads).
+    pub range: String,
+    pub colorize: bool,
+    /// (hue, saturation, lightness) per range name.
+    pub adjustments: Vec<(String, [f64; 3])>,
+    pub bands: Vec<(String, HueBand)>,
+}
+impl Default for HueSaturation { fn default() -> Self { HueSaturation { range: "Master".into(), colorize: false, adjustments: Vec::new(), bands: Vec::new() } } }
+impl HueSaturation {
+    pub fn adjustment(&self, range: &str) -> [f64; 3] { self.adjustments.iter().find(|(r, _)| r == range).map(|(_, a)| *a).unwrap_or([0.0; 3]) }
+    pub fn set_adjustment(&mut self, range: &str, value: [f64; 3]) {
+        match self.adjustments.iter_mut().find(|(r, _)| r == range) { Some(entry) => entry.1 = value, None => self.adjustments.push((range.to_string(), value)) }
+    }
+    pub fn band(&self, range: &str) -> HueBand { self.bands.iter().find(|(r, _)| r == range).map(|(_, b)| *b).unwrap_or_else(|| default_band(range)) }
+    pub fn is_identity(&self) -> bool { !self.colorize && self.adjustments.iter().all(|(_, a)| *a == [0.0; 3]) }
+    fn weight(&self, range: &str, hue: f64) -> f64 { self.band(range).weight(hue) }
+    /// How much every range shifts a given hue, sampled once per degree.
+    fn response(&self) -> Vec<[f64; 3]> {
+        (0..=360).map(|degree| {
+            let mut r = [0.0; 3];
+            for (range, a) in &self.adjustments {
+                if *a == [0.0; 3] { continue; }
+                let w = self.weight(range, degree as f64);
+                if w <= 0.0 { continue; }
+                for k in 0..3 { r[k] += a[k] * w; }
+            }
+            r
+        }).collect()
+    }
+    fn adjust(&self, rgb: [f64; 3], response: &[[f64; 3]]) -> [f64; 3] {
+        let (mut hue, mut saturation, mut lightness) = to_hsl(rgb);
+        let amount;
+        if self.colorize {
+            let a = self.adjustment(&self.range);
+            hue = a[0] % 360.0;
+            saturation = (a[1] / 100.0).clamp(0.0, 1.0);
+            amount = a[2] / 100.0;
+        } else {
+            let sampled = response[(hue.round() as usize).min(360)];
+            amount = sampled[2] / 100.0;
+            hue = (hue + sampled[0]) % 360.0;
+            if hue < 0.0 { hue += 360.0; }
+            saturation = (saturation * (1.0 + sampled[1] / 100.0)).clamp(0.0, 1.0);
+        }
+        let amount = amount.clamp(-1.0, 1.0);
+        lightness = if amount >= 0.0 { lightness + (1.0 - lightness) * amount } else { lightness * (1.0 + amount) };
+        to_rgb(hue, saturation, lightness.clamp(0.0, 1.0))
+    }
+    /// A 3D lookup table of `dim` steps per channel (as the reference's `CIColorCube`), indexed
+    /// `((b * dim + g) * dim + r) * 3`.
+    pub fn cube(&self, dim: usize) -> Vec<u8> {
+        let response = self.response();
+        let mut out = vec![0u8; dim * dim * dim * 3];
+        let step = (dim - 1) as f64;
+        for b in 0..dim { for g in 0..dim { for r in 0..dim {
+            let c = self.adjust([r as f64 / step, g as f64 / step, b as f64 / step], &response);
+            let i = ((b * dim + g) * dim + r) * 3;
+            for k in 0..3 { out[i + k] = (c[k] * 255.0).round().clamp(0.0, 255.0) as u8; }
+        } } }
+        out
+    }
+}
+
+fn to_hsl(rgb: [f64; 3]) -> (f64, f64, f64) {
+    let [r, g, b] = rgb;
+    let (high, low) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (high + low) / 2.0;
+    let delta = high - low;
+    if delta <= 0.0 { return (0.0, 0.0, lightness); }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
+    let mut hue = if high == r { (g - b) / delta } else if high == g { (b - r) / delta + 2.0 } else { (r - g) / delta + 4.0 };
+    hue *= 60.0;
+    if hue < 0.0 { hue += 360.0; }
+    (hue, saturation.min(1.0), lightness)
+}
+
+fn to_rgb(hue: f64, saturation: f64, lightness: f64) -> [f64; 3] {
+    if saturation <= 0.0 { return [lightness; 3]; }
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue / 60.0;
+    let second = chroma * (1.0 - ((sector % 2.0) - 1.0).abs());
+    let base = lightness - chroma / 2.0;
+    let (r, g, b) = match sector as i32 { 0 => (chroma, second, 0.0), 1 => (second, chroma, 0.0), 2 => (0.0, chroma, second), 3 => (0.0, second, chroma), 4 => (second, 0.0, chroma), _ => (chroma, 0.0, second) };
+    [(r + base).clamp(0.0, 1.0), (g + base).clamp(0.0, 1.0), (b + base).clamp(0.0, 1.0)]
+}
+
+/// Curves: per-channel points through which a shape-preserving cubic runs (`CurvesSettings`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Curves { pub channels: [Vec<(f64, f64)>; 4] }
+impl Default for Curves { fn default() -> Self { Curves { channels: std::array::from_fn(|_| vec![(0.0, 0.0), (255.0, 255.0)]) } } }
+impl Curves {
+    pub fn is_identity(&self) -> bool { self.channels.iter().all(|c| *c == vec![(0.0, 0.0), (255.0, 255.0)]) }
+    pub fn value(&self, x: f64, channel: usize) -> f64 {
+        let p = &self.channels[channel];
+        if p.len() < 2 { return x; }
+        let i = p.iter().rposition(|q| q.0 <= x).unwrap_or(0).min(p.len() - 2);
+        let d: Vec<f64> = p.windows(2).map(|w| (w[1].1 - w[0].1) / (w[1].0 - w[0].0)).collect();
+        let slope = |j: usize| -> f64 {
+            if j == 0 { return d[0]; }
+            if j == p.len() - 1 { return *d.last().unwrap(); }
+            if d[j - 1] * d[j] <= 0.0 { return 0.0; }
+            2.0 / (1.0 / d[j - 1] + 1.0 / d[j])
+        };
+        let h = p[i + 1].0 - p[i].0;
+        let t = ((x - p[i].0) / h).clamp(0.0, 1.0);
+        let y = (2.0 * t * t * t - 3.0 * t * t + 1.0) * p[i].1 + (t * t * t - 2.0 * t * t + t) * h * slope(i)
+            + (-2.0 * t * t * t + 3.0 * t * t) * p[i + 1].1 + (t * t * t - t * t) * h * slope(i + 1);
+        y.clamp(0.0, 255.0)
+    }
+}
+
+/// Applies a per-channel table (RGB order, 3 x 256, values 0 to 1) to packed BGRA premultiplied pixels the
+/// way the reference applies `levels_apply`: straight colors around the lookup for soft edges.
+fn apply_tables(pixels: &mut [u8], count: usize, rgb: &[[f32; 256]; 3]) {
+    let mut tables = [0f32; 768];
+    for (slot, channel) in [2usize, 1, 0].into_iter().enumerate() { tables[slot * 256..(slot + 1) * 256].copy_from_slice(&rgb[channel]); }
+    unpremultiply_partial(pixels);
+    ffi::levels(pixels, count, &tables);
+    premultiply_partial(pixels);
+}
+
+/// One adjustment layer's settings, read from the file's JSON and written back the same way.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Adjustment {
+    Levels(Levels),
+    Curves(Curves),
+    Exposure(Exposure),
+    GradientMap(GradientMap),
+    Grain { grain: Grain, seed: u32 },
+    HueSaturation(HueSaturation),
+}
+
+impl Adjustment {
+    pub fn kind_name(&self) -> &'static str {
+        match self { Adjustment::Levels(_) => "Levels", Adjustment::Curves(_) => "Curves", Adjustment::Exposure(_) => "Exposure", Adjustment::GradientMap(_) => "Gradient Map", Adjustment::Grain { .. } => "Grain", Adjustment::HueSaturation(_) => "Hue/Saturation" }
+    }
+
+    pub fn from_kind(kind: &str) -> Option<Adjustment> {
+        Some(match kind {
+            "Levels" => Adjustment::Levels(Levels::default()), "Curves" => Adjustment::Curves(Curves::default()), "Exposure" => Adjustment::Exposure(Exposure::default()),
+            "Gradient Map" => Adjustment::GradientMap(GradientMap::default()), "Grain" => Adjustment::Grain { grain: Grain::default(), seed: 0 },
+            "Hue/Saturation" => Adjustment::HueSaturation(HueSaturation::default()), _ => return None,
+        })
+    }
+
+    /// From the file's record (`LayerAdjustment`'s fields).
+    pub fn from_record(record: &crate::format::Adjustment) -> Option<Adjustment> {
+        use serde_json::Value;
+        let s = &record.settings;
+        let num = |v: Option<&Value>, d: f64| v.and_then(Value::as_f64).unwrap_or(d);
+        let color = |v: Option<&Value>, d: [f64; 3]| v.map(|c| [num(c.get("red"), d[0]), num(c.get("green"), d[1]), num(c.get("blue"), d[2])]).unwrap_or(d);
+        Some(match record.kind.as_str() {
+            "Levels" => {
+                let mut levels = Levels::default();
+                if let Some(ranges) = s.get("levels").and_then(|l| l.get("ranges")).and_then(Value::as_array) {
+                    for (i, r) in ranges.iter().take(4).enumerate() {
+                        levels.ranges[i] = Range { black: num(r.get("black"), 0.0), gamma: num(r.get("gamma"), 1.0), white: num(r.get("white"), 255.0), output_black: num(r.get("outputBlack"), 0.0), output_white: num(r.get("outputWhite"), 255.0) };
+                    }
+                }
+                Adjustment::Levels(levels.normalized())
+            }
+            "Curves" => {
+                let mut curves = Curves::default();
+                if let Some(channels) = s.get("curves").and_then(|c| c.get("channels")).and_then(Value::as_array) {
+                    for (i, ch) in channels.iter().take(4).enumerate() {
+                        if let Some(points) = ch.as_array() {
+                            let pts: Vec<(f64, f64)> = points.iter().map(|p| (num(p.get("x"), 0.0), num(p.get("y"), 0.0))).collect();
+                            if pts.len() >= 2 { curves.channels[i] = pts; }
+                        }
+                    }
+                }
+                Adjustment::Curves(curves)
+            }
+            "Exposure" => {
+                let e = s.get("exposureSettings");
+                Adjustment::Exposure(Exposure { exposure: num(e.and_then(|e| e.get("exposure")), 0.0), offset: num(e.and_then(|e| e.get("offset")), 0.0), gamma: num(e.and_then(|e| e.get("gamma")), 1.0) }.normalized())
+            }
+            "Gradient Map" => {
+                let g = s.get("gradientMapSettings");
+                Adjustment::GradientMap(GradientMap { shadows: color(g.and_then(|g| g.get("shadows")), [0.0; 3]), highlights: color(g.and_then(|g| g.get("highlights")), [1.0; 3]), reversed: g.and_then(|g| g.get("reversed")).and_then(Value::as_bool).unwrap_or(false) })
+            }
+            "Grain" => {
+                let g = s.get("grainSettings");
+                Adjustment::Grain { grain: Grain { amount: num(g.and_then(|g| g.get("amount")), 25.0), size: num(g.and_then(|g| g.get("size")), 1.5), roughness: num(g.and_then(|g| g.get("roughness")), 50.0) }.normalized(), seed: g.and_then(|g| g.get("seed")).and_then(Value::as_u64).unwrap_or(0) as u32 }
+            }
+            "Hue/Saturation" => {
+                let mut hs = HueSaturation { colorize: s.get("colorize").and_then(Value::as_bool).unwrap_or(false), ..HueSaturation::default() };
+                match s.get("hsvSettings") {
+                    Some(v) => {
+                        hs.range = v.get("range").and_then(Value::as_str).unwrap_or("Master").to_string();
+                        hs.colorize = v.get("colorize").and_then(Value::as_bool).unwrap_or(hs.colorize);
+                        if let Some(adj) = v.get("adjustments").and_then(Value::as_object) {
+                            for (range, a) in adj { hs.adjustments.push((range.clone(), [num(a.get("hue"), 0.0), num(a.get("saturation"), 0.0), num(a.get("lightness"), 0.0)])); }
+                        }
+                        if let Some(bands) = v.get("bands").and_then(Value::as_object) {
+                            for (range, b) in bands { hs.bands.push((range.clone(), HueBand { falloff_start: num(b.get("falloffStart"), 0.0), range_start: num(b.get("rangeStart"), 0.0), range_end: num(b.get("rangeEnd"), 360.0), falloff_end: num(b.get("falloffEnd"), 360.0) })); }
+                        }
+                    }
+                    None => hs.adjustments.push(("Master".into(), [num(s.get("hue"), 0.0), num(s.get("saturation"), 0.0), num(s.get("lightness"), 0.0)])),
+                }
+                Adjustment::HueSaturation(hs)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The file record: the kind and every setting, in the reference app's field names.
+    pub fn to_record(&self) -> crate::format::Adjustment {
+        use serde_json::{Map, Value, json};
+        let mut settings = Map::new();
+        // Every record carries the legacy top-level fields the Swift always writes.
+        settings.insert("hue".into(), json!(0.0)); settings.insert("saturation".into(), json!(0.0)); settings.insert("lightness".into(), json!(0.0)); settings.insert("colorize".into(), json!(false));
+        settings.insert("levels".into(), json!({"channel": "RGB", "ranges": Levels::default().ranges.iter().map(|r| json!({"black": r.black, "gamma": r.gamma, "white": r.white, "outputBlack": r.output_black, "outputWhite": r.output_white})).collect::<Vec<_>>()}));
+        settings.insert("curves".into(), json!({"channel": "RGB", "channels": Curves::default().channels.iter().map(|c| c.iter().map(|p| json!({"x": p.0, "y": p.1})).collect::<Vec<_>>()).collect::<Vec<_>>()}));
+        match self {
+            Adjustment::Levels(l) => { settings.insert("levels".into(), json!({"channel": "RGB", "ranges": l.ranges.iter().map(|r| json!({"black": r.black, "gamma": r.gamma, "white": r.white, "outputBlack": r.output_black, "outputWhite": r.output_white})).collect::<Vec<_>>()})); }
+            Adjustment::Curves(c) => { settings.insert("curves".into(), json!({"channel": "RGB", "channels": c.channels.iter().map(|ch| ch.iter().map(|p| json!({"x": p.0, "y": p.1})).collect::<Vec<_>>()).collect::<Vec<_>>()})); }
+            Adjustment::Exposure(e) => { settings.insert("exposureSettings".into(), json!({"exposure": e.exposure, "offset": e.offset, "gamma": e.gamma})); }
+            Adjustment::GradientMap(g) => { settings.insert("gradientMapSettings".into(), json!({"shadows": {"red": g.shadows[0], "green": g.shadows[1], "blue": g.shadows[2]}, "highlights": {"red": g.highlights[0], "green": g.highlights[1], "blue": g.highlights[2]}, "reversed": g.reversed})); }
+            Adjustment::Grain { grain, seed } => { settings.insert("grainSettings".into(), json!({"amount": grain.amount, "size": grain.size, "roughness": grain.roughness, "seed": seed})); }
+            Adjustment::HueSaturation(h) => {
+                let master = h.adjustment("Master");
+                settings.insert("hue".into(), json!(master[0])); settings.insert("saturation".into(), json!(master[1])); settings.insert("lightness".into(), json!(master[2])); settings.insert("colorize".into(), json!(h.colorize));
+                let adjustments: Map<String, Value> = h.adjustments.iter().map(|(r, a)| (r.clone(), json!({"hue": a[0], "saturation": a[1], "lightness": a[2]}))).collect();
+                let bands: Map<String, Value> = COLOR_RANGES.iter().map(|r| { let b = h.band(r); (r.to_string(), json!({"falloffStart": b.falloff_start, "rangeStart": b.range_start, "rangeEnd": b.range_end, "falloffEnd": b.falloff_end})) }).collect();
+                settings.insert("hsvSettings".into(), json!({"range": h.range, "colorize": h.colorize, "invertRange": false, "adjustments": adjustments, "bands": bands}));
+            }
+        }
+        crate::format::Adjustment { kind: self.kind_name().to_string(), settings }
+    }
+
+    /// Applies the adjustment in place to packed premultiplied BGRA pixels. `origin` and `units_per_pixel`
+    /// place the pixels in document space, so Grain's pattern stays fixed however the canvas is drawn.
+    pub fn apply(&self, pixels: &mut [u8], w: usize, h: usize, origin: (f64, f64), units_per_pixel: f64) {
+        let stride = w * 4;
+        match self {
+            Adjustment::Levels(levels) => {
+                if levels.is_identity() { return; }
+                let mut rgb = [[0f32; 256]; 3];
+                for (c, table) in rgb.iter_mut().enumerate() { for v in 0..256 { table[v] = levels.apply(v as f64 / 255.0, c + 1) as f32; } }
+                apply_tables(pixels, w * h, &rgb);
+            }
+            Adjustment::Curves(curves) => {
+                if curves.is_identity() { return; }
+                let mut rgb = [[0f32; 256]; 3];
+                for (c, table) in rgb.iter_mut().enumerate() { for v in 0..256 { table[v] = (curves.value(curves.value(v as f64, c + 1), 0) / 255.0) as f32; } }
+                apply_tables(pixels, w * h, &rgb);
+            }
+            Adjustment::Exposure(exposure) => {
+                if exposure.is_identity() { return; }
+                let t = exposure.table();
+                apply_tables(pixels, w * h, &[t, t, t]);
+            }
+            Adjustment::GradientMap(g) => {
+                ffi::swap_red_blue(pixels, stride, w, h);
+                ffi::gradient_map(pixels, w, h, stride, &g.table());
+                ffi::swap_red_blue(pixels, stride, w, h);
+            }
+            Adjustment::Grain { grain, seed } => {
+                if grain.amount <= 0.0 { return; }
+                ffi::swap_red_blue(pixels, stride, w, h);
+                ffi::grain(pixels, w, h, stride, grain.amount, grain.size, grain.roughness, *seed, origin, units_per_pixel);
+                ffi::swap_red_blue(pixels, stride, w, h);
+            }
+            Adjustment::HueSaturation(hs) => {
+                if hs.is_identity() { return; }
+                let dim = 33usize;
+                let cube = hs.cube(dim);
+                let step = (dim - 1) as f64;
+                for p in pixels.chunks_exact_mut(4) {
+                    let a = p[3] as u32;
+                    if a == 0 { continue; }
+                    let straight = [((p[2] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0, ((p[1] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0, ((p[0] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0];
+                    let out = trilinear(&cube, dim, step, straight);
+                    p[2] = ((out[0] as u32 * a + 127) / 255) as u8;
+                    p[1] = ((out[1] as u32 * a + 127) / 255) as u8;
+                    p[0] = ((out[2] as u32 * a + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
+fn trilinear(cube: &[u8], dim: usize, step: f64, rgb: [f64; 3]) -> [u8; 3] {
+    let f = rgb.map(|v| v.clamp(0.0, 1.0) * step);
+    let i0 = f.map(|v| (v.floor() as usize).min(dim - 1));
+    let i1 = i0.map(|i| (i + 1).min(dim - 1));
+    let t = [f[0] - i0[0] as f64, f[1] - i0[1] as f64, f[2] - i0[2] as f64];
+    let at = |r: usize, g: usize, b: usize, k: usize| cube[((b * dim + g) * dim + r) * 3 + k] as f64;
+    let mut out = [0u8; 3];
+    for k in 0..3 {
+        let c00 = at(i0[0], i0[1], i0[2], k) * (1.0 - t[0]) + at(i1[0], i0[1], i0[2], k) * t[0];
+        let c10 = at(i0[0], i1[1], i0[2], k) * (1.0 - t[0]) + at(i1[0], i1[1], i0[2], k) * t[0];
+        let c01 = at(i0[0], i0[1], i1[2], k) * (1.0 - t[0]) + at(i1[0], i0[1], i1[2], k) * t[0];
+        let c11 = at(i0[0], i1[1], i1[2], k) * (1.0 - t[0]) + at(i1[0], i1[1], i1[2], k) * t[0];
+        let c0 = c00 * (1.0 - t[1]) + c10 * t[1];
+        let c1 = c01 * (1.0 - t[1]) + c11 * t[1];
+        out[k] = (c0 * (1.0 - t[2]) + c1 * t[2]).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
