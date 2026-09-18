@@ -137,8 +137,8 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         state.window.present();
         if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() {
             let (state, script) = (state.clone(), script.clone());
-            // After the first layout, so the fit has happened.
-            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            // After the first layout and frame, so the fit has happened and the canvas has its size.
+            glib::timeout_add_local_once(Duration::from_millis(1000), move || {
                 state.with_current(|p| {
                     if let Some(name) = &script.layer { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.renderer.layers().iter().find(|l| l.name == *name).map(|l| l.id) { d.document.active = Some(id); } }
                     if let Some(zoom) = script.zoom { p.canvas.zoom_to(zoom); }
@@ -181,6 +181,10 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
 }
 
 fn build_window(app: &gtk::Application) -> Rc<App> {
+    // Tool buttons are smaller than GTK's default minimum.
+    let css = gtk::CssProvider::new();
+    css.load_from_string("button.tool { min-width: 0; min-height: 0; padding: 4px; }");
+    if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
     let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
     let header = gtk::HeaderBar::new();
     let open = gtk::Button::builder().label("Open").tooltip_text("Open a .comp project (Ctrl+O)").action_name("win.open").build();

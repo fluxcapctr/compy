@@ -37,10 +37,23 @@ pub struct Canvas {
     refresh: RefCell<Option<Rc<dyn Fn()>>>,
     /// A transform drag in progress: the drag, the layers it moves and their transforms when it began.
     transform_drag: RefCell<Option<(Drag, Vec<(uuid::Uuid, crate::format::Transform)>)>>,
+    /// The last composited frame, kept while nothing it shows has changed.
+    cache: RefCell<Option<FrameCache>>,
     /// A marquee or lasso being drawn.
     draft: RefCell<Option<Draft>>,
     /// Dragging a selection outline: its offset so far (document pixels).
     outline_move: Cell<Option<(f64, f64)>>,
+}
+
+/// The composited document as last drawn: the ground, checkerboard, layers, grid and border, at device
+/// resolution, with what it was drawn for. Overlays (cursor, ants, handles, drafts) go on top each frame.
+struct FrameCache {
+    surface: cairo::ImageSurface,
+    width: i32,
+    height: i32,
+    scale: i32,
+    viewport: crate::viewport::Viewport,
+    revision: u64,
 }
 
 /// A selection outline in progress, in document pixels.
@@ -89,7 +102,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -97,6 +110,41 @@ impl Canvas {
     }
 
     pub fn doc(&self) -> &DocRef { &self.doc }
+
+    /// Brings the cached frame up to date: nothing when the document and view are as they were, only the
+    /// changed region after a stroke step, everything otherwise. Returns what it did, for tracing.
+    fn cached_frame(&self, doc: &mut super::Doc, w: i32, h: i32, scale: i32) -> Result<&'static str> {
+        let revision = doc.document.renderer.revision();
+        let dirty = doc.document.take_dirty();
+        let mut cache = self.cache.borrow_mut();
+        let fresh = cache.as_ref().is_none_or(|c| c.width != w || c.height != h || c.scale != scale || c.viewport != doc.viewport);
+        if fresh {
+            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w * scale, h * scale)?;
+            surface.set_device_scale(scale as f64, scale as f64);
+            *cache = Some(FrameCache { surface, width: w, height: h, scale, viewport: doc.viewport, revision: 0 });
+        }
+        let c = cache.as_mut().unwrap();
+        if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("  revision {} (cached {}), fresh {fresh}, dirty {dirty:?}", revision, c.revision); }
+        if c.revision == revision { return Ok("cached"); }
+        let cr = Context::new(&c.surface)?;
+        let what = match (fresh, dirty) {
+            (false, Some((x0, y0, x1, y1))) => {
+                // Just the touched part, with a little room for antialiasing and resampling.
+                let size = doc.size();
+                let (vx0, vy0) = doc.viewport.view_point((x0, y0), size);
+                let (vx1, vy1) = doc.viewport.view_point((x1, y1), size);
+                cr.rectangle(vx0.min(vx1).floor() - 2.0, vy0.min(vy1).floor() - 2.0, (vx1 - vx0).abs().ceil() + 4.0, (vy1 - vy0).abs().ceil() + 4.0);
+                cr.clip();
+                "partial"
+            }
+            _ => "full",
+        };
+        let t = std::time::Instant::now();
+        draw_document(doc, &cr, w as f64, h as f64)?;
+        if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("  render {what} {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); }
+        c.revision = revision;
+        Ok(what)
+    }
 
     fn connect(self: &Rc<Self>) {
         let area = &self.area;
@@ -114,14 +162,25 @@ impl Canvas {
             let doc = self.doc.clone();
             let pointer = self.pointer.clone();
             let trace = std::env::var_os("COMPOSITOR_TRACE").is_some();
-            let (draft_ref, outline_ref) = (self.clone(), self.clone());
-            area.set_draw_func(move |_, cr, w, h| {
+            let (draft_ref, outline_ref, this) = (self.clone(), self.clone(), self.clone());
+            area.set_draw_func(move |area, cr, w, h| {
                 let start = std::time::Instant::now();
                 let mut d = doc.borrow_mut();
                 let draft = draft_ref.draft.borrow();
                 let offset = outline_ref.outline_move.get().unwrap_or((0.0, 0.0));
-                if let Err(error) = draw(&mut d, cr, w as f64, h as f64, pointer.get(), draft.as_ref(), offset) { eprintln!("canvas draw failed: {error:#}"); }
-                if trace { eprintln!("frame {:.1} ms at {}", start.elapsed().as_secs_f64() * 1000.0, zoom_text(d.viewport.zoom())); }
+                let scale = area.scale_factor();
+                let rendered = match this.cached_frame(&mut d, w, h, scale) {
+                    Ok(rendered) => rendered,
+                    Err(error) => { eprintln!("canvas draw failed: {error:#}"); "failed" }
+                };
+                let t = std::time::Instant::now();
+                if let Some(cache) = this.cache.borrow().as_ref() {
+                    cr.set_source_surface(&cache.surface, 0.0, 0.0).ok();
+                    cr.paint().ok();
+                }
+                if trace { eprintln!("  paint {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); }
+                if let Err(error) = draw_overlays(&mut d, cr, w as f64, h as f64, pointer.get(), draft.as_ref(), offset) { eprintln!("canvas overlay failed: {error:#}"); }
+                if trace { eprintln!("frame {:.1} ms at {} ({rendered})", start.elapsed().as_secs_f64() * 1000.0, zoom_text(d.viewport.zoom())); }
             });
         }
         // Marching ants advance while a drawable selection exists.
@@ -647,6 +706,9 @@ impl Canvas {
             let step = std::time::Instant::now();
             self.continue_stroke(view);
             worst = worst.max(step.elapsed().as_secs_f64() * 1000.0);
+            // Bring the frame cache up to date between points, as a real pointer's frames would.
+            let (w, h, scale) = (self.area.width(), self.area.height(), self.area.scale_factor());
+            if w > 0 && h > 0 { let mut d = self.doc.borrow_mut(); let _ = self.cached_frame(&mut d, w, h, scale); }
         }
         eprintln!("stroke steps: {} points, worst {:.1} ms", points.len() - 1, worst);
         let end = std::time::Instant::now();
@@ -739,7 +801,7 @@ pub fn zoom_text(zoom: f64) -> String {
     if percent < 10.0 { format!("{percent:.1}%") } else { format!("{percent:.0}%") }
 }
 
-fn draw(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, pointer: (f64, f64), draft: Option<&Draft>, outline_offset: (f64, f64)) -> Result<()> {
+fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) -> Result<()> {
     cr.set_source_rgb(0.105, 0.105, 0.105);
     cr.paint()?;
     let size = doc.size();
@@ -830,6 +892,17 @@ fn draw(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, pointer: (f
     cr.set_line_width(hairline);
     cr.rectangle(rx, ry, rw, rh);
     cr.stroke()?;
+    Ok(())
+}
+
+/// Everything that sits on top of the composited document and changes without it: the transform box and
+/// guides, selection drafts, the brush cursor, the clone crosshair, and the marching ants.
+fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, pointer: (f64, f64), draft: Option<&Draft>, outline_offset: (f64, f64)) -> Result<()> {
+    let size = doc.size();
+    let vp = doc.viewport;
+    let (rx, ry, rw, rh) = vp.document_rect(size);
+    let Some((vx, vy, vw, vh)) = intersect((rx, ry, rw, rh), (0.0, 0.0, width, height)) else { return Ok(()) };
+    let ppp = vp.points_per_pixel();
 
     // The Move tool's transform box and handles, and the guides a snapped move met.
     if doc.tool == Tool::Move {

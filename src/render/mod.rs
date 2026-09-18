@@ -53,6 +53,8 @@ pub struct Renderer {
     thumbnails: HashMap<(Uuid, i32), ImageSurface>,
     live: live::LiveMasks,
     warnings: Vec<String>,
+    /// Counts every change to what a draw would show, so a canvas can keep the last frame until it changes.
+    revision: u64,
 }
 
 /// Which of a layer's pixel buffers a halved copy came from.
@@ -96,7 +98,7 @@ impl State {
 
 /// A folder's mask, clipping every layer inside the folder.
 pub(crate) struct FolderMask {
-    mask: ImageSurface,
+    id: Uuid,
     transform: Transform,
 }
 
@@ -151,6 +153,7 @@ impl Renderer {
             thumbnails: HashMap::new(),
             live: live::LiveMasks::default(),
             warnings: Vec::new(),
+            revision: 1,
         })
     }
 
@@ -162,6 +165,8 @@ impl Renderer {
     pub fn has_image(&self, id: Uuid) -> bool { self.images.contains_key(&id) }
     pub fn image_size(&self, id: Uuid) -> Option<(i32, i32)> { self.images.get(&id).map(|s| (s.width(), s.height())) }
     pub fn take_warnings(&mut self) -> Vec<String> { std::mem::take(&mut self.warnings) }
+    pub fn revision(&self) -> u64 { self.revision }
+    fn touch(&mut self) { self.revision += 1; }
     pub(crate) fn source(&self, id: Uuid) -> Option<Uuid> { self.layer(id).mask_source_id }
     pub(crate) fn parent(&self, id: Uuid) -> Option<Uuid> { self.layer(id).parent_id }
 
@@ -171,13 +176,13 @@ impl Renderer {
     pub fn mask(&self, id: Uuid) -> Option<&ImageSurface> { self.masks.get(&id) }
 
     /// Replaces a layer's pixels. The old surface stays valid for anyone (undo history) still holding it.
-    pub fn set_image(&mut self, id: Uuid, surface: ImageSurface) {
+    pub fn set_image(&mut self, id: Uuid, surface: ImageSurface) { self.touch();
         self.images.insert(id, surface);
         self.invalidate(id);
     }
 
     /// Shows `surface` instead of the layer's pixels until cleared; the same size as they are, ideally.
-    pub fn set_preview(&mut self, id: Uuid, surface: Option<ImageSurface>) {
+    pub fn set_preview(&mut self, id: Uuid, surface: Option<ImageSurface>) { self.touch();
         match surface { Some(s) => { self.previews.insert(id, s); } None => { self.previews.remove(&id); } }
         self.preview_transforms.remove(&id);
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::Preview));
@@ -186,7 +191,7 @@ impl Renderer {
 
     /// Shows `surface` in place of the layer's pixels, placed on the document by `transform` rather than the
     /// layer's own (a warp's document-size working copy, or a blur that grew the layer).
-    pub fn set_preview_placed(&mut self, id: Uuid, surface: ImageSurface, transform: Transform) {
+    pub fn set_preview_placed(&mut self, id: Uuid, surface: ImageSurface, transform: Transform) { self.touch();
         self.set_preview(id, Some(surface));
         self.preview_transforms.insert(id, transform);
     }
@@ -202,7 +207,7 @@ impl Renderer {
     /// Starts a live preview grid for a stroke: `width` x `height` pixels placed by `transform`, holding
     /// the layer's pixels at (`ox`, `oy`). Its reduced copies are assembled from the layer's own cached
     /// halvings (the grid's origin is aligned so they line up), so even a huge layer starts at once.
-    pub fn begin_preview(&mut self, id: Uuid, ox: i32, oy: i32, width: i32, height: i32, transform: Transform) -> Result<ImageSurface> {
+    pub fn begin_preview(&mut self, id: Uuid, ox: i32, oy: i32, width: i32, height: i32, transform: Transform) -> Result<ImageSurface> { self.touch();
         self.set_preview(id, None);
         let surface = new_argb(width, height)?;
         if let Some(image) = self.images.get(&id) {
@@ -235,7 +240,7 @@ impl Renderer {
     }
 
     /// The preview grid's pixels changed inside `rect` (x0, y0, x1, y1): brings its reduced copies up to date.
-    pub fn preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> {
+    pub fn preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> { self.touch();
         let Some(mut source) = self.previews.get(&id).cloned() else { return Ok(()) };
         let mut region = rect;
         for level in 1..=crate::raster::MAX_LEVEL {
@@ -251,7 +256,7 @@ impl Renderer {
 
     /// Makes a stroke's preview grid the layer's pixels outright, keeping the reduced copies built during the
     /// stroke, so committing a stroke on a huge layer costs nothing beyond bookkeeping.
-    pub fn adopt_preview(&mut self, id: Uuid) -> bool {
+    pub fn adopt_preview(&mut self, id: Uuid) -> bool { self.touch();
         let Some(surface) = self.previews.remove(&id) else { return false };
         self.preview_transforms.remove(&id);
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::Image));
@@ -267,7 +272,7 @@ impl Renderer {
     /// Makes the part (x0, y0, x1, y1) of a stroke's preview grid the layer's pixels, cropping the reduced copies
     /// along with it; exact when the origin is a multiple of every halving in use and everything outside the
     /// crop is transparent, which is how a stroke's committed bounds are chosen.
-    pub fn adopt_preview_cropped(&mut self, id: Uuid, x0: i32, y0: i32, x1: i32, y1: i32) -> Result<bool> {
+    pub fn adopt_preview_cropped(&mut self, id: Uuid, x0: i32, y0: i32, x1: i32, y1: i32) -> Result<bool> { self.touch();
         let Some(preview) = self.previews.get(&id).cloned() else { return Ok(false) };
         if x0 % 64 != 0 || y0 % 64 != 0 { return Ok(false); }
         let crop = |source: &ImageSurface, sx: i32, sy: i32, w: i32, h: i32| -> Result<ImageSurface> {
@@ -299,7 +304,7 @@ impl Renderer {
     /// Starts a live preview of a layer's mask for a stroke: an A8 grid of `width` x `height` holding the mask
     /// stretched to it (a uniform 1 x 1 mask covers it whole), with reduced copies from the mask's own where
     /// the grid is the mask's own size.
-    pub fn begin_mask_preview(&mut self, id: Uuid, width: i32, height: i32) -> Result<ImageSurface> {
+    pub fn begin_mask_preview(&mut self, id: Uuid, width: i32, height: i32) -> Result<ImageSurface> { self.touch();
         self.end_mask_preview(id);
         let surface = crate::raster::a8_filled(width, height, 255)?;
         if let Some(mask) = self.masks.get(&id) {
@@ -327,7 +332,7 @@ impl Renderer {
     }
 
     /// The mask preview's pixels changed inside `rect` (x0, y0, x1, y1).
-    pub fn mask_preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> {
+    pub fn mask_preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> { self.touch();
         let Some(mut source) = self.mask_previews.get(&id).cloned() else { return Ok(()) };
         self.placed.retain(|(l, _), _| *l != id);
         let mut region = rect;
@@ -344,14 +349,14 @@ impl Renderer {
 
     pub fn mask_preview(&self, id: Uuid) -> Option<ImageSurface> { self.mask_previews.get(&id).cloned() }
 
-    pub fn end_mask_preview(&mut self, id: Uuid) {
+    pub fn end_mask_preview(&mut self, id: Uuid) { self.touch();
         self.mask_previews.remove(&id);
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::MaskPreview));
         self.placed.retain(|(l, _), _| *l != id);
     }
 
     /// Makes the mask preview the layer's mask, reduced copies and all.
-    pub fn adopt_mask_preview(&mut self, id: Uuid) -> bool {
+    pub fn adopt_mask_preview(&mut self, id: Uuid) -> bool { self.touch();
         let Some(surface) = self.mask_previews.remove(&id) else { return false };
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::Mask));
         let moved: Vec<(usize, ImageSurface)> = self.halved.iter().filter(|((l, source, _), _)| *l == id && *source == Source::MaskPreview).map(|((_, _, k), s)| (*k, s.clone())).collect();
@@ -368,19 +373,19 @@ impl Renderer {
         if self.layers[i].mask_file.is_none() { self.layers[i].mask_file = Some(format!("{}.mask.png", crate::format::upper(id))); }
     }
 
-    pub fn set_mask_enabled(&mut self, id: Uuid, enabled: bool) { let i = self.index[&id]; if self.layers[i].mask_file.is_some() { self.layers[i].mask_enabled = Some(enabled); } }
-    pub fn set_mask_placement(&mut self, id: Uuid, placement: Option<Transform>) { let i = self.index[&id]; self.layers[i].mask_placement = placement; self.placed.retain(|(l, _), _| *l != id); }
-    pub fn set_mask_linked(&mut self, id: Uuid, linked: bool) { let i = self.index[&id]; self.layers[i].mask_linked = Some(linked); }
-    pub fn set_mask_source(&mut self, id: Uuid, source: Option<Uuid>) { let i = self.index[&id]; self.layers[i].mask_source_id = source; }
+    pub fn set_mask_enabled(&mut self, id: Uuid, enabled: bool) { self.touch(); let i = self.index[&id]; if self.layers[i].mask_file.is_some() { self.layers[i].mask_enabled = Some(enabled); } }
+    pub fn set_mask_placement(&mut self, id: Uuid, placement: Option<Transform>) { self.touch(); let i = self.index[&id]; self.layers[i].mask_placement = placement; self.placed.retain(|(l, _), _| *l != id); }
+    pub fn set_mask_linked(&mut self, id: Uuid, linked: bool) { self.touch(); let i = self.index[&id]; self.layers[i].mask_linked = Some(linked); }
+    pub fn set_mask_source(&mut self, id: Uuid, source: Option<Uuid>) { self.touch(); let i = self.index[&id]; self.layers[i].mask_source_id = source; }
 
-    pub fn set_layer_transform(&mut self, id: Uuid, transform: Transform) {
+    pub fn set_layer_transform(&mut self, id: Uuid, transform: Transform) { self.touch();
         let i = self.index[&id];
         self.layers[i].transform = transform;
         self.placed.retain(|(l, _), _| *l != id);
     }
 
     /// Replaces a layer's mask pixels (its enabled flag and placement stay as they are), or removes the mask.
-    pub fn set_mask(&mut self, id: Uuid, surface: Option<ImageSurface>) {
+    pub fn set_mask(&mut self, id: Uuid, surface: Option<ImageSurface>) { self.touch();
         match surface {
             Some(s) => { self.masks.insert(id, s); self.ensure_mask_record(id); }
             None => {
@@ -396,7 +401,7 @@ impl Renderer {
     pub fn snapshot(&self) -> State { State { layers: self.layers.clone(), images: self.images.clone(), masks: self.masks.clone(), width: self.width, height: self.height, resolution: self.resolution } }
 
     /// Puts a snapshot back, dropping cached copies of whatever changed.
-    pub fn restore(&mut self, state: &State) {
+    pub fn restore(&mut self, state: &State) { self.touch();
         let ids: std::collections::HashSet<Uuid> = self.images.keys().chain(state.images.keys()).chain(self.masks.keys()).chain(state.masks.keys()).copied().collect();
         for id in ids {
             let same = |a: Option<&ImageSurface>, b: Option<&ImageSurface>| match (a, b) { (Some(x), Some(y)) => x.to_raw_none() == y.to_raw_none(), (None, None) => true, _ => false };
@@ -413,11 +418,11 @@ impl Renderer {
 
     fn reindex(&mut self) { self.index = self.layers.iter().enumerate().map(|(i, l)| (l.id, i)).collect(); }
 
-    pub fn set_size(&mut self, width: i32, height: i32) { self.width = width; self.height = height; }
-    pub fn set_resolution(&mut self, resolution: f64) { self.resolution = resolution; }
+    pub fn set_size(&mut self, width: i32, height: i32) { self.touch(); self.width = width; self.height = height; }
+    pub fn set_resolution(&mut self, resolution: f64) { self.touch(); self.resolution = resolution; }
 
     /// Adds a layer record (and its pixels and mask) at `index` in the array, bottom to top among its siblings.
-    pub fn insert_layer(&mut self, index: usize, layer: Layer, image: Option<ImageSurface>, mask: Option<ImageSurface>) {
+    pub fn insert_layer(&mut self, index: usize, layer: Layer, image: Option<ImageSurface>, mask: Option<ImageSurface>) { self.touch();
         let id = layer.id;
         let index = index.min(self.layers.len());
         self.layers.insert(index, layer);
@@ -427,7 +432,7 @@ impl Renderer {
     }
 
     /// Removes a layer, its pixels, its mask, and the clipping links pointing at it.
-    pub fn remove_layer(&mut self, id: Uuid) {
+    pub fn remove_layer(&mut self, id: Uuid) { self.touch();
         self.layers.retain(|l| l.id != id);
         for layer in &mut self.layers { if layer.mask_source_id == Some(id) { layer.mask_source_id = None; } }
         self.images.remove(&id);
@@ -437,15 +442,15 @@ impl Renderer {
     }
 
     /// Swaps two records in the array (which orders siblings bottom to top).
-    pub fn swap_layers(&mut self, a: usize, b: usize) {
+    pub fn swap_layers(&mut self, a: usize, b: usize) { self.touch();
         if a < self.layers.len() && b < self.layers.len() { self.layers.swap(a, b); self.reindex(); }
     }
 
     pub fn layer_index(&self, id: Uuid) -> Option<usize> { self.index.get(&id).copied() }
-    pub fn set_layer_name(&mut self, id: Uuid, name: String) { let i = self.index[&id]; self.layers[i].name = name; }
-    pub fn set_layer_parent(&mut self, id: Uuid, parent: Option<Uuid>) { let i = self.index[&id]; self.layers[i].parent_id = parent; }
-    pub fn set_adjustment(&mut self, id: Uuid, adjustment: Option<crate::format::Adjustment>) { let i = self.index[&id]; self.layers[i].adjustment = adjustment; }
-    pub fn set_sampling(&mut self, id: Uuid, sampling: Sampling) { let i = self.index[&id]; self.layers[i].transform.sampling = sampling; }
+    pub fn set_layer_name(&mut self, id: Uuid, name: String) { self.touch(); let i = self.index[&id]; self.layers[i].name = name; }
+    pub fn set_layer_parent(&mut self, id: Uuid, parent: Option<Uuid>) { self.touch(); let i = self.index[&id]; self.layers[i].parent_id = parent; }
+    pub fn set_adjustment(&mut self, id: Uuid, adjustment: Option<crate::format::Adjustment>) { self.touch(); let i = self.index[&id]; self.layers[i].adjustment = adjustment; }
+    pub fn set_sampling(&mut self, id: Uuid, sampling: Sampling) { self.touch(); let i = self.index[&id]; self.layers[i].transform.sampling = sampling; }
 
     /// The layer's mask (or full coverage without one) placed by its transform, drawn as coverage into an A8
     /// context: what Image Size resamples a mask through.
@@ -498,9 +503,9 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn set_visible(&mut self, id: Uuid, visible: bool) { let i = self.index[&id]; self.layers[i].is_visible = visible; }
-    pub fn set_opacity(&mut self, id: Uuid, opacity: f64) { let i = self.index[&id]; self.layers[i].opacity = Some(opacity.clamp(0.0, 1.0)); }
-    pub fn set_blend_mode(&mut self, id: Uuid, mode: BlendMode) { let i = self.index[&id]; self.layers[i].blend_mode = Some(mode); }
+    pub fn set_visible(&mut self, id: Uuid, visible: bool) { self.touch(); let i = self.index[&id]; self.layers[i].is_visible = visible; }
+    pub fn set_opacity(&mut self, id: Uuid, opacity: f64) { self.touch(); let i = self.index[&id]; self.layers[i].opacity = Some(opacity.clamp(0.0, 1.0)); }
+    pub fn set_blend_mode(&mut self, id: Uuid, mode: BlendMode) { self.touch(); let i = self.index[&id]; self.layers[i].blend_mode = Some(mode); }
 
     /// The whole document at one pixel per document pixel.
     pub fn render_flat(&mut self) -> Result<ImageSurface> {
@@ -596,13 +601,17 @@ impl Renderer {
         {
             let ccr = Context::new(&coverage)?;
             ccr.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -region.x as f64, -region.y as f64)));
-            let mut masks: Vec<(ImageSurface, Transform)> = folders.iter().map(|f| (f.mask.clone(), f.transform)).collect();
-            if layer.mask_enabled() { if let Some(m) = self.masks.get(&id) { masks.push((m.clone(), layer.transform)); } }
-            for (mask, t) in masks {
+            let mut masks: Vec<(Uuid, Transform)> = folders.iter().map(|f| (f.id, f.transform)).collect();
+            if layer.mask_enabled() && self.masks.contains_key(&id) { masks.push((id, layer.transform)); }
+            let device = device_scale(cr);
+            for (mask_id, t) in masks {
+                let (source, level, ws, hs) = self.reduced(mask_id, Source::Mask, t.size.0 * device, t.sampling)?;
+                let mw = self.masks[&mask_id].width().max(1) as f64;
+                let filter = interpolation(t.sampling, t.size.0 * device / mw * (1usize << level) as f64);
                 ccr.save()?;
                 place(&ccr, &t);
-                let rect = (-t.size.0 / 2.0, -t.size.1 / 2.0, t.size.0, t.size.1);
-                let pattern = pattern_over(&mask, rect, quality(t.sampling));
+                let rect = (-t.size.0 / 2.0, -t.size.1 / 2.0, t.size.0 * ws, t.size.1 * hs);
+                let pattern = pattern_over(&source, rect, filter);
                 ccr.set_source(&pattern)?;
                 ccr.set_operator(Operator::In);
                 ccr.paint()?;
@@ -625,10 +634,8 @@ impl Renderer {
         let mut depth = 0;
         while let (Some(current), true) = (folder, depth < 64) {
             let layer = self.layer(current);
-            if layer.mask_enabled() {
-                if let Some(mask) = self.masks.get(&current) {
-                    result.push(FolderMask { mask: mask.clone(), transform: layer.transform });
-                }
+            if layer.mask_enabled() && self.masks.contains_key(&current) {
+                result.push(FolderMask { id: current, transform: layer.transform });
             }
             folder = layer.parent_id;
             depth += 1;
@@ -657,8 +664,11 @@ impl Renderer {
             Some(MaskSource::Placed(surface)) => Some((surface, 0, 1.0, 1.0)),
             None => None,
         };
+        // A layer with nothing but its own mask (or nothing at all) at full opacity paints straight onto the
+        // canvas; anything more goes through a group so the alpha masks and opacity apply once, together.
+        let direct = folders.is_empty() && clip.is_none() && layer.opacity() >= 1.0;
         cr.save()?;
-        cr.push_group();
+        if !direct { cr.push_group(); }
         {
             cr.save()?;
             place(cr, &t);
@@ -668,6 +678,7 @@ impl Renderer {
             cr.set_source(&pattern)?;
             cr.rectangle(rect.0, rect.1, rect.2, rect.3);
             cr.clip();
+            if direct { cr.set_operator(operator(layer.blend_mode())); }
             match clip_mask {
                 Some((mask, _, mws, mhs)) => {
                     let mrect = (-w / 2.0, -h / 2.0, w * mws, h * mhs);
@@ -680,10 +691,12 @@ impl Renderer {
             }
             cr.restore()?;
         }
-        cr.pop_group_to_source()?;
-        self.through_masks(cr, folders, clip)?;
-        cr.set_operator(operator(layer.blend_mode()));
-        cr.paint_with_alpha(layer.opacity())?;
+        if !direct {
+            cr.pop_group_to_source()?;
+            self.through_masks(cr, folders, clip)?;
+            cr.set_operator(operator(layer.blend_mode()));
+            cr.paint_with_alpha(layer.opacity())?;
+        }
         cr.restore()?;
         Ok(())
     }
@@ -691,14 +704,20 @@ impl Renderer {
     /// Multiplies the current source's alpha by each folder mask (placed on the document by its folder's
     /// transform) and by `clip`, a coverage over a device-space region. The source is locked to the user
     /// space it was set in, so changing the matrix here leaves it where it is.
-    pub(crate) fn through_masks(&self, cr: &Context, folders: &[FolderMask], clip: Option<(&ImageSurface, Region)>) -> Result<()> {
+    pub(crate) fn through_masks(&mut self, cr: &Context, folders: &[FolderMask], clip: Option<(&ImageSurface, Region)>) -> Result<()> {
+        let device = device_scale(cr);
         for folder in folders {
+            let t = folder.transform;
+            // From the mask's sharp halvings, like a layer's own pixels; Cairo's "best" filter on a full-size
+            // mask is a slow convolution.
+            let (source, level, ws, hs) = self.reduced(folder.id, Source::Mask, t.size.0 * device, t.sampling)?;
+            let mw = self.masks[&folder.id].width().max(1) as f64;
+            let filter = interpolation(t.sampling, t.size.0 * device / mw * (1usize << level) as f64);
             cr.push_group();
             cr.save()?;
-            let t = &folder.transform;
-            place(cr, t);
-            let rect = (-t.size.0 / 2.0, -t.size.1 / 2.0, t.size.0, t.size.1);
-            let pattern = pattern_over(&folder.mask, rect, quality(t.sampling));
+            place(cr, &t);
+            let rect = (-t.size.0 / 2.0, -t.size.1 / 2.0, t.size.0 * ws, t.size.1 * hs);
+            let pattern = pattern_over(&source, rect, filter);
             cr.rectangle(rect.0, rect.1, rect.2, rect.3);
             cr.clip();
             cr.mask(&pattern)?;
@@ -749,6 +768,7 @@ impl Renderer {
             let next = {
                 let previous = if level == 1 { self.store_mut(source).get_mut(&id).unwrap() } else { self.halved.get_mut(&(id, source, level - 1)).unwrap() };
                 if previous.width() <= 1 && previous.height() <= 1 { break; }
+                if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("    halve {id} {source:?} level {level} ({}x{})", previous.width(), previous.height()); }
                 halve(previous).with_context(|| format!("halving layer {id}"))?
             };
             self.halved.insert((id, source, level), next);
@@ -832,7 +852,7 @@ impl Renderer {
             let rect = (0.0, 0.0, mw as f64, mh as f64);
             cr.rectangle(rect.0, rect.1, rect.2, rect.3);
             cr.clip();
-            let pattern = pattern_over(&source, rect, Filter::Best);
+            let pattern = pattern_over(&source, rect, Filter::Bilinear);
             cr.set_source(&pattern)?;
             cr.set_operator(Operator::Source);
             cr.paint()?;

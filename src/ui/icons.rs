@@ -7,15 +7,18 @@ use gtk::prelude::*;
 use std::f64::consts::{PI, TAU};
 
 pub fn icon(tool: Tool) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder().content_width(20).content_height(20).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
+    let area = gtk::DrawingArea::builder().content_width(17).content_height(17).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
     area.set_draw_func(move |area, cr, w, h| {
         let color = area.color();
         cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
         cr.set_line_width(1.6);
         cr.set_line_cap(cairo::LineCap::Round);
         cr.set_line_join(cairo::LineJoin::Round);
-        // Drawn in a 20 x 20 box, centered.
-        cr.translate((w as f64 - 20.0) / 2.0, (h as f64 - 20.0) / 2.0);
+        // Drawn in a 20 x 20 box, scaled to the icon's size and centered.
+        let scale = w.min(h) as f64 / 20.0;
+        cr.translate((w as f64 - 20.0 * scale) / 2.0, (h as f64 - 20.0 * scale) / 2.0);
+        cr.scale(scale, scale);
+        cr.set_line_width(1.6 / scale.max(0.5));
         draw(tool, cr);
     });
     area

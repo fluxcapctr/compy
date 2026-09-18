@@ -24,6 +24,8 @@ pub struct Document {
     mask_target: bool,
     pub document_id: Uuid,
     pub path: Option<std::path::PathBuf>,
+    /// Document pixels the last stroke step changed (x0, y0, x1, y1), when the change was that local.
+    dirty: Option<(f64, f64, f64, f64)>,
 }
 
 #[derive(Clone)]
@@ -63,7 +65,7 @@ impl Document {
         let document_id = project.manifest.document_id;
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -291,6 +293,15 @@ pub enum StrokeKind {
 impl Document {
     pub fn stroke_active(&self) -> bool { self.stroke.is_some() || self.warp.is_some() }
 
+    /// The document region the latest change was confined to, if it was local; None means redraw everything.
+    pub fn take_dirty(&mut self) -> Option<(f64, f64, f64, f64)> { self.dirty.take() }
+
+    fn mark_dirty_grid(&mut self, stroke: &crate::brush::Stroke, rect: (i32, i32, i32, i32)) {
+        let corners = [(rect.0, rect.1), (rect.2, rect.1), (rect.0, rect.3), (rect.2, rect.3)].map(|(x, y)| stroke.to_document.transform_point(x as f64, y as f64));
+        let r = (corners.iter().map(|c| c.0).fold(f64::MAX, f64::min), corners.iter().map(|c| c.1).fold(f64::MAX, f64::min), corners.iter().map(|c| c.0).fold(f64::MIN, f64::max), corners.iter().map(|c| c.1).fold(f64::MIN, f64::max));
+        self.dirty = Some(match self.dirty { Some(d) => (d.0.min(r.0), d.1.min(r.1), d.2.max(r.2), d.3.max(r.3)), None => r });
+    }
+
     /// Starts a Smudge or Liquify stroke on the active layer's pixels (never its mask).
     pub fn begin_warp(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, mode: crate::warp::WarpMode) -> Result<()> {
         if self.stroke_active() { bail!("a stroke is already in progress"); }
@@ -310,7 +321,11 @@ impl Document {
         let Some(id) = self.active else { return Ok(()) };
         let Some(warp) = self.warp.as_mut() else { return Ok(()) };
         warp.append(point)?;
-        if let Some(rect) = warp.changed { self.renderer.preview_changed(id, rect)?; }
+        if let Some(rect) = warp.changed {
+            let r = (rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64);
+            self.dirty = Some(match self.dirty { Some(d) => (d.0.min(r.0), d.1.min(r.1), d.2.max(r.2), d.3.max(r.3)), None => r });
+            self.renderer.preview_changed(id, rect)?;
+        }
         Ok(())
     }
 
@@ -392,6 +407,7 @@ impl Document {
         let Some(id) = self.active else { return Ok(()) };
         let Some(mut stroke) = self.stroke.take() else { return Ok(()) };
         let result = stroke.append(point);
+        if result.is_ok() { if let Some(rect) = stroke.changed { self.mark_dirty_grid(&stroke, rect); } }
         let sync = match (&result, self.stroke_mask) {
             (Ok(()), true) => self.sync_mask_preview(id, &stroke),
             (Ok(()), false) => stroke.changed.map_or(Ok(()), |rect| self.renderer.preview_changed(id, rect)),

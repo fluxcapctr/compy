@@ -39,13 +39,13 @@ pub struct ToolRail {
 impl ToolRail {
     /// `changed` runs after the document's tool has been set.
     pub fn new(doc: DocRef, changed: Rc<dyn Fn()>) -> Rc<ToolRail> {
-        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(56)
-            .margin_top(10).margin_start(10).margin_end(10).build();
+        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(3).width_request(45)
+            .margin_top(8).margin_start(8).margin_end(8).build();
         let mut buttons = Vec::new();
         let current = doc.borrow().tool;
         let mut group: Option<gtk::ToggleButton> = None;
         for tool in Tool::ALL {
-            let button = gtk::ToggleButton::builder().tooltip_text(tool.help()).width_request(36).height_request(36).active(tool == current).build();
+            let button = gtk::ToggleButton::builder().tooltip_text(tool.help()).width_request(29).height_request(29).active(tool == current).css_classes(["tool"]).build();
             button.set_child(Some(&super::icons::icon(tool)));
             if let Some(first) = &group { button.set_group(Some(first)); } else { group = Some(button.clone()); }
             let (doc, changed) = (doc.clone(), changed.clone());
