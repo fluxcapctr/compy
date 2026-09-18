@@ -195,4 +195,15 @@ pub fn open_image(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'sta
     dialog.open(Some(parent), gio::Cancellable::NONE, move |result| { if let Ok(file) = result { if let Some(path) = file.path() { done(path); } } });
 }
 
+/// A file chooser for Photoshop files.
+pub fn open_psd(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'static) {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Photoshop (PSD)"));
+    for pattern in ["*.psd", "*.PSD"] { filter.add_pattern(pattern); }
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    let dialog = gtk::FileDialog::builder().title("Open PSD").modal(true).filters(&filters).build();
+    dialog.open(Some(parent), gio::Cancellable::NONE, move |result| { if let Ok(file) = result { if let Some(path) = file.path() { done(path); } } });
+}
+
 pub fn is_project(path: &Path) -> bool { path.is_dir() && path.join("manifest.json").exists() }

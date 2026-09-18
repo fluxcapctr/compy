@@ -999,6 +999,17 @@ impl Document {
 
     // Export and import
 
+    /// Opens a Photoshop file as a new document, with what the file had that was not carried over.
+    pub fn open_psd(path: &std::path::Path) -> Result<(Document, Vec<String>)> {
+        let (project, warnings) = crate::psd::read(path)?;
+        let mut document = Document::new(project)?;
+        document.history.mark_saved();
+        Ok((document, warnings))
+    }
+
+    /// Writes the document as a Photoshop file; returns what was left out.
+    pub fn export_psd(&mut self, path: &std::path::Path) -> Result<Vec<String>> { crate::psd::write(self, path) }
+
     pub fn export_png(&mut self, path: &std::path::Path) -> Result<()> {
         let image = self.renderer.render_flat()?;
         crate::png_io::encode(&image, path, self.renderer.resolution())

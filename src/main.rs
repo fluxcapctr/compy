@@ -1,4 +1,4 @@
-//! `compositor [project.comp ...]` opens the app; `compositor info <project.comp>` lists the layer tree;
+//! `compositor [project.comp | file.psd ...]` opens the app; `compositor info <project.comp>` lists the layer tree;
 //! `compositor render <project.comp> <out.png>` flattens the project to a PNG.
 
 use anyhow::{Context as _, Result, bail};
@@ -12,7 +12,8 @@ fn main() {
     let result = match args.get(1).map(String::as_str) {
         Some("info") if args.len() == 3 => info(Path::new(&args[2])),
         Some("render") if args.len() == 4 => render_to(Path::new(&args[2]), Path::new(&args[3])),
-        Some("info") | Some("render") | Some("--help") | Some("-h") => Err(anyhow::anyhow!(USAGE)),
+        Some("psd") if args.len() == 4 => convert_psd(Path::new(&args[2]), Path::new(&args[3])),
+        Some("info") | Some("render") | Some("psd") | Some("--help") | Some("-h") => Err(anyhow::anyhow!(USAGE)),
         _ => {
             let mut paths = Vec::new();
             let mut script = ui::Script::default();
@@ -46,7 +47,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  compositor [project.comp ...]            open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>";
+const USAGE: &str = "usage:\n  compositor [project.comp | file.psd ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way";
 
 fn info(path: &Path) -> Result<()> {
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;
@@ -83,5 +84,22 @@ fn render_to(input: &Path, output: &Path) -> Result<()> {
     println!("{} -> {}  {}x{}  load {:.2?}  render {:.2?}  write {:.2?}", input.display(), output.display(),
         rendered.image.width(), rendered.image.height(), loaded, drawn - loaded, start.elapsed() - drawn);
     if output.extension().is_none() { bail!("output has no extension"); }
+    Ok(())
+}
+
+/// Converts between the two formats by extension; notes about what was not carried over go to stderr.
+fn convert_psd(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let to_psd = output.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd"));
+    let notes = if to_psd {
+        let mut document = ui::open_document(input)?.0.document;
+        document.export_psd(output)?
+    } else {
+        let (mut document, notes) = compositor::document::Document::open_psd(input)?;
+        document.save(output)?;
+        notes
+    };
+    for note in notes { eprintln!("note: {note}"); }
+    eprintln!("wrote {} in {:.2}s", output.display(), started.elapsed().as_secs_f64());
     Ok(())
 }

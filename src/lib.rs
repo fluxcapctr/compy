@@ -11,6 +11,7 @@ pub mod filters;
 pub mod history;
 pub mod format;
 pub mod png_io;
+pub mod psd;
 pub mod raster;
 pub mod render;
 pub mod selection;

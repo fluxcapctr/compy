@@ -99,14 +99,23 @@ impl Doc {
     }
 }
 
-pub fn open_document(path: &Path) -> Result<Doc> {
+/// Opens a `.comp` package or a `.psd` file. A PSD opens as a new untitled-at-path document (it saves as
+/// `.comp`); the notes say what the PSD had that was not carried over.
+pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
+    if is_psd(path) {
+        let (document, notes) = Document::open_psd(path).with_context(|| format!("opening {}", path.display()))?;
+        let title = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
+        return Ok((Doc::from(document, &title), notes));
+    }
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;
     let document = Document::new(project)?;
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
-    Ok(Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
+    Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false })
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }, Vec::new()))
 }
+
+pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
 
 /// Scripted checks: a zoom to set, a wand click to make (document pixels), and a PNG to save the window to
 /// before quitting.
@@ -234,8 +243,10 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 42] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 44] = [
         ("open", &["<Control>o"], |s| s.choose_and_open()),
+        ("open-psd", &["<Control><Alt>o"], |s| { let state = s.clone(); dialogs::open_psd(s.window.upcast_ref(), move |path| state.open_path(&path)); }),
+        ("export-psd", &[], |s| s.export_psd()),
         ("close-tab", &["<Control>w"], |s| s.close_current()),
         ("zoom-in", &["<Control>equal", "<Control>plus", "<Control>KP_Add"], |s| s.with_current(|p| p.canvas.zoom_by(2.0))),
         ("zoom-out", &["<Control>minus", "<Control>KP_Subtract"], |s| s.with_current(|p| p.canvas.zoom_by(0.5))),
@@ -316,7 +327,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         target.connect_drop(move |_, value, _, _| {
             let Ok(file) = value.get::<gio::File>() else { return false };
             let Some(path) = file.path() else { return false };
-            if dialogs::is_project(&path) { state.open_path(&path); }
+            if dialogs::is_project(&path) || is_psd(&path) { state.open_path(&path); }
             else if state.notebook.current_page().is_some() { state.edit(|d| d.import_image(&path).map(|_| ())); }
             else { state.alert("Not a Compositor project", "Open a project first, then drop images to import them as layers."); }
             true
@@ -347,11 +358,13 @@ fn menu() -> gio::Menu {
     let file = gio::Menu::new();
     file.append(Some("New Canvas…"), Some("win.new"));
     file.append(Some("Open…"), Some("win.open"));
+    file.append(Some("Open PSD…"), Some("win.open-psd"));
     file.append(Some("Save"), Some("win.save"));
     file.append(Some("Save As…"), Some("win.save-as"));
     file.append(Some("Import Image…"), Some("win.import"));
     file.append(Some("Export PNG…"), Some("win.export-png"));
     file.append(Some("Export JPEG…"), Some("win.export-jpeg"));
+    file.append(Some("Export PSD…"), Some("win.export-psd"));
     file.append(Some("Close"), Some("win.close-tab"));
     menu.append_submenu(Some("File"), &file);
     let edit = gio::Menu::new();
@@ -414,8 +427,11 @@ fn menu() -> gio::Menu {
 impl App {
     fn open_path(&self, path: &Path) {
         match open_document(path) {
-            Ok(doc) => self.add_page(doc),
-            Err(error) => self.alert("Could not open project", &format!("{error:#}")),
+            Ok((doc, notes)) => {
+                self.add_page(doc);
+                if !notes.is_empty() { self.alert("Opened with changes", &format!("{}\n\nSave keeps it as a .comp project; use Export PSD to write a Photoshop file.", notes.join("\n"))); }
+            }
+            Err(error) => self.alert("Could not open", &format!("{error:#}")),
         }
     }
 
@@ -442,6 +458,7 @@ impl App {
             canvas.set_refresh(Rc::new(move || { panel_ref.rebuild(); area.queue_draw(); }));
             let canvas2 = canvas.clone();
             panel.set_on_select(Rc::new(move || { canvas2.sync_inspector(); canvas2.area.queue_draw(); }));
+            canvas.sync_inspector();
         }
         self.pages.borrow_mut().push(Page { root: root.clone(), canvas, panel });
         self.notebook.set_current_page(Some(index));
@@ -565,6 +582,20 @@ impl App {
             dialogs::save_as(window.upcast_ref(), "Export JPEG", &title, "jpg", move |path| {
                 if let Err(error) = doc.borrow_mut().document.export_jpeg(&path, quality, background) { state.alert("Could not export", &format!("{error:#}")); }
             });
+        });
+    }
+
+    fn export_psd(self: &Rc<Self>) {
+        let state = self.clone();
+        let title = self.current_title();
+        dialogs::save_as(self.window.upcast_ref(), "Export PSD", &title, "psd", move |path| {
+            let mut outcome = None;
+            state.with_current(|p| outcome = Some(p.canvas.doc().borrow_mut().document.export_psd(&path)));
+            match outcome {
+                Some(Ok(notes)) if !notes.is_empty() => state.alert("Exported with changes", &notes.join("\n")),
+                Some(Err(error)) => state.alert("Could not export", &format!("{error:#}")),
+                _ => {}
+            }
         });
     }
 
