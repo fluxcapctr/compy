@@ -82,6 +82,8 @@ pub struct Doc {
     pub snap_guides: (Option<f64>, Option<f64>),
     pub syncing_inspector: bool,
     pub needs_redraw: bool,
+    /// Rulers along the top and left of the canvas in document pixels (Ctrl+R), as Photoshop's.
+    pub rulers: bool,
 }
 
 impl Doc {
@@ -118,7 +120,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false }
     }
 }
 
@@ -141,7 +143,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -178,6 +180,7 @@ pub struct Script {
     pub pick_brush: bool,
     /// A brush preset to paint the scripted stroke with, by name.
     pub brush: Option<String>,
+    pub rulers: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -191,7 +194,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -200,6 +203,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some(zoom) = script.zoom { p.canvas.zoom_to(zoom); }
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
+                    if script.rulers { p.canvas.doc().borrow_mut().rulers = true; p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
@@ -299,7 +303,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 59] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 60] = [
+        ("toggle-rulers", &["<Control>r"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.rulers = !d.rulers; } p.canvas.area.queue_draw(); })),
         ("swap-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('x'); })),
         ("default-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('d'); })),
         ("crop-apply", &[], |s| s.with_current(|p| p.canvas.apply_crop())),
@@ -508,6 +513,7 @@ fn menu() -> gio::Menu {
     image.append(Some("Invert"), Some("win.invert"));
     image.append(Some("Flip Canvas Horizontal"), Some("win.flip-canvas-horizontal"));
     image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
+    image.append(Some("Rulers"), Some("win.toggle-rulers"));
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
     filter.append(Some("Remove Background…"), Some("win.filter::background"));

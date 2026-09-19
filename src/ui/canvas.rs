@@ -218,7 +218,7 @@ impl Canvas {
             motion.connect_motion(move |_, x, y| {
                 this.pointer.set((x, y));
                 let tool = this.doc.borrow().tool;
-                if tool.is_brush() { this.area.queue_draw(); }
+                if tool.is_brush() || this.doc.borrow().rulers { this.area.queue_draw(); }
                 if tool == Tool::Move && !this.dragging.get() && this.transform_drag.borrow().is_none() { this.update_cursor(); }
                 let polygonal = this.draft.borrow().as_ref().is_some_and(|d| d.kind == DraftKind::Polygonal);
                 if polygonal {
@@ -1214,6 +1214,79 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
     let Some((vx, vy, vw, vh)) = intersect((rx, ry, rw, rh), (0.0, 0.0, width, height)) else { return Ok(()) };
     let ppp = vp.points_per_pixel();
 
+    // Rulers along the top and left edges, in document pixels, with the pointer's position marked.
+    if doc.rulers {
+        let thickness = 18.0;
+        let (p_bg, p_fg, p_line) = { let pal = super::theme::current(); match pal {
+            Some(p) => (hex_rgb(&p.dark_background), hex_rgb(&p.foreground), hex_rgb(&p.muted)),
+            None => ((0.16, 0.16, 0.16), (0.85, 0.85, 0.85), (0.45, 0.45, 0.45)),
+        } };
+        // A step in document pixels that lands ticks 60 to 150 points apart.
+        let mut step = 1.0;
+        for candidate in [1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] { step = candidate; if candidate * ppp >= 60.0 { break; } }
+        let minor = step / 5.0;
+        cr.set_source_rgb(p_bg.0, p_bg.1, p_bg.2);
+        cr.rectangle(0.0, 0.0, width, thickness);
+        cr.rectangle(0.0, 0.0, thickness, height);
+        cr.fill()?;
+        cr.set_source_rgb(p_line.0, p_line.1, p_line.2);
+        cr.set_line_width(1.0);
+        cr.move_to(0.0, thickness + 0.5); cr.line_to(width, thickness + 0.5);
+        cr.move_to(thickness + 0.5, 0.0); cr.line_to(thickness + 0.5, height);
+        cr.stroke()?;
+        cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        cr.set_font_size(9.0);
+        // Horizontal: ticks from the first step left of the visible edge to past the right.
+        let (dx0, _) = vp.document_point((thickness, 0.0), size);
+        let (dx1, _) = vp.document_point((width, 0.0), size);
+        let mut x = (dx0 / minor).floor() * minor;
+        while x <= dx1 {
+            let (vx, _) = vp.view_point((x, 0.0), size);
+            let major = ((x / step).round() * step - x).abs() < minor / 2.0;
+            let len = if major { thickness } else { 5.0 };
+            cr.set_source_rgb(p_line.0, p_line.1, p_line.2);
+            cr.move_to(vx.round() + 0.5, thickness - len); cr.line_to(vx.round() + 0.5, thickness);
+            cr.stroke()?;
+            if major { cr.set_source_rgb(p_fg.0, p_fg.1, p_fg.2); cr.move_to(vx.round() + 3.0, 10.0); cr.show_text(&format!("{}", x.round() as i64))?; }
+            x += minor;
+        }
+        // Vertical, labels turned to read along the ruler.
+        let (_, dy0) = vp.document_point((0.0, thickness), size);
+        let (_, dy1) = vp.document_point((0.0, height), size);
+        let mut y = (dy0 / minor).floor() * minor;
+        while y <= dy1 {
+            let (_, vy) = vp.view_point((0.0, y), size);
+            let major = ((y / step).round() * step - y).abs() < minor / 2.0;
+            let len = if major { thickness } else { 5.0 };
+            cr.set_source_rgb(p_line.0, p_line.1, p_line.2);
+            cr.move_to(thickness - len, vy.round() + 0.5); cr.line_to(thickness, vy.round() + 0.5);
+            cr.stroke()?;
+            if major {
+                cr.set_source_rgb(p_fg.0, p_fg.1, p_fg.2);
+                cr.save()?;
+                cr.translate(10.0, vy.round() - 3.0);
+                cr.rotate(-std::f64::consts::PI / 2.0);
+                cr.move_to(0.0, 0.0);
+                cr.show_text(&format!("{}", y.round() as i64))?;
+                cr.restore()?;
+            }
+            y += minor;
+        }
+        // The pointer's place on each ruler.
+        let (px, py) = pointer;
+        if px > -1.0e8 {
+            let (ar, ag, ab) = super::theme::accent();
+            cr.set_source_rgb(ar, ag, ab);
+            cr.rectangle(px.round(), 0.0, 1.0, thickness);
+            cr.rectangle(0.0, py.round(), thickness, 1.0);
+            cr.fill()?;
+        }
+        // The corner square.
+        cr.set_source_rgb(p_bg.0, p_bg.1, p_bg.2);
+        cr.rectangle(0.0, 0.0, thickness, thickness);
+        cr.fill()?;
+    }
+
     // The Move tool's transform box and handles, and the guides a snapped move met.
     if doc.tool == Tool::Move {
         if let Some(id) = doc.document.active {
@@ -1415,4 +1488,11 @@ fn drag_box(anchor: (f64, f64), point: (f64, f64), square: bool, from_center: bo
     if square { let side = dx.abs().max(dy.abs()); dx = if dx < 0.0 { -side } else { side }; dy = if dy < 0.0 { -side } else { side }; }
     if from_center { (anchor.0 - dx.abs(), anchor.1 - dy.abs(), dx.abs() * 2.0, dy.abs() * 2.0) }
     else { (anchor.0.min(anchor.0 + dx), anchor.1.min(anchor.1 + dy), dx.abs(), dy.abs()) }
+}
+
+/// "#rrggbb" as cairo components.
+fn hex_rgb(text: &str) -> (f64, f64, f64) {
+    let t = text.trim().trim_start_matches('#');
+    let v = u32::from_str_radix(t, 16).unwrap_or(0x808080);
+    (((v >> 16) & 255) as f64 / 255.0, ((v >> 8) & 255) as f64 / 255.0, (v & 255) as f64 / 255.0)
 }

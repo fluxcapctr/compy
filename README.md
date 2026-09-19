@@ -156,6 +156,9 @@ library itself is downloaded when the app is built.
 
 **Import.** PNG, JPEG, TIFF, GIF, WebP, BMP and HEIC files, and pixels dragged out of other apps.
 
+**Rulers.** Ctrl+R (or Image > Rulers) shows rulers along the top and left of the canvas in document
+pixels, their steps following the zoom, with the pointer's position marked on each.
+
 Not built: the GPU brush (the software path meets the phase 4 budget), a Curves editor (curve points load,
 save and render, but there is no widget to edit them), and Cmd+T-style floating transforms of a selection
 (pixels inside a selection move and duplicate, but do not scale or rotate on their own).
