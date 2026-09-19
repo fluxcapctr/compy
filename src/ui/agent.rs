@@ -375,6 +375,11 @@ pub struct Assistant {
     dictating: Cell<bool>,
     entry_changed: Cell<Option<std::time::Instant>>,
     voice_state: RefCell<String>,
+    /// Messages typed while a turn was running; they go next, in order.
+    queue: RefCell<Vec<String>>,
+    /// The running Claude Code process, so a stuck turn can be stopped.
+    child_pid: Cell<Option<u32>>,
+    replied: Cell<bool>,
     app: Rc<App>,
 }
 
@@ -408,6 +413,8 @@ impl Assistant {
         let mic = gtk::Button::builder().label("\u{f036c}").has_frame(false).tooltip_text("Talk to Compy (dictation through voxtype; Page Down does the same)").build();
         mic.set_visible(voxtype_available());
         header.append(&mic);
+        let fresh = gtk::Button::builder().label("\u{f0453}").has_frame(false).tooltip_text("Start a new conversation (Compy forgets this one)").build();
+        header.append(&fresh);
         let popout = gtk::Button::builder().label("\u{f0d3}").has_frame(false).tooltip_text("Pop Compy out into its own window, or back under the layers").build();
         header.append(&popout);
         content.append(&header);
@@ -423,7 +430,8 @@ impl Assistant {
         row.append(&send);
         body.append(&row);
         content.append(&body);
-        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), app });
+        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), replied: Cell::new(false), app });
+        { let t = this.clone(); fresh.connect_clicked(move |_| t.reset()); }
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
         { let t = this.clone(); entry.connect_changed(move |_| t.entry_changed.set(Some(std::time::Instant::now()))); }
         { let t = this.clone(); send.connect_clicked(move |_| t.submit()); }
@@ -533,13 +541,35 @@ impl Assistant {
             serde_json::to_string(&state).unwrap_or_default())
     }
 
+    /// Forgets the conversation; the next message starts a new one. A running turn is stopped.
+    pub fn reset(&self) {
+        if let Some(pid) = self.child_pid.take() { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); }
+        *self.session.borrow_mut() = None;
+        self.queue.borrow_mut().clear();
+        self.busy.set(false);
+        self.send.set_sensitive(true);
+        self.transcript.buffer().set_text("");
+        self.status.set_label("New conversation.");
+    }
+
     fn submit(self: &Rc<Self>) {
-        if self.busy.get() { return; }
         let message = self.entry.text().trim().to_string();
         if message.is_empty() { return; }
-        let Some(claude) = claude_binary() else { self.append("system", "Claude Code is not installed."); return };
         self.entry.set_text("");
-        self.append("you", &message);
+        if self.busy.get() {
+            // Compy is mid-turn: keep the message and send it as soon as the turn ends.
+            self.append("you", &message);
+            self.queue.borrow_mut().push(message);
+            self.status.set_label("Compy is still working; that goes next.");
+            return;
+        }
+        self.send_now(message);
+    }
+
+    fn send_now(self: &Rc<Self>, message: String) {
+        let Some(claude) = claude_binary() else { self.append("system", "Claude Code is not installed."); return };
+        if !self.queue.borrow().iter().any(|m| *m == message) { self.append("you", &message); }
+        self.replied.set(false);
         self.busy.set(true);
         self.send.set_sensitive(false);
         self.status.set_label("Compy is thinking…");
@@ -566,6 +596,7 @@ impl Assistant {
         let (tx, rx) = mpsc::channel::<(String, String)>();
         match command.spawn() {
             Ok(mut child) => {
+                self.child_pid.set(Some(child.id()));
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let tx2 = tx.clone();
@@ -579,16 +610,31 @@ impl Assistant {
             Err(e) => { self.append("system", &format!("Could not start Claude Code: {e}")); self.busy.set(false); self.send.set_sensitive(true); return; }
         }
         let this = self.clone();
+        let started = std::time::Instant::now();
+        let last_error = Rc::new(RefCell::new(String::new()));
         glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
+            // A turn that goes quiet for five minutes is stuck: stop it and say so.
+            if started.elapsed() > std::time::Duration::from_secs(300) { if let Some(pid) = this.child_pid.take() { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); } }
             while let Ok((kind, line)) = rx.try_recv() {
                 match kind.as_str() {
                     "out" => this.handle_line(&line),
-                    "err" => { if !line.trim().is_empty() { eprintln!("claude: {line}"); } }
+                    "err" => { if !line.trim().is_empty() { eprintln!("claude: {line}"); *last_error.borrow_mut() = line.clone(); } }
                     _ => {
+                        this.child_pid.set(None);
                         this.busy.set(false);
                         this.send.set_sensitive(true);
-                        if line != "0" { this.append("system", &format!("Claude Code ended with status {line}.")); }
+                        if line != "0" {
+                            let detail = last_error.borrow().clone();
+                            this.append("system", &format!("Compy stopped ({}). {}", if line == "-1" { "it was interrupted".to_string() } else { format!("status {line}") }, if detail.is_empty() { "Try again, or start a new conversation with the arrow button.".to_string() } else { detail.clone() }));
+                            // A conversation that cannot be resumed starts over next time.
+                            if detail.contains("session") || detail.contains("resume") { *this.session.borrow_mut() = None; }
+                        } else if !this.replied.get() {
+                            this.append("system", "Compy finished without saying anything. Ask again.");
+                        }
                         this.app.with_current(|p| p.refresh());
+                        // Anything typed meanwhile goes now.
+                        let next = { let mut q = this.queue.borrow_mut(); if q.is_empty() { None } else { Some(q.remove(0)) } };
+                        if let Some(message) = next { let t = this.clone(); glib::idle_add_local_once(move || t.send_now(message)); }
                         return glib::ControlFlow::Break;
                     }
                 }
@@ -603,7 +649,7 @@ impl Assistant {
             Some("assistant") => {
                 for block in v.pointer("/message/content").and_then(Value::as_array).cloned().unwrap_or_default() {
                     match block.get("type").and_then(Value::as_str) {
-                        Some("text") => { if let Some(t) = block.get("text").and_then(Value::as_str) { if !t.trim().is_empty() { self.append("claude", t.trim()); } } }
+                        Some("text") => { if let Some(t) = block.get("text").and_then(Value::as_str) { if !t.trim().is_empty() { self.replied.set(true); self.append("claude", t.trim()); } } }
                         Some("tool_use") => {
                             // The work shows on the canvas, not in the chat: just a word in the status line.
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches("mcp__compy__").replace('_', " ");
