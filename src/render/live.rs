@@ -16,8 +16,8 @@ use uuid::Uuid;
 pub(crate) struct LiveMasks {
     coverage: HashMap<Uuid, (ImageSurface, Region)>,
     visiting: HashSet<Uuid>,
-    stacks: HashMap<Uuid, Vec<Uuid>>,
-    stacked: HashSet<Uuid>,
+    pub(crate) stacks: HashMap<Uuid, Vec<Uuid>>,
+    pub(crate) stacked: HashSet<Uuid>,
 }
 
 impl LiveMasks {
@@ -65,7 +65,10 @@ impl Renderer {
         for child in children {
             let gcr = Context::new(&group)?;
             gcr.set_matrix(Matrix_for(cr, region));
+            // A clip, not a path: a path left pending would widen the child's own clip to the whole region
+            // and smear its edge pixels across the base.
             gcr.rectangle(0.0, 0.0, region.width as f64, region.height as f64);
+            gcr.clip();
             if self.layer(child).adjustment.is_some() { self.adjust(child, &gcr, &[])?; } else { self.draw_own(child, &gcr, None, &[])?; }
         }
         with_bytes_mut(&mut group, |data, stride| {

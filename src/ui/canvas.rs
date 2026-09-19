@@ -1627,6 +1627,36 @@ pub fn zoom_text(zoom: f64) -> String {
     if percent < 10.0 { format!("{percent:.1}%") } else { format!("{percent:.0}%") }
 }
 
+thread_local! {
+    /// The GPU compositor, made on first use; the inner None means there is no usable GPU.
+    static GPU: RefCell<Option<Option<crate::gpu::Gpu>>> = const { RefCell::new(None) };
+}
+
+fn with_gpu<R>(f: impl FnOnce(&mut crate::gpu::Gpu) -> R) -> Option<R> {
+    GPU.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let gpu = crate::gpu::Gpu::new();
+            if std::env::var_os("COMPOSITOR_TRACE").is_some() { match &gpu { Some(g) => eprintln!("gpu: {}", g.name), None => eprintln!("gpu: none, compositing on the CPU") } }
+            *slot = Some(gpu);
+        }
+        slot.as_mut().unwrap().as_mut().map(f)
+    })
+}
+
+/// The document composited on the GPU for `w` x `h` device pixels whose centers `device_to_document`
+/// maps onto the document; None when there is no GPU or the frame needs the CPU path.
+fn gpu_frame(doc: &mut super::Doc, device_to_document: cairo::Matrix, w: u32, h: u32) -> Option<cairo::ImageSurface> {
+    if w == 0 || h == 0 { return None; }
+    with_gpu(|gpu| {
+        let t = std::time::Instant::now();
+        let plan = match doc.document.renderer.gpu_plan(device_to_document, w, h, gpu.max_dimension()) { Ok(Some(p)) => p, Ok(None) => return None, Err(e) => { eprintln!("gpu plan: {e:#}"); return None; } };
+        let bytes = match gpu.render(&plan) { Ok(b) => b, Err(e) => { eprintln!("gpu render: {e:#}"); return None; } };
+        if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("  gpu frame {}x{} {:.1} ms", w, h, t.elapsed().as_secs_f64() * 1000.0); }
+        cairo::ImageSurface::create_for_data(bytes, cairo::Format::ARgb32, w as i32, h as i32, (w * 4) as i32).ok()
+    }).flatten()
+}
+
 fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) -> Result<()> {
     let (sr, sg, sb) = if doc.preview { (0.0, 0.0, 0.0) } else { super::theme::surround() };
     cr.set_source_rgb(sr, sg, sb);
@@ -1673,14 +1703,20 @@ fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) ->
         let y1 = ((vy + vh - ry) / ppp).ceil().min(size.1);
         let (w, h) = ((x1 - x0) as i32, (y1 - y0) as i32);
         if w > 0 && h > 0 {
-            let pixels = new_argb(w, h)?;
-            {
-                let pcr = Context::new(&pixels)?;
-                pcr.translate(-x0, -y0);
-                pcr.rectangle(x0, y0, w as f64, h as f64);
-                pcr.clip();
-                doc.document.renderer.draw(&pcr)?;
-            }
+            let pixels = match gpu_frame(doc, cairo::Matrix::new(1.0, 0.0, 0.0, 1.0, x0, y0), w as u32, h as u32) {
+                Some(surface) => surface,
+                None => {
+                    let pixels = new_argb(w, h)?;
+                    {
+                        let pcr = Context::new(&pixels)?;
+                        pcr.translate(-x0, -y0);
+                        pcr.rectangle(x0, y0, w as f64, h as f64);
+                        pcr.clip();
+                        doc.document.renderer.draw(&pcr)?;
+                    }
+                    pixels
+                }
+            };
             cr.translate(rx, ry);
             cr.scale(ppp, ppp);
             cr.set_source_surface(&pixels, x0, y0)?;
@@ -1689,11 +1725,29 @@ fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) ->
             cr.fill()?;
         }
     } else {
-        cr.translate(rx, ry);
-        cr.scale(ppp, ppp);
-        cr.rectangle(0.0, 0.0, size.0, size.1);
-        cr.clip();
-        doc.document.renderer.draw(cr)?;
+        // The visible part of the document at device resolution, composited on the GPU when it can be.
+        let ds = cr.target().device_scale().0.max(1.0);
+        let (dw, dh) = ((vw * ds).ceil() as u32, (vh * ds).ceil() as u32);
+        let device_to_document = cairo::Matrix::new(1.0 / (ds * ppp), 0.0, 0.0, 1.0 / (ds * ppp), (vx - rx) / ppp, (vy - ry) / ppp);
+        match gpu_frame(doc, device_to_document, dw, dh) {
+            Some(surface) => {
+                cr.save()?;
+                cr.translate(vx, vy);
+                cr.scale(1.0 / ds, 1.0 / ds);
+                cr.set_source_surface(&surface, 0.0, 0.0)?;
+                cr.source().set_filter(Filter::Nearest);
+                cr.rectangle(0.0, 0.0, dw as f64, dh as f64);
+                cr.fill()?;
+                cr.restore()?;
+            }
+            None => {
+                cr.translate(rx, ry);
+                cr.scale(ppp, ppp);
+                cr.rectangle(0.0, 0.0, size.0, size.1);
+                cr.clip();
+                doc.document.renderer.draw(cr)?;
+            }
+        }
     }
     cr.restore()?;
 

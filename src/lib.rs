@@ -15,6 +15,7 @@ pub mod filters;
 pub mod history;
 pub mod format;
 pub mod genfill;
+pub mod gpu;
 pub mod gbr;
 pub mod heic;
 pub mod matte;

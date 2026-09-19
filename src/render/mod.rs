@@ -10,6 +10,7 @@
 //! costs a window's worth of pixels, not a document's worth.
 
 mod live;
+mod gpu_plan;
 
 use crate::format::{BlendMode, Layer, Project, Sampling, Transform, entries_ordered, visible_layers};
 use crate::raster::{halve, level_for, new_argb, with_bytes};
@@ -55,6 +56,9 @@ pub struct Renderer {
     thumbnails: HashMap<(Uuid, i32), ImageSurface>,
     /// Rendered layer effects by layer, with what they were built from.
     styled: HashMap<Uuid, Styled>,
+    /// Rows of a preview changed in place since the GPU last uploaded it (layer pixels, half open).
+    preview_dirty: HashMap<Uuid, (i32, i32, i32, i32)>,
+    mask_preview_dirty: HashMap<Uuid, (i32, i32, i32, i32)>,
     live: live::LiveMasks,
     warnings: Vec<String>,
     /// Counts every change to what a draw would show, so a canvas can keep the last frame until it changes.
@@ -78,7 +82,7 @@ struct Styled {
 
 /// A layer's rendered effects handed to the draw: where they sit, and the three surfaces.
 #[derive(Clone)]
-struct StyledDraw { x: f64, y: f64, below: Option<ImageSurface>, inside: Option<ImageSurface>, above: Option<ImageSurface> }
+pub(crate) struct StyledDraw { pub(crate) x: f64, pub(crate) y: f64, pub(crate) below: Option<ImageSurface>, pub(crate) inside: Option<ImageSurface>, pub(crate) above: Option<ImageSurface> }
 
 /// The layers, pixels and masks at one moment, shared by reference: what undo history holds.
 #[derive(Clone)]
@@ -117,8 +121,8 @@ impl State {
 
 /// A folder's mask, clipping every layer inside the folder.
 pub(crate) struct FolderMask {
-    id: Uuid,
-    transform: Transform,
+    pub(crate) id: Uuid,
+    pub(crate) transform: Transform,
 }
 
 /// The device pixels a context's clip covers: what an offscreen copy of it needs to hold.
@@ -172,6 +176,8 @@ impl Renderer {
             placed: HashMap::new(),
             thumbnails: HashMap::new(),
             styled: HashMap::new(),
+            preview_dirty: HashMap::new(),
+            mask_preview_dirty: HashMap::new(),
             live: live::LiveMasks::default(),
             warnings: Vec::new(),
             revision: 1,
@@ -292,6 +298,7 @@ impl Renderer {
     /// The preview grid's pixels changed inside `rect` (x0, y0, x1, y1): brings its reduced copies up to date.
     pub fn preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> { self.touch();
         let Some(mut source) = self.previews.get(&id).cloned() else { return Ok(()) };
+        self.preview_dirty.entry(id).and_modify(|d| { d.0 = d.0.min(rect.0); d.1 = d.1.min(rect.1); d.2 = d.2.max(rect.2); d.3 = d.3.max(rect.3); }).or_insert(rect);
         let mut region = rect;
         for level in 1..=crate::raster::MAX_LEVEL {
             let Some(destination) = self.halved.get(&(id, Source::Preview, level)).cloned() else { break };
@@ -386,6 +393,7 @@ impl Renderer {
     /// The mask preview's pixels changed inside `rect` (x0, y0, x1, y1).
     pub fn mask_preview_changed(&mut self, id: Uuid, rect: (i32, i32, i32, i32)) -> Result<()> { self.touch();
         let Some(mut source) = self.mask_previews.get(&id).cloned() else { return Ok(()) };
+        self.mask_preview_dirty.entry(id).and_modify(|d| { d.0 = d.0.min(rect.0); d.1 = d.1.min(rect.1); d.2 = d.2.max(rect.2); d.3 = d.3.max(rect.3); }).or_insert(rect);
         self.placed.retain(|(l, _), _| *l != id);
         let mut region = rect;
         for level in 1..=crate::raster::MAX_LEVEL {
@@ -441,7 +449,7 @@ impl Renderer {
 
     /// The layer's effects, rendered from its committed pixels through its own mask, cached until the pixels,
     /// mask, placement or effects change. A stroke in progress draws over the effects as they were.
-    fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<StyledDraw>> {
+    pub(crate) fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<StyledDraw>> {
         let Some(effects) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) else { return Ok(None) };
         let Some(image) = self.images.get(&id) else { return Ok(None) };
         let mask_ptr = self.masks.get(&id).map(|m| m.to_raw_none() as usize).unwrap_or(0);
@@ -747,7 +755,7 @@ impl Renderer {
     }
 
     /// The enabled masks of every folder containing `id`, nearest folder first.
-    fn folder_masks(&self, id: Uuid) -> Vec<FolderMask> {
+    pub(crate) fn folder_masks(&self, id: Uuid) -> Vec<FolderMask> {
         let mut result = Vec::new();
         let mut folder = self.parent(id);
         let mut depth = 0;
@@ -878,14 +886,14 @@ impl Renderer {
         Ok(())
     }
 
-    fn store(&self, source: Source) -> &HashMap<Uuid, ImageSurface> {
+    pub(crate) fn store(&self, source: Source) -> &HashMap<Uuid, ImageSurface> {
         match source { Source::Image => &self.images, Source::Mask => &self.masks, Source::Preview => &self.previews, Source::MaskPreview => &self.mask_previews }
     }
     fn store_mut(&mut self, source: Source) -> &mut HashMap<Uuid, ImageSurface> {
         match source { Source::Image => &mut self.images, Source::Mask => &mut self.masks, Source::Preview => &mut self.previews, Source::MaskPreview => &mut self.mask_previews }
     }
     /// The mask pixels to draw a layer through right now: a stroke's preview when one is painting the mask.
-    fn mask_source(&self, id: Uuid) -> Source { if self.mask_previews.contains_key(&id) { Source::MaskPreview } else { Source::Mask } }
+    pub(crate) fn mask_source(&self, id: Uuid) -> Source { if self.mask_previews.contains_key(&id) { Source::MaskPreview } else { Source::Mask } }
 
     /// A layer's pixels (image, mask or preview) reduced for landing `device_width` device pixels wide: the
     /// surface, how many halvings it had, and how far past the layer's bounds it reaches (halvings round up).

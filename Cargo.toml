@@ -26,6 +26,8 @@ libheif-rs = { version = "3", features = ["v1_23"] }
 ort = "2.0.0-rc.13"
 ureq = "3"
 pangocairo = "0.22"
+wgpu = "30"
+pollster = "1"
 
 [build-dependencies]
 cc = "1"
