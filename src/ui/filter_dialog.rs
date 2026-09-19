@@ -69,8 +69,6 @@ impl FilterDialog {
     fn present(this: Rc<Self>, parent: &gtk::Window) {
         let kind = this.kind;
         let title = match &this.adjustment { Some((_, a)) => format!("{} Adjustment", a.kind_name()), None => kind.name().to_string() };
-        let window = gtk::Window::builder().title(title).transient_for(parent).modal(false).default_width(360).resizable(false).build();
-        window.set_application(parent.application().as_ref());
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(14).margin_bottom(14).margin_start(14).margin_end(14).build();
         this.build_controls(&content);
         content.append(&this.status);
@@ -83,7 +81,7 @@ impl FilterDialog {
         buttons.append(&cancel);
         buttons.append(&ok);
         content.append(&buttons);
-        window.set_child(Some(&content));
+        let window = super::dialogs::floating(parent, &title, false, 360, &content);
         { let window = window.clone(); cancel.connect_clicked(move |_| window.close()); }
         { let (this, window) = (this.clone(), window.clone()); ok.connect_clicked(move |_| { this.commit(); window.close(); }); }
         { let this = this.clone(); window.connect_close_request(move |_| {

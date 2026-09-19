@@ -164,12 +164,14 @@ impl OptionsBar {
         let smooth = gtk::CheckButton::builder().label("Anti-alias").active(true).build();
         { let doc = doc.clone(); smooth.connect_toggled(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.antialiased = c.is_active(); } }); }
         marquee.append(&smooth);
+        marquee.append(&gtk::Button::builder().label("Generative Fill…").action_name("win.generative-fill").tooltip_text("Paint the selection with a fal.ai model (Ctrl+Shift+G, or right-click the selection)").build());
         stack.add_named(&marquee, Some("marquee"));
         let lasso = row();
         lasso.append(&mode_buttons(&doc));
         let kind = gtk::DropDown::from_strings(&["Freehand", "Polygonal"]);
         { let doc = doc.clone(); kind.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.lasso_polygonal = s.selected() == 1; } }); }
         lasso.append(&kind);
+        lasso.append(&gtk::Button::builder().label("Generative Fill…").action_name("win.generative-fill").build());
         stack.add_named(&lasso, Some("lasso"));
 
         // Magic Wand.
@@ -192,6 +194,7 @@ impl OptionsBar {
         let contiguous = gtk::CheckButton::builder().label("Contiguous").active(true).tooltip_text("Select only similar pixels connected to the one you click; off selects them everywhere").build();
         { let doc = doc.clone(); contiguous.connect_toggled(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.wand.contiguous = c.is_active(); } }); }
         wand.append(&contiguous);
+        wand.append(&gtk::Button::builder().label("Generative Fill…").action_name("win.generative-fill").build());
         stack.add_named(&wand, Some("wand"));
 
         // Brush tools share the tip, size, hardness, spacing, angle, roundness and opacity; each adds its own

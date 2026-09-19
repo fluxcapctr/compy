@@ -12,7 +12,7 @@ use crate::transform::{Drag, Geometry, Mode as DragMode, SNAP_DISTANCE};
 use anyhow::Result;
 use cairo::{Context, Filter};
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -289,9 +289,25 @@ impl Canvas {
         {
             let this = self.clone();
             context.connect_pressed(move |g, _, x, y| {
-                if !this.doc.borrow().tool.is_brush() { return; }
+                let tool = this.doc.borrow().tool;
+                if tool.is_brush() { g.set_state(gtk::EventSequenceState::Claimed); this.brush_popover(x, y); return; }
+                // Over a selection: what can be done with it, Generative Fill first.
+                let inside = { let d = this.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); d.document.selection.as_ref().is_some_and(|s| !s.is_empty() && s.contains(p.0.floor(), p.1.floor())) };
+                if !inside { return; }
                 g.set_state(gtk::EventSequenceState::Claimed);
-                this.brush_popover(x, y);
+                let menu = gio::Menu::new();
+                menu.append(Some("Generative Fill…"), Some("win.generative-fill"));
+                menu.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
+                menu.append(Some("Fill with Background"), Some("win.fill-background"));
+                menu.append(Some("Clear"), Some("win.clear"));
+                menu.append(Some("Copy"), Some("win.copy"));
+                menu.append(Some("Crop to Selection"), Some("win.crop"));
+                menu.append(Some("Deselect"), Some("win.deselect"));
+                let popover = gtk::PopoverMenu::from_model(Some(&menu));
+                popover.set_parent(&this.area);
+                popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover.connect_closed(move |p| { let p = p.clone(); glib::idle_add_local_once(move || p.unparent()); });
+                popover.popup();
             });
         }
         area.add_controller(context);

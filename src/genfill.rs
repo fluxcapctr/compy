@@ -20,16 +20,34 @@ pub struct Model {
     /// Extra fields sent with every request (steps, guidance and the like).
     #[serde(default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+    /// fal's price in dollars per megapixel of output (billed rounded up), when known.
+    #[serde(default)]
+    pub price_per_megapixel: Option<f64>,
 }
 
 pub fn default_models() -> Vec<Model> {
-    let m = |id: &str, name: &str| Model { id: id.into(), name: name.into(), extra: Default::default() };
+    let m = |id: &str, name: &str, price: Option<f64>| Model { id: id.into(), name: name.into(), extra: Default::default(), price_per_megapixel: price };
     vec![
-        m("fal-ai/flux-pro/v1/fill", "FLUX.1 Fill [pro]"),
-        m("fal-ai/flux-lora/inpainting", "FLUX.1 [dev] inpainting"),
-        m("fal-ai/qwen-image-edit/inpaint", "Qwen Image Edit inpaint"),
-        m("fal-ai/inpaint", "Stable Diffusion inpainting"),
+        m("fal-ai/flux-pro/v1/fill", "FLUX.1 Fill [pro]", Some(0.05)),
+        m("fal-ai/flux-lora/inpainting", "FLUX.1 [dev] inpainting", Some(0.035)),
+        m("fal-ai/qwen-image-edit/inpaint", "Qwen Image Edit inpaint", Some(0.03)),
+        m("fal-ai/inpaint", "Stable Diffusion inpainting", None),
     ]
+}
+
+/// The estimated charge for `count` images of `width` x `height` pixels: fal bills each image by its
+/// megapixels rounded up.
+pub fn estimate(model: &Model, width: usize, height: usize, count: u32) -> Option<f64> {
+    let per = model.price_per_megapixel?;
+    let megapixels = ((width * height) as f64 / 1_000_000.0).ceil().max(1.0);
+    Some(per * megapixels * count as f64)
+}
+
+/// The size of a context window once scaled for the model.
+pub fn scaled_size(window: (i32, i32, i32, i32)) -> (usize, usize) {
+    let (w, h) = ((window.2 - window.0).max(1) as f64, (window.3 - window.1).max(1) as f64);
+    let scale = (MAX_SIDE as f64 / w.max(h)).min(1.0);
+    (((w * scale).round() as usize).max(1), ((h * scale).round() as usize).max(1))
 }
 
 fn config_dir() -> PathBuf {
@@ -41,7 +59,14 @@ fn config_dir() -> PathBuf {
 pub fn models() -> Vec<Model> {
     let path = config_dir().join("genfill-models.json");
     if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(list) = serde_json::from_str::<Vec<Model>>(&text) { if !list.is_empty() { return list; } }
+        if let Ok(mut list) = serde_json::from_str::<Vec<Model>>(&text) {
+            if !list.is_empty() {
+                // A list written before prices were known takes them from the defaults, by id.
+                let defaults = default_models();
+                for m in list.iter_mut() { if m.price_per_megapixel.is_none() { m.price_per_megapixel = defaults.iter().find(|d| d.id == m.id).and_then(|d| d.price_per_megapixel); } }
+                return list;
+            }
+        }
     }
     let list = default_models();
     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -104,6 +129,25 @@ pub struct Fal { pub key: String }
 
 impl Backend for Fal {
     fn generate(&self, request: &Request, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Vec<Vec<u8>>> {
+        // Some models give one image however many were asked for: ask again until the count is met.
+        let wanted = request.count.clamp(1, 4) as usize;
+        let mut out = Vec::new();
+        let mut round = 0;
+        while out.len() < wanted && round < wanted {
+            round += 1;
+            let mut r = request.clone();
+            r.count = (wanted - out.len()) as u32;
+            if round > 1 { r.seed = Some(request.seed.unwrap_or(1) + round as u64 * 7919); progress(&format!("Asking for variation {} of {}…", out.len() + 1, wanted)); }
+            let mut got = self.generate_once(&r, progress, cancelled)?;
+            if got.is_empty() { break; }
+            out.append(&mut got);
+        }
+        Ok(out)
+    }
+}
+
+impl Fal {
+    fn generate_once(&self, request: &Request, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Vec<Vec<u8>>> {
         let submit_url = format!("https://queue.fal.run/{}", request.model.id);
         progress("Sending the selection to fal…");
         let body = body(request).to_string();

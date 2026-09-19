@@ -7,9 +7,19 @@ use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
 
-fn dialog(parent: &gtk::Window, title: &str) -> (gtk::Window, gtk::Grid, gtk::Button) {
-    let window = gtk::Window::builder().title(title).transient_for(parent).modal(true).resizable(false).default_width(340).build();
+/// A window over the canvas: its own title bar, and a body that drags the window from anywhere blank, so
+/// it can be moved off the picture (`gtk::WindowHandle`). `content` becomes its body.
+pub fn floating(parent: &gtk::Window, title: &str, modal: bool, width: i32, content: &impl IsA<gtk::Widget>) -> gtk::Window {
+    let window = gtk::Window::builder().title(title).transient_for(parent).modal(modal).resizable(false).default_width(width).build();
     window.set_application(parent.application().as_ref());
+    let header = gtk::HeaderBar::builder().show_title_buttons(true).build();
+    header.set_title_widget(Some(&gtk::Label::builder().label(title).css_classes(["title"]).build()));
+    window.set_titlebar(Some(&header));
+    window.set_child(Some(&gtk::WindowHandle::builder().child(content).build()));
+    window
+}
+
+fn dialog(parent: &gtk::Window, title: &str) -> (gtk::Window, gtk::Grid, gtk::Button) {
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(14).margin_bottom(14).margin_start(14).margin_end(14).build();
     let grid = gtk::Grid::builder().row_spacing(8).column_spacing(10).build();
     content.append(&grid);
@@ -19,7 +29,7 @@ fn dialog(parent: &gtk::Window, title: &str) -> (gtk::Window, gtk::Grid, gtk::Bu
     buttons.append(&cancel);
     buttons.append(&ok);
     content.append(&buttons);
-    window.set_child(Some(&content));
+    let window = floating(parent, title, true, 340, &content);
     { let w = window.clone(); cancel.connect_clicked(move |_| w.close()); }
     window.set_default_widget(Some(&ok));
     (window, grid, ok)

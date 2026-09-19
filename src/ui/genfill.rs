@@ -21,6 +21,7 @@ pub struct GenFill {
     composite: gtk::CheckButton,
     generate: gtk::Button,
     status: gtk::Label,
+    cost: gtk::Label,
     results: gtk::FlowBox,
     /// The window the results cover, and the layer the first pick made (later picks replace its pixels).
     window_rect: Cell<Option<(i32, i32, i32, i32)>>,
@@ -34,8 +35,6 @@ impl GenFill {
     /// Opens the panel for the current selection (`expand` names it Generative Expand).
     pub fn open(parent: &gtk::Window, doc: DocRef, finished: Rc<dyn Fn()>, expand: bool) {
         let title = if expand { "Generative Expand" } else { "Generative Fill" };
-        let window = gtk::Window::builder().title(title).transient_for(parent).modal(false).default_width(420).resizable(false).build();
-        window.set_application(parent.application().as_ref());
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(14).margin_bottom(14).margin_start(14).margin_end(14).build();
         let prompt = gtk::Entry::builder().placeholder_text("Describe what should appear (empty fills in the surroundings)").hexpand(true).build();
         content.append(&prompt);
@@ -64,6 +63,8 @@ impl GenFill {
         content.append(&results);
         let status = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).build();
         content.append(&status);
+        let cost = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label", "caption"]).build();
+        content.append(&cost);
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).halign(gtk::Align::End).build();
         let cancel = gtk::Button::with_label("Cancel");
         let generate = gtk::Button::builder().label("Generate").css_classes(["suggested-action"]).build();
@@ -72,8 +73,11 @@ impl GenFill {
         buttons.append(&generate);
         buttons.append(&close);
         content.append(&buttons);
-        window.set_child(Some(&content));
-        let this = Rc::new(GenFill { doc, window: window.clone(), prompt, models, count, composite, generate, status, results, window_rect: Cell::new(None), layer: Cell::new(None), images: RefCell::new(Vec::new()), running: Rc::new(RefCell::new(None)), finished });
+        let window = super::dialogs::floating(parent, title, false, 420, &content);
+        let this = Rc::new(GenFill { doc, window: window.clone(), prompt, models, count, composite, generate, status, cost, results, window_rect: Cell::new(None), layer: Cell::new(None), images: RefCell::new(Vec::new()), running: Rc::new(RefCell::new(None)), finished });
+        this.update_cost();
+        { let t = this.clone(); this.count.connect_value_changed(move |_| t.update_cost()); }
+        { let t = this.clone(); this.models.connect_selected_notify(move |_| t.update_cost()); }
         match genfill::key() {
             Some(_) => this.status.set_label("Only the selection and a margin around it are sent to fal.ai."),
             None => { this.status.set_label("No fal.ai key yet: paste it above and press Save key (it is kept in ~/.config/compositor/fal.key)."); this.generate.set_sensitive(false); }
@@ -97,6 +101,24 @@ impl GenFill {
         { let t = this.clone(); window.connect_close_request(move |_| { if let Some(s) = t.running.borrow().as_ref() { if let Ok(mut s) = s.lock() { s.cancel = true; } } glib::Propagation::Proceed }); }
         window.present();
         this.prompt.grab_focus();
+    }
+
+    /// The small line at the bottom: what fal will charge for this window and count.
+    fn update_cost(&self) {
+        let window = self.doc.borrow().document.genfill_window().ok();
+        let list = genfill::models();
+        let text = match (window, list.get(self.models.selected() as usize)) {
+            (Some(w), Some(model)) => {
+                let (sw, sh) = genfill::scaled_size(w);
+                let count = self.count.value() as u32;
+                match genfill::estimate(model, sw, sh, count) {
+                    Some(usd) => format!("Estimated cost: ${usd:.2} ({count} × {sw} × {sh} px; fal bills each image by its megapixels, rounded up)"),
+                    None => format!("Cost: not listed for this model ({count} × {sw} × {sh} px)"),
+                }
+            }
+            _ => String::new(),
+        };
+        self.cost.set_label(&text);
     }
 
     fn start(self: &Rc<Self>) {
