@@ -342,8 +342,11 @@ impl App {
                         let (model, body, place, name, cost): (String, Value, (f64, f64, f64, f64), String, f64) = match tool {
                             "generate_image" => {
                                 let (gw, gh) = (num(args, "width").unwrap_or(w).clamp(64.0, 4096.0), num(args, "height").unwrap_or(h).clamp(64.0, 4096.0));
-                                let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_default(), false);
-                                let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), None, gw as usize, gh as usize, 1);
+                                let transparent = args.get("transparent").and_then(Value::as_bool).unwrap_or(false);
+                                // A transparent background needs GPT Image, whatever the default says.
+                                let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_else(|| if transparent { "gpt image".into() } else { String::new() }), false);
+                                let model = if transparent && !model.starts_with("openai/") { crate::genfill::resolve_model("gpt image", false) } else { model };
+                                let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), None, gw as usize, gh as usize, 1, transparent);
                                 (model, body, ((w - gw) / 2.0, (h - gh) / 2.0, gw, gh), "Generated".into(), 0.05)
                             }
                             _ => {
@@ -354,8 +357,10 @@ impl App {
                                 match tool {
                                     "generative_edit" => {
                                         let count = num(args, "count").unwrap_or(1.0).clamp(1.0, 4.0) as i64;
-                                        let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_default(), true);
-                                        let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), Some(&uri), rect.2 as usize, rect.3 as usize, count);
+                                        let transparent = args.get("transparent").and_then(Value::as_bool).unwrap_or(false);
+                                        let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_else(|| if transparent { "gpt image".into() } else { String::new() }), true);
+                                        let model = if transparent && !model.starts_with("openai/") { crate::genfill::resolve_model("gpt image", true) } else { model };
+                                        let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), Some(&uri), rect.2 as usize, rect.3 as usize, count, transparent);
                                         (model, body, place, format!("{layer_name} edited"), 0.05 * count as f64)
                                     }
                                     "upscale" => ("fal-ai/aura-sr".into(), json!({"image_url": uri, "upscaling_factor": 4}), place, format!("{layer_name} upscaled"), 0.02),

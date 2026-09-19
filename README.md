@@ -190,7 +190,9 @@ original), a picture from a prompt, a four-times upscale, and relighting in a na
 new pictures go to Nano Banana 2 (Google) by default; `~/.config/compositor/agent-models.json` sets the
 `generate` and `edit` models (GPT Image 2.5 is `openai/gpt-image-2.5/flare/text-to-image` and
 `.../flare/edit`; FLUX is `fal-ai/flux/dev` and `fal-ai/flux-pro/kontext`), and asking Compy for "gpt
-image" or "flux" on one job picks it for that job. Voice: with
+image" or "flux" on one job picks it for that job. Asking for a cutout on a transparent background
+switches that job to GPT Image, the one model that returns a real alpha channel; it lands as a layer
+with transparency. No model returns separate layers. Voice: with
 voxtype dictation running (Omarchy's Page Down), starting to talk opens Compy and the words go into its
 entry; when they stop, the message sends itself; the microphone button toggles the same. The same tools
 serve two other surfaces: `compositor mcp` is a Model Context Protocol server for Claude Code in the

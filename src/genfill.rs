@@ -128,8 +128,9 @@ pub fn nearest_aspect(width: usize, height: usize) -> &'static str {
 
 /// The request body for a generation (`source` none, sized `width` x `height`) or an edit of `source`
 /// (a data URI) shaped for the model's family: Nano Banana takes an aspect ratio and a resolution
-/// tier, GPT Image a size and a quality, FLUX a size or a single image_url.
-pub fn agent_body(model: &str, prompt: &str, source: Option<&str>, width: usize, height: usize, count: i64) -> serde_json::Value {
+/// tier, GPT Image a size, a quality and a transparent or opaque background, FLUX a size or a
+/// single image_url. `transparent` only means something to GPT Image; callers pick that family.
+pub fn agent_body(model: &str, prompt: &str, source: Option<&str>, width: usize, height: usize, count: i64, transparent: bool) -> serde_json::Value {
     let mut body = serde_json::json!({"prompt": prompt, "num_images": count.clamp(1, 4), "output_format": "png"});
     let side = width.max(height);
     if model.contains("nano-banana") {
@@ -139,6 +140,8 @@ pub fn agent_body(model: &str, prompt: &str, source: Option<&str>, width: usize,
     } else if model.starts_with("openai/") {
         body["image_size"] = if source.is_some() { serde_json::Value::from("auto") } else { serde_json::json!({"width": width, "height": height}) };
         body["quality"] = serde_json::Value::from("high");
+        // GPT Image is the one family that returns a real alpha channel on request.
+        body["background"] = serde_json::Value::from(if transparent { "transparent" } else { "auto" });
         if let Some(s) = source { body["image_urls"] = serde_json::json!([s]); }
     } else {
         match source {
@@ -347,18 +350,20 @@ mod tests {
         assert_eq!(nearest_aspect(1920, 1080), "16:9");
         assert_eq!(nearest_aspect(1000, 1000), "1:1");
         assert_eq!(nearest_aspect(800, 1000), "4:5");
-        let g = agent_body("fal-ai/nano-banana-2", "a cat", None, 1500, 1000, 1);
+        let g = agent_body("fal-ai/nano-banana-2", "a cat", None, 1500, 1000, 1, false);
         assert_eq!(g["aspect_ratio"], "3:2");
         assert_eq!(g["resolution"], "2K");
         assert!(g.get("image_urls").is_none());
-        let e = agent_body("fal-ai/nano-banana-2/edit", "redder", Some("data:x"), 500, 500, 2);
+        let e = agent_body("fal-ai/nano-banana-2/edit", "redder", Some("data:x"), 500, 500, 2, false);
         assert_eq!(e["aspect_ratio"], "auto");
         assert_eq!(e["image_urls"][0], "data:x");
         assert_eq!(e["num_images"], 2);
-        let o = agent_body("openai/gpt-image-2.5/flare/text-to-image", "a dog", None, 1024, 768, 1);
+        let o = agent_body("openai/gpt-image-2.5/flare/text-to-image", "a dog", None, 1024, 768, 1, true);
         assert_eq!(o["image_size"]["width"], 1024);
         assert_eq!(o["quality"], "high");
-        let f = agent_body("fal-ai/flux-pro/kontext", "bluer", Some("data:y"), 10, 10, 1);
+        assert_eq!(o["background"], "transparent");
+        assert_eq!(agent_body("openai/gpt-image-2.5/flare/edit", "x", Some("data:z"), 1, 1, 1, false)["background"], "auto");
+        let f = agent_body("fal-ai/flux-pro/kontext", "bluer", Some("data:y"), 10, 10, 1, false);
         assert_eq!(f["image_url"], "data:y");
     }
 }
