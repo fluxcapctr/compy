@@ -103,10 +103,15 @@ pub fn css(p: &Palette) -> String {
         @define-color card_bg_color {lbg};
         window, .background {{ background-color: {bg}; color: {fg}; }}
         headerbar {{ background-color: {dbg}; color: {fg}; box-shadow: none; border-bottom: 1px solid {ddbg}; }}
-        headerbar button, .options button {{ background-color: {lbg}; color: {fg}; border: 1px solid {ddbg}; box-shadow: none; text-shadow: none; }}
-        headerbar button:hover, .options button:hover {{ background-color: {sel}; }}
+        headerbar button, .options button {{ background-color: transparent; color: {fg}; border: 1px solid {lbg}; box-shadow: none; text-shadow: none; }}
+        headerbar button:hover, .options button:hover {{ background-color: {lbg}; border-color: {muted}; }}
+        button {{ background-color: transparent; color: {fg}; border-color: {lbg}; }}
+        button:hover {{ background-color: {lbg}; border-color: {muted}; }}
+        button:checked {{ background-color: {sel}; color: {bfg}; }}
         .layers-footer button, .layers-panel row button {{ background-color: transparent; background-image: none; border: none; box-shadow: none; }}
-        button.suggested-action {{ background-color: {accent}; color: {on_accent}; border-color: {accent}; }}
+        button.suggested-action {{ background-color: {fg}; color: {dbg}; border-color: {fg}; }}
+        button.suggested-action:hover {{ background-color: {bfg}; border-color: {bfg}; }}
+        decoration {{ box-shadow: 0 0 0 1px {muted}; }}
         notebook > header {{ background-color: {dbg}; border-color: {ddbg}; }}
         notebook > header tab {{ color: {dfg}; }}
         notebook > header tab:checked {{ color: {bfg}; box-shadow: inset 0 -2px {accent}; }}
@@ -117,7 +122,7 @@ pub fn css(p: &Palette) -> String {
         button.tool:checked {{ background-color: {lbg}; color: {bfg}; box-shadow: inset 0 0 0 1px {muted}; }}
         .panel-tabs {{ background-color: {ddbg}; }}
         .panel-tab {{ color: {dfg}; }}
-        .panel-tab.current {{ background-color: {bg}; color: {bfg}; }}
+        .panel-tab.current {{ background-color: {bg}; color: {bfg}; border-bottom: 1px solid {accent}; }}
         .options {{ background-color: {bg}; border-bottom: 1px solid {ddbg}; }}
         .layers-panel {{ background-color: {bg}; border-left: 1px solid {ddbg}; }}
         .layers-panel .heading {{ color: {bfg}; }}
@@ -133,22 +138,93 @@ pub fn css(p: &Palette) -> String {
         entry:focus-within, spinbutton:focus-within {{ border-color: {accent}; outline-color: {accent}; }}
         scale trough {{ background-color: {lbg}; }}
         scale highlight {{ background-color: {accent}; }}
-        scale slider {{ background-color: {bfg}; border: 1px solid {muted}; box-shadow: none; }}
+        scale slider {{ background-color: {bfg}; border: 1px solid {dbg}; box-shadow: none; }}
         check, radio {{ background-color: {dbg}; border: 1px solid {muted}; color: {on_accent}; }}
         check:checked, radio:checked {{ background-color: {accent}; border-color: {accent}; color: {on_accent}; }}
-        popover > contents, popover.menu > contents {{ background-color: {lbg}; color: {fg}; border: 1px solid {ddbg}; }}
+        popover > contents, popover.menu > contents {{ background-color: {dbg}; color: {fg}; border: 1px solid {muted}; }}
         popover.menu modelbutton:hover, popover listview > row:hover {{ background-color: {sel}; }}
         popover listview > row:selected {{ background-color: {accent}; color: {on_accent}; }}
         paned > separator {{ background-color: {ddbg}; }}
-        tooltip {{ background-color: {ddbg}; color: {fg}; border: 1px solid {lbg}; }}
+        tooltip {{ background-color: {ddbg}; color: {fg}; border: 1px solid {muted}; }}
         *:focus-visible {{ outline-color: {accent}; }}
         selection {{ background-color: {accent}; color: {on_accent}; }}
     ")
 }
 
+/// The system's monospace font as Omarchy sets it (`omarchy font current`), else JetBrains Mono.
+pub fn system_font() -> String {
+    if let Ok(name) = std::env::var("COMPOSITOR_FONT") { if !name.trim().is_empty() { return name; } }
+    let out = std::process::Command::new("omarchy").args(["font", "current"]).output().ok();
+    let name = out.filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if name.is_empty() { "JetBrains Mono".into() } else { name }
+}
+
+/// The look shared with omarchy.org, independent of the palette: the system monospace font throughout,
+/// square corners, one-pixel borders, flat controls, small uppercase labels with wide tracking.
+pub fn look_css(font: &str) -> String {
+    let font = font.replace('"', "");
+    format!(r#"
+        window, .background, popover, tooltip {{ font-family: "{font}", "JetBrains Mono", monospace; font-size: 12px; }}
+        button, entry, spinbutton, spinbutton text, spinbutton button, dropdown > button, menubutton > button, check, radio, popover > contents, popover > arrow, tooltip, tooltip > contents,
+        notebook > header tab, list row, scale slider, scale trough, scale highlight, scrollbar slider, switch, switch slider, textview, scrolledwindow, frame, .frame, window.csd, decoration, .card, headerbar, entry > text, searchbar, listview > row, treeview {{ border-radius: 0; }}
+        decoration {{ box-shadow: 0 0 0 1px alpha(currentColor, 0.28); margin: 0; }}
+        window.csd {{ box-shadow: none; }}
+        headerbar {{ min-height: 34px; padding: 0 6px; }}
+        headerbar .dialog-title, .panel-tab, .heading, .layers-panel .heading {{ text-transform: uppercase; letter-spacing: 1.4px; font-size: 10.5px; font-weight: 600; }}
+        headerbar .title {{ letter-spacing: 0.6px; font-weight: 600; }}
+        .panel-tab.current {{ border-bottom: 1px solid currentColor; }}
+        button {{ background-image: none; box-shadow: none; text-shadow: none; padding: 3px 10px; min-height: 22px; border: 1px solid alpha(currentColor, 0.22); }}
+        button:hover {{ border-color: alpha(currentColor, 0.5); }}
+        button:active, button:checked {{ box-shadow: none; }}
+        button.flat, button.tool, .layers-footer button, .layers-panel row button, notebook > header tab button, spinbutton button, button.swatch, menubutton > button.flat {{ border: none; }}
+        button.tool {{ padding: 3px; min-width: 0; min-height: 0; }}
+        button.tool.mark {{ padding: 1px; }}
+        button.swatch {{ padding: 0; min-width: 0; min-height: 0; }}
+        .layers-footer button, .layers-panel row button {{ padding: 3px 5px; min-width: 0; min-height: 0; }}
+        spinbutton button, notebook > header tab button, menubutton > button.flat {{ min-height: 0; }}
+        button.suggested-action {{ border: 1px solid transparent; }}
+        button.suggested-action label {{ font-weight: 600; }}
+        entry, spinbutton, dropdown > button {{ min-height: 22px; padding: 0 6px; }}
+        spinbutton button {{ padding: 0 6px; min-width: 18px; border-left: 1px solid alpha(currentColor, 0.15); }}
+        scale {{ min-height: 16px; }}
+        scale trough {{ min-height: 2px; }}
+        scale highlight {{ min-height: 2px; }}
+        scale slider {{ min-width: 8px; min-height: 16px; margin: -7px; box-shadow: none; }}
+        check, radio {{ min-width: 13px; min-height: 13px; -gtk-icon-size: 11px; }}
+        popover > contents {{ box-shadow: none; padding: 4px; }}
+        popover.menu modelbutton {{ min-height: 24px; padding: 2px 10px; }}
+        tooltip {{ box-shadow: none; padding: 4px 6px; }}
+        notebook > header {{ padding: 0; }}
+        notebook > header tab {{ min-height: 24px; padding: 2px 10px; }}
+        scrollbar {{ background: transparent; }}
+        scrollbar slider {{ min-width: 4px; min-height: 4px; margin: 2px; }}
+        .canvas-status {{ font-size: 11px; }}
+        .dim-label, label.caption {{ font-size: 11px; }}
+        .layers-panel row label.caption {{ font-size: 10px; letter-spacing: 0.3px; }}
+        .monospace {{ letter-spacing: 0; }}
+        paned > separator {{ min-width: 1px; min-height: 1px; }}
+    "#)
+}
+
+thread_local! {
+    static LOOK: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+}
+
+/// Installs the shared look once; the palette provider sits above it.
+fn install_look(display: &gdk::Display) {
+    LOOK.with(|slot| {
+        if slot.borrow().is_some() { return; }
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&look_css(&system_font()));
+        gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        *slot.borrow_mut() = Some(provider);
+    });
+}
+
 /// Applies the palette (or clears it when `None`) to every window on the default display.
 fn apply(palette: Option<Palette>) {
     let Some(display) = gdk::Display::default() else { return };
+    install_look(&display);
     PROVIDER.with(|slot| {
         let mut slot = slot.borrow_mut();
         if let Some(old) = slot.take() { gtk::style_context_remove_provider_for_display(&display, &old); }

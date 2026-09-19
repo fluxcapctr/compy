@@ -145,6 +145,12 @@ scaled with the Move tool without redrawing, and turns into plain pixels once pa
 adds a type layer from a script. The palette at the bottom of the rail holds the foreground and background
 colors; X swaps them, D resets them.
 
+**Look.** The chrome follows omarchy.org: the system monospace font (`omarchy font current`, JetBrains Mono
+by default) everywhere, square corners, one-pixel borders, flat controls, small uppercase labels with wide
+tracking on panel tabs and dialog titles, and a light filled primary button. Colors still come from the
+active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
+`theme::look_css` and can be reverted as one commit.
+
 **Snapping and the grid.** View > Snap (Ctrl+Shift+;) makes guides, as you drag them off a ruler or with
 the Move tool, settle on the canvas edges and center, every visible layer's edges and center, and the grid;
 switch it off to place them freely. View > Show Grid (Ctrl+') draws a grid every 100 px with four

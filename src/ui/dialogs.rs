@@ -13,7 +13,7 @@ pub fn floating(parent: &gtk::Window, title: &str, modal: bool, width: i32, cont
     let window = gtk::Window::builder().title(title).transient_for(parent).modal(modal).resizable(false).default_width(width).build();
     window.set_application(parent.application().as_ref());
     let header = gtk::HeaderBar::builder().show_title_buttons(true).build();
-    header.set_title_widget(Some(&gtk::Label::builder().label(title).css_classes(["title"]).build()));
+    header.set_title_widget(Some(&gtk::Label::builder().label(title).css_classes(["title", "dialog-title"]).build()));
     window.set_titlebar(Some(&header));
     window.set_child(Some(&gtk::WindowHandle::builder().child(content).build()));
     window
