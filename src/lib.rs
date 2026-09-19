@@ -22,6 +22,7 @@ pub mod psd;
 pub mod raster;
 pub mod render;
 pub mod selection;
+pub mod text;
 pub mod transform;
 pub mod ui;
 pub mod viewport;

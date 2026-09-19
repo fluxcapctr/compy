@@ -133,8 +133,17 @@ dropdown fixes the proportions, Return applies. Eyedropper (I): picks the foregr
 (Alt-click the background); Alt-click with the Brush does the same. Gradient (G): linear or radial, foreground
 to background or to transparent, reversed, at an opacity, over the layer or its mask inside the selection.
 Shape (U): rectangles with rounded corners and ellipses in the foreground color on a new layer, redrawn
-crisp when scaled (Shift+U swaps the kind). The palette at the bottom of the rail holds the foreground and
-background colors; X swaps them, D resets them.
+crisp when scaled (Shift+U swaps the kind). Type (T): click the canvas to set text on a new layer in the
+foreground color, or click existing text to edit it; a floating editor shows the text and the canvas updates
+as you type (Escape or closing keeps it). The options bar sets the family (a searchable list of every font
+on the system), size, bold, italic, alignment, leading and tracking, and changes apply to the selected type
+layer live. To use a Google font, type its name into the "Google font" field and press Get: the family's
+regular, bold, italic and bold italic files download into `~/.local/share/fonts/compositor-google/` and the
+list picks it up, so only fonts you ask for are ever fetched and the app starts as fast as before. The text
+and its style stay on the layer (`text` on the record), so a type layer can be edited again after saving,
+scaled with the Move tool without redrawing, and turns into plain pixels once painted on. `--text "Hello"`
+adds a type layer from a script. The palette at the bottom of the rail holds the foreground and background
+colors; X swaps them, D resets them.
 
 **Brushes.** The tip button at the left of the brush options opens the presets: Hard Round and Soft Round,
 the bundled set (Chalk, Charcoal, Dry Brush, Sponge, Spatter, Stipple, Grain, Soft Grain, Watercolor, Splat,

@@ -163,6 +163,27 @@ fn draw(tool: Tool, cr: &cairo::Context) {
             cr.rectangle(3.0, 4.0, 14.0, 12.0);
             cr.stroke().ok();
         }
+        Tool::Type => {
+            // A serif capital T.
+            cr.move_to(3.0, 3.5);
+            cr.line_to(17.0, 3.5);
+            cr.line_to(17.0, 7.5);
+            cr.line_to(15.5, 7.5);
+            cr.line_to(15.0, 5.8);
+            cr.line_to(11.6, 5.8);
+            cr.line_to(11.6, 15.6);
+            cr.line_to(13.6, 16.2);
+            cr.line_to(13.6, 17.5);
+            cr.line_to(6.4, 17.5);
+            cr.line_to(6.4, 16.2);
+            cr.line_to(8.4, 15.6);
+            cr.line_to(8.4, 5.8);
+            cr.line_to(5.0, 5.8);
+            cr.line_to(4.5, 7.5);
+            cr.line_to(3.0, 7.5);
+            cr.close_path();
+            cr.fill().ok();
+        }
         Tool::Shape => {
             // A filled rounded square with a circle cut into its corner.
             cr.set_fill_rule(cairo::FillRule::EvenOdd);

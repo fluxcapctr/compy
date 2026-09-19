@@ -185,6 +185,16 @@ impl Renderer {
         // Pixels edited any other way stop being the shape the layer was drawn as.
         let i = self.index[&id];
         self.layers[i].shape = None;
+        self.layers[i].text = None;
+        self.invalidate(id);
+    }
+
+    /// A type layer's raster, set again from its text (kept on the record).
+    pub fn set_text_image(&mut self, id: Uuid, surface: ImageSurface, style: serde_json::Value) { self.touch();
+        self.images.insert(id, surface);
+        self.ensure_image_record(id);
+        let i = self.index[&id];
+        self.layers[i].text = Some(style);
         self.invalidate(id);
     }
 

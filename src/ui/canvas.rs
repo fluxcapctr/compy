@@ -362,6 +362,7 @@ impl Canvas {
                         this.area.queue_draw();
                     }
                     Tool::Eyedropper => this.sample_at(x, y, state.contains(gdk::ModifierType::ALT_MASK)),
+                    Tool::Type if g.current_button() == 1 && n == 1 => this.type_at(x, y),
                     Tool::Brush if state.contains(gdk::ModifierType::ALT_MASK) => this.sample_at(x, y, false),
                     Tool::Wand => {
                         let mode = selection_mode(state, this.doc.borrow().mode);
@@ -488,6 +489,7 @@ impl Canvas {
             match d.tool {
                 Tool::Hand => "grab", Tool::Zoom => "zoom-in", Tool::Wand => "crosshair", Tool::Marquee | Tool::Lasso => "crosshair",
                 Tool::Crop | Tool::Gradient | Tool::Shape | Tool::Eyedropper => "crosshair",
+                Tool::Type => "text",
                 t if t.is_brush() => "none",
                 Tool::Move if self.guide_at(self.pointer.get()).is_some_and(|(v, _)| v) => "ew-resize",
                 Tool::Move if self.guide_at(self.pointer.get()).is_some() => "ns-resize",
@@ -514,7 +516,62 @@ impl Canvas {
         Some(Geometry::new(&layer.transform, |p| vp.view_point(p, size)))
     }
 
-    pub fn sync_inspector(&self) { self.options.sync_move(&self.doc); self.options.show_mask_paint(self.doc.borrow().document.mask_target()); }
+    pub fn sync_inspector(&self) { self.options.sync_move(&self.doc); self.options.sync_type(&self.doc); self.options.show_mask_paint(self.doc.borrow().document.mask_target()); }
+
+    /// The Type tool's click: existing text under the point opens for editing, anywhere else starts a new
+    /// type layer there, in the current style and the foreground color.
+    fn type_at(&self, x: f64, y: f64) {
+        let result = {
+            let mut d = self.doc.borrow_mut();
+            let size = d.size();
+            let point = d.viewport.document_point((x, y), size);
+            match d.document.text_layer_at(point) {
+                Some(id) => { d.document.select_layer(Some(id)); Ok(id) }
+                None => { let mut style = d.text_style.clone(); style.color = d.brush.color; d.document.add_text_layer(&style, point.0, point.1) }
+            }
+        };
+        match result {
+            Ok(id) => { if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); } self.sync_inspector(); self.area.queue_draw(); self.edit_text(id); }
+            Err(error) => self.notify(&format!("{error:#}")),
+        }
+    }
+
+    /// A floating editor for a type layer's text: each keystroke sets the layer again (one undo step).
+    pub fn edit_text(&self, id: uuid::Uuid) {
+        let Some(parent) = self.widget.root().and_downcast::<gtk::Window>() else { return };
+        let Some(style) = self.doc.borrow().document.text_style(id) else { return };
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(10).margin_bottom(10).margin_start(10).margin_end(10).build();
+        let view = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).accepts_tab(false).top_margin(6).bottom_margin(6).left_margin(8).right_margin(8).build();
+        view.buffer().set_text(&style.text);
+        let scroller = gtk::ScrolledWindow::builder().child(&view).min_content_height(120).max_content_height(320).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        scroller.add_css_class("frame");
+        content.append(&scroller);
+        let hint = gtk::Label::builder().label("Edits show on the canvas as you type. Return adds a line; Escape or closing keeps the text; the options bar sets the font.").wrap(true).xalign(0.0).css_classes(["dim-label"]).build();
+        content.append(&hint);
+        let window = super::dialogs::floating(&parent, "Type", false, 380, &content);
+        {
+            let (doc, area, refresh) = (self.doc.clone(), self.area.clone(), self.refresh.borrow().clone());
+            view.buffer().connect_changed(move |buffer| {
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).to_string();
+                let Ok(mut d) = doc.try_borrow_mut() else { return };
+                if !d.document.has_layer(id) { return; }
+                let Some(mut style) = d.document.text_style(id) else { return };
+                if style.text == text || text.trim().is_empty() { return; }
+                style.text = text;
+                if let Err(error) = d.document.set_text(id, &style) { eprintln!("type: {error:#}"); return; }
+                drop(d);
+                if let Some(refresh) = refresh.as_ref() { refresh(); }
+                area.queue_draw();
+            });
+        }
+        let keys = gtk::EventControllerKey::new();
+        { let window = window.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gdk::Key::Escape { window.close(); glib::Propagation::Stop } else { glib::Propagation::Proceed } }); }
+        window.add_controller(keys);
+        window.present();
+        view.grab_focus();
+        let buffer = view.buffer();
+        buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+    }
 
     /// Arrow keys nudge the layer (Move) or the selection outline (selection tools); Escape, Return and
     /// BackSpace drive the polygonal lasso. True when the key was used.

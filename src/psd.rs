@@ -400,7 +400,7 @@ fn record(id: Uuid, name: &str, placement: (f64, f64, f64, f64), parent: Option<
         id, name, is_visible: !hidden,
         transform: Transform { origin: Point(placement.0, placement.1), size: Size(placement.2.max(1.0), placement.3.max(1.0)), rotation: 0.0, flip_x: false, flip_y: false, sampling: Sampling::High },
         image_file: None, parent_id: parent, is_group: None, opacity: if opacity == 255 { None } else { Some(opacity as f64 / 255.0) },
-        blend_mode: if blend == BlendMode::Normal { None } else { Some(blend) }, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None,
+        blend_mode: if blend == BlendMode::Normal { None } else { Some(blend) }, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None,
     }
 }
 

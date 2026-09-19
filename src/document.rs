@@ -743,6 +743,59 @@ impl Document {
         Ok(())
     }
 
+    // MARK: Type layers
+
+    /// Text set in `style`, rendered onto a new layer above the active one whose top-left corner is at
+    /// (`x`, `y`) in document pixels. The style stays on the record so the text can be edited again.
+    pub fn add_text_layer(&mut self, style: &crate::text::TextStyle, x: f64, y: f64) -> Result<Uuid> {
+        let (image, _, _) = crate::text::render(style)?;
+        let (w, h) = (image.width() as f64, image.height() as f64);
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(self.unique_name(&text_layer_name(&style.text)), parent);
+        record.name = text_layer_name(&style.text);
+        record.transform.origin = crate::format::Point(x.round(), y.round());
+        record.transform.size = crate::format::Size(w, h);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        record.text = Some(style.to_record());
+        let id = record.id;
+        self.begin_edit("Type");
+        self.renderer.insert_layer(index, record, Some(image), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// The style a type layer was set in, or None for any other layer.
+    pub fn text_style(&self, id: Uuid) -> Option<crate::text::TextStyle> {
+        self.renderer.layer(id).text.as_ref().and_then(crate::text::TextStyle::from_record)
+    }
+
+    /// Sets a type layer's text again. The layer keeps its top-left corner and whatever scale a transform
+    /// gave it; consecutive edits merge into one undo step ("Edit Text").
+    pub fn set_text(&mut self, id: Uuid, style: &crate::text::TextStyle) -> Result<()> {
+        let Some(old) = self.text_style(id) else { bail!("That is not a type layer.") };
+        let old_name = text_layer_name(&old.text);
+        let (image, _, _) = crate::text::render(style)?;
+        let layer = self.renderer.layer(id).clone();
+        let (rw, rh) = self.renderer.image_size(id).unwrap_or((image.width(), image.height()));
+        let (sx, sy) = (layer.transform.size.0 / rw.max(1) as f64, layer.transform.size.1 / rh.max(1) as f64);
+        let mut transform = layer.transform;
+        transform.size = crate::format::Size((image.width() as f64 * sx).max(1.0), (image.height() as f64 * sy).max(1.0));
+        self.begin_edit("Edit Text");
+        if self.renderer.mask(id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(id, Some(layer.transform)); }
+        self.renderer.set_layer_transform(id, transform);
+        self.renderer.set_text_image(id, image, style.to_record());
+        if layer.name == old_name || layer.name.starts_with("Type") { self.renderer.set_layer_name(id, text_layer_name(&style.text)); }
+        self.end_edit_merging();
+        Ok(())
+    }
+
+    /// The topmost visible type layer under a document point, for the Type tool's click.
+    pub fn text_layer_at(&self, point: (f64, f64)) -> Option<Uuid> {
+        let layers = self.renderer.layers();
+        crate::format::entries_ordered(layers, true).into_iter().filter(|e| e.visible && e.layer.text.is_some() && e.layer.transform.contains(point)).map(|e| e.layer.id).next()
+    }
+
     // MARK: Crop
 
     /// Crops the canvas to `rect` (document pixels), as one undo step (`commitCrop`).
@@ -1804,7 +1857,7 @@ impl Document {
         let layer = crate::format::Layer {
             id, name: "Layer 1".into(), is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None,
+            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None,
         };
         let manifest = crate::format::Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: Some(id), layers: vec![layer] };
         let json = serde_json::to_vec(&manifest)?;
@@ -1854,7 +1907,7 @@ impl Document {
         crate::format::Layer {
             id: Uuid::new_v4(), name, is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(self.width() as f64, self.height() as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None,
+            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None,
         }
     }
 
@@ -2404,4 +2457,11 @@ fn shape_image(ellipse: bool, w: i32, h: i32, color: [f64; 3], radius: f64) -> R
     cr.fill()?;
     drop(cr);
     Ok(out)
+}
+
+/// A type layer is named after its first line, as Photoshop names them.
+fn text_layer_name(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("Type").trim();
+    let name: String = line.chars().take(40).collect();
+    if name.is_empty() { "Type".into() } else { name }
 }

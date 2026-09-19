@@ -243,6 +243,9 @@ pub struct Layer {
     pub mask_linked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<serde_json::Value>,
+    /// A type layer's text and style (this app's extension; other readers ignore it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<serde_json::Value>,
 }
 
 impl Layer {

@@ -3,13 +3,14 @@
 use super::DocRef;
 use crate::selection::Mode;
 use gtk::prelude::*;
+use gtk::glib;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Shape, Hand, Zoom }
+pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Type, Shape, Hand, Zoom }
 
 impl Tool {
-    pub const ALL: [Tool; 15] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Shape, Tool::Hand, Tool::Zoom];
+    pub const ALL: [Tool; 16] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Type, Tool::Shape, Tool::Hand, Tool::Zoom];
     pub fn help(self) -> &'static str {
         match self {
             Tool::Move => "Move / Transform (V): drag to move; handles scale, the top handle rotates; Shift constrains; Alt scales from the center; Ctrl-click picks the layer under the pointer; arrow keys nudge",
@@ -24,12 +25,13 @@ impl Tool {
             Tool::Crop => "Crop (C): drag a frame, then Return crops the canvas to it; edges snap to layers; Alt keeps the center; Escape cancels",
             Tool::Eyedropper => "Eyedropper (I): click to pick the foreground color from the canvas; Alt-click sets the background color",
             Tool::Gradient => "Gradient (G): drag a line to fill the layer (or its mask) with a gradient inside the selection; Shift snaps the angle",
+            Tool::Type => "Type (T): click to set text on a new layer in the foreground color, or click existing text to edit it; the options set the font",
             Tool::Shape => "Shape (U): drag a rectangle or ellipse onto a new layer in the foreground color; Shift squares it, Alt grows from the center; Shift+U swaps the kind",
             Tool::Hand => "Hand (H): drag to pan",
             Tool::Zoom => "Zoom (Z): click to zoom in, Alt-click to zoom out",
         }
     }
-    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
+    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
     pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur) }
     pub fn is_selection(self) -> bool { matches!(self, Tool::Marquee | Tool::Lasso | Tool::Wand) }
 }
@@ -107,7 +109,137 @@ pub struct OptionsBar {
     angle: gtk::SpinButton,
     roundness: gtk::SpinButton,
     jitter: gtk::SpinButton,
+    type_page: TypePage,
     syncing: std::cell::Cell<bool>,
+}
+
+/// The Type tool's options: the font and its setting.
+pub struct TypePage {
+    families: gtk::StringList,
+    family: gtk::DropDown,
+    size: gtk::SpinButton,
+    bold: gtk::ToggleButton,
+    italic: gtk::ToggleButton,
+    align: gtk::DropDown,
+    leading: gtk::SpinButton,
+    tracking: gtk::SpinButton,
+    google: gtk::Entry,
+    status: gtk::Label,
+}
+
+impl TypePage {
+    fn build(doc: &DocRef) -> (gtk::Box, TypePage) {
+        let page = row();
+        let names = crate::text::families();
+        let families = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let family = gtk::DropDown::builder().model(&families).enable_search(true).tooltip_text("Font family; type to search").build();
+        family.set_expression(Some(&gtk::PropertyExpression::new(gtk::StringObject::static_type(), None::<gtk::Expression>, "string")));
+        let current = doc.borrow().text_style.family.clone();
+        if let Some(i) = names.iter().position(|n| *n == current) { family.set_selected(i as u32); }
+        page.append(&family);
+        page.append(&gtk::Label::new(Some("Size")));
+        let size = gtk::SpinButton::with_range(1.0, 2000.0, 1.0);
+        size.set_value(doc.borrow().text_style.size);
+        size.set_tooltip_text(Some("Font size in document pixels"));
+        page.append(&size);
+        let styles = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).css_classes(["linked"]).build();
+        let bold = gtk::ToggleButton::builder().label("B").tooltip_text("Bold").build();
+        bold.add_css_class("type-bold");
+        let italic = gtk::ToggleButton::builder().label("I").tooltip_text("Italic").build();
+        italic.add_css_class("type-italic");
+        styles.append(&bold);
+        styles.append(&italic);
+        page.append(&styles);
+        let align = gtk::DropDown::from_strings(&["Left", "Center", "Right"]);
+        align.set_tooltip_text(Some("Alignment of the lines"));
+        page.append(&align);
+        page.append(&gtk::Label::new(Some("Leading")));
+        let leading = gtk::SpinButton::with_range(0.5, 5.0, 0.1);
+        leading.set_digits(2);
+        leading.set_value(doc.borrow().text_style.leading);
+        leading.set_tooltip_text(Some("Line height as a multiple of the size"));
+        page.append(&leading);
+        page.append(&gtk::Label::new(Some("Tracking")));
+        let tracking = gtk::SpinButton::with_range(-100.0, 500.0, 1.0);
+        tracking.set_tooltip_text(Some("Letter spacing in pixels"));
+        page.append(&tracking);
+        let google = gtk::Entry::builder().placeholder_text("Google font, e.g. Lobster").width_chars(18).tooltip_text("A family name from fonts.google.com; Get downloads it into your fonts").build();
+        page.append(&google);
+        let get = gtk::Button::builder().label("Get").tooltip_text("Download the family from Google Fonts").build();
+        page.append(&get);
+        let status = gtk::Label::builder().css_classes(["dim-label"]).build();
+        page.append(&status);
+        let this = TypePage { families, family, size, bold, italic, align, leading, tracking, google, status };
+        this.connect(doc);
+        { let google = this.google.clone(); get.connect_clicked(move |_| google.emit_activate()); }
+        (page, this)
+    }
+
+    /// Each control changes the style for new text and, with a type layer active, that layer.
+    fn connect(&self, doc: &DocRef) {
+        fn apply(doc: &DocRef, change: &dyn Fn(&mut crate::text::TextStyle)) {
+            let Ok(mut d) = doc.try_borrow_mut() else { return };
+            if d.syncing_inspector { return; }
+            change(&mut d.text_style);
+            if let Some(id) = d.document.active {
+                if let Some(mut style) = d.document.text_style(id) {
+                    change(&mut style);
+                    if let Err(error) = d.document.set_text(id, &style) { eprintln!("type: {error:#}"); }
+                    d.needs_redraw = true;
+                }
+            }
+        }
+        { let doc = doc.clone(); self.family.connect_selected_notify(move |f| { let Some(name) = f.selected_item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()) else { return }; apply(&doc, &|s| s.family = name.clone()); }); }
+        { let doc = doc.clone(); self.size.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.size = v); }); }
+        { let doc = doc.clone(); self.bold.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.bold = v); }); }
+        { let doc = doc.clone(); self.italic.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.italic = v); }); }
+        { let doc = doc.clone(); self.align.connect_selected_notify(move |a| { let v = a.selected(); apply(&doc, &|st| st.align = v); }); }
+        { let doc = doc.clone(); self.leading.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.leading = v); }); }
+        { let doc = doc.clone(); self.tracking.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.tracking = v); }); }
+        {
+            let (families, family, status) = (self.families.clone(), self.family.clone(), self.status.clone());
+            let doc = doc.clone();
+            self.google.connect_activate(move |entry| {
+                let name = entry.text().trim().to_string();
+                if name.is_empty() { return; }
+                status.set_label("Fetching…");
+                entry.set_sensitive(false);
+                let (tx, rx) = std::sync::mpsc::channel();
+                { let name = name.clone(); std::thread::spawn(move || { let _ = tx.send(crate::text::fetch_google_family(&name)); }); }
+                let (families, family, status, entry, doc) = (families.clone(), family.clone(), status.clone(), entry.clone(), doc.clone());
+                glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                    let Ok(result) = rx.try_recv() else { return glib::ControlFlow::Continue };
+                    entry.set_sensitive(true);
+                    match result {
+                        Ok(n) => {
+                            status.set_label(&format!("Got {name} ({n} files)"));
+                            entry.set_text("");
+                            let names = crate::text::families();
+                            families.splice(0, families.n_items(), &names.iter().map(String::as_str).collect::<Vec<_>>());
+                            if let Some(i) = names.iter().position(|f| f.eq_ignore_ascii_case(&name)) { family.set_selected(i as u32); }
+                            else { apply(&doc, &|s| s.family = name.clone()); }
+                        }
+                        Err(error) => status.set_label(&format!("{error:#}")),
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
+        }
+    }
+
+    /// Shows a style in the controls without applying it back.
+    fn show(&self, doc: &DocRef, style: &crate::text::TextStyle) {
+        doc.borrow_mut().syncing_inspector = true;
+        let n = self.families.n_items();
+        if let Some(i) = (0..n).find(|i| self.families.string(*i).is_some_and(|s| s == style.family)) { self.family.set_selected(i); }
+        self.size.set_value(style.size);
+        self.bold.set_active(style.bold);
+        self.italic.set_active(style.italic);
+        self.align.set_selected(style.align.min(2));
+        self.leading.set_value(style.leading);
+        self.tracking.set_value(style.tracking);
+        doc.borrow_mut().syncing_inspector = false;
+    }
 }
 
 /// New / Add / Subtract, kept in step with the document's mode.
@@ -305,6 +437,10 @@ impl OptionsBar {
         gradient.append(&gopacity);
         stack.add_named(&gradient, Some("gradient"));
 
+        // Type.
+        let (type_row, type_page) = TypePage::build(&doc);
+        stack.add_named(&type_row, Some("type"));
+
         // Shape.
         let shape_row = row();
         let skind = gtk::DropDown::from_strings(&["Rectangle", "Ellipse"]);
@@ -336,7 +472,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -374,6 +510,12 @@ impl OptionsBar {
         doc.borrow_mut().syncing_inspector = false;
     }
 
+    /// Shows the active type layer's style in the Type options, or the style for new text.
+    pub fn sync_type(&self, doc: &DocRef) {
+        let style = { let d = doc.borrow(); d.document.active.and_then(|id| d.document.text_style(id)).unwrap_or_else(|| d.text_style.clone()) };
+        self.type_page.show(doc, &style);
+    }
+
     pub fn show_mask_paint(&self, on: bool) { self.mask_paint.set_visible(on); }
     pub fn sync_mask_paint(&self, doc: &DocRef) { let white = doc.borrow().mask_paint_white; self.mask_paint.set_selected(if white { 1 } else { 0 }); }
     pub fn sync_shape_kind(&self, ellipse: bool) {
@@ -397,6 +539,7 @@ impl OptionsBar {
                 }
             }
             Tool::Gradient => self.widget.set_visible_child_name("gradient"),
+            Tool::Type => self.widget.set_visible_child_name("type"),
             Tool::Shape => self.widget.set_visible_child_name("shape"),
             Tool::Crop => self.widget.set_visible_child_name("crop"),
             Tool::Eyedropper => self.widget.set_visible_child_name("eyedropper"),

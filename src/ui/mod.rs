@@ -72,6 +72,8 @@ pub struct Doc {
     pub shape_ellipse: bool,
     pub shape_radius: f64,
     pub shape_draft: Option<(f64, f64, f64, f64)>,
+    /// Type tool: the font and setting for new text (the color is the foreground color).
+    pub text_style: crate::text::TextStyle,
     /// Crop tool: the frame (x, y, w, h) and the ratio choice (0 free, 1 original, 2 square, 3 4:3, 4 16:9).
     pub crop: Option<(f64, f64, f64, f64)>,
     pub crop_ratio: u32,
@@ -125,7 +127,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }
     }
 }
 
@@ -148,7 +150,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -193,6 +195,8 @@ pub struct Script {
     pub preview: bool,
     /// Guides to place: vertical xs and horizontal ys.
     pub guides: (Vec<f64>, Vec<f64>),
+    /// Adds a type layer with this text at (40, 40) in the current style.
+    pub text: Option<String>,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -206,7 +210,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -216,6 +220,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
                     if script.rulers { p.canvas.doc().borrow_mut().rulers = true; p.canvas.area.queue_draw(); }
+                    if let Some(text) = &script.text { let mut d = p.canvas.doc().borrow_mut(); let mut style = d.text_style.clone(); style.text = text.clone(); style.size = 72.0; if let Err(e) = d.document.add_text_layer(&style, 40.0, 40.0) { eprintln!("text: {e:#}"); } drop(d); p.refresh(); }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
@@ -262,7 +267,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
 fn build_window(app: &gtk::Application) -> Rc<App> {
     // Tool buttons are smaller than GTK's default minimum.
     let css = gtk::CssProvider::new();
-    css.load_from_string("button.tool, .layers-panel row button, .layers-footer button, .layers-panel menubutton > button { background-image: none; background-color: transparent; border: none; box-shadow: none; outline: none; } button.tool:hover, .layers-panel row button:hover, .layers-footer button:hover { background-color: alpha(currentColor, 0.12); } button.tool { min-width: 0; min-height: 0; padding: 3px; border-radius: 3px; } button.tool.mark { padding: 1px; } button.swatch { min-width: 0; min-height: 0; padding: 0; border-radius: 0; border: 1px solid alpha(currentColor, 0.5); } .panel-tab { padding: 5px 12px; } .panel-tab.current { background-color: alpha(@window_bg_color, 1); border-bottom: 2px solid @accent_bg_color; } .layers-footer button { min-width: 0; min-height: 0; padding: 3px 5px; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
+    css.load_from_string("button.tool, .layers-panel row button, .layers-footer button, .layers-panel menubutton > button { background-image: none; background-color: transparent; border: none; box-shadow: none; outline: none; } button.tool:hover, .layers-panel row button:hover, .layers-footer button:hover { background-color: alpha(currentColor, 0.12); } button.tool { min-width: 0; min-height: 0; padding: 3px; border-radius: 3px; } button.tool.mark { padding: 1px; } button.swatch { min-width: 0; min-height: 0; padding: 0; border-radius: 0; border: 1px solid alpha(currentColor, 0.5); } .panel-tab { padding: 5px 12px; } .panel-tab.current { background-color: alpha(@window_bg_color, 1); border-bottom: 2px solid @accent_bg_color; } .layers-footer button { min-width: 0; min-height: 0; padding: 3px 5px; } .type-bold { font-weight: bold; } .type-italic { font-style: italic; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
 
     let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
