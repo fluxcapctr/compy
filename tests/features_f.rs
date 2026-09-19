@@ -151,31 +151,40 @@ fn layer_effects_render_around_the_layer_and_survive_saving() {
 
 
 #[test]
-fn layer_style_session_is_one_step_and_cancel_leaves_no_trace() {
+fn layer_style_session_is_one_step_cancel_leaves_no_trace_and_saving_ignores_the_preview() {
     use compositor::effects::{Effects, Stroke};
     let mut d = Document::blank(30, 30, 72.0).unwrap();
     let id = d.add_shape_layer(false, (5.0, 5.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
     let path = std::env::temp_dir().join(format!("compositor-test-{}-style.comp", std::process::id()));
     d.save(&path).unwrap();
-    d.begin_layer_style();
+    d.begin_layer_style(id).unwrap();
+    assert!(d.begin_layer_style(id).is_err(), "one session at a time");
     let mut e = Effects::default();
     e.stroke = Some(Stroke { size: 2.0, position: 0, color: [1.0, 0.0, 0.0], opacity: 1.0, enabled: true });
-    d.set_effects(id, Some(&e)).unwrap();
-    assert!(d.is_modified(), "previewing counts as unsaved");
-    e.stroke.as_mut().unwrap().size = 3.0;
-    d.set_effects(id, Some(&e)).unwrap();
+    d.preview_effects(Some(&e));
+    assert_eq!(d.effects(id), Some(e.clone()), "the preview shows");
+    assert!(!d.is_modified(), "a preview is not an edit");
+    // Saving mid-session writes the layer without the preview, so Cancel leaves memory equal to disk.
+    d.save(&path).unwrap();
+    let on_disk = Document::new(compositor::format::load(&path).unwrap()).unwrap();
+    assert!(on_disk.effects(id).is_none(), "the file holds the original");
+    assert_eq!(d.effects(id), Some(e.clone()), "and the preview is still showing");
+    // Another edit while the window is open is its own step, untouched by Cancel.
+    let other = d.add_shape_layer(false, (0.0, 0.0, 3.0, 3.0), [0.0; 3], 0.0).unwrap();
     d.end_layer_style(false);
     assert!(d.effects(id).is_none(), "cancel puts the layer back");
-    assert!(!d.is_modified(), "and leaves nothing to undo");
-    assert_ne!(d.undo_name(), Some("Layer Style"));
-    d.begin_layer_style();
-    d.set_effects(id, Some(&e)).unwrap();
+    assert!(d.has_layer(other), "the other edit stands");
+    assert_eq!(d.undo_name(), Some("Rectangle"));
+    d.begin_layer_style(id).unwrap();
+    d.preview_effects(Some(&e));
     e.stroke.as_mut().unwrap().size = 4.0;
-    d.set_effects(id, Some(&e)).unwrap();
+    d.preview_effects(Some(&e));
     d.end_layer_style(true);
     assert_eq!(d.undo_name(), Some("Layer Style"));
+    assert_eq!(d.effects(id), Some(e));
     d.undo();
     assert!(d.effects(id).is_none(), "both changes undo as one step");
+    assert!(!d.layer_style_open());
 }
 
 #[test]
@@ -194,4 +203,23 @@ fn color_overlay_keeps_the_layer_alpha_and_effects_follow_a_layer_off_the_left_e
     let p = px[(5 * w + 5) as usize];
     assert!((p[3] as i32 - 128).abs() <= 2, "alpha stays the layer's: {p:?}");
     assert!(p[0] > 120 && p[2] == 0, "recolored red, no blue left: {p:?}");
+}
+
+
+#[test]
+fn effects_follow_a_canvas_that_grows_to_reveal_the_layer() {
+    use compositor::effects::{Effects, Overlay};
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let mut t = d.renderer.layer(id).transform;
+    t.origin = compositor::format::Point(60.0, 60.0);
+    d.set_transform(id, t, "Move");
+    let mut e = Effects::default();
+    e.color_overlay = Some(Overlay { color: [1.0, 0.0, 0.0], opacity: 1.0, enabled: true });
+    d.set_effects(id, Some(&e)).unwrap();
+    let _ = pixels(&mut d);
+    d.canvas_size(120, 120, 0, None, None, "Canvas Size").unwrap();
+    let (px, w) = pixels(&mut d);
+    let p = px[(70 * w + 70) as usize];
+    assert!(p[0] > 200 && p[2] == 0, "the overlay is drawn where the layer now shows: {p:?}");
 }

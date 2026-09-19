@@ -52,8 +52,9 @@ pub struct Canvas {
     popover: RefCell<Option<gtk::Popover>>,
     /// Text being typed on the canvas: the type layer and the caret's byte index in its text.
     text_edit: RefCell<Option<(uuid::Uuid, usize)>>,
-    /// Return with the Move tool puts the transform handles away until the next click on the canvas.
-    handles_parked: Cell<bool>,
+    /// Return with the Move tool puts this layer's transform handles away until the next click on the
+    /// canvas, a new transform, another layer, or Transform Controls switched on.
+    handles_parked: Cell<Option<uuid::Uuid>>,
     /// A marquee or lasso being drawn.
     draft: RefCell<Option<Draft>>,
     /// Dragging a selection outline: its offset so far (document pixels).
@@ -136,7 +137,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(false) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -373,7 +374,7 @@ impl Canvas {
             click.connect_pressed(move |g, n, x, y| {
                 this.close_popover();
                 if this.space_held.get() { return; }
-                this.handles_parked.set(false);
+                this.handles_parked.set(None);
                 if this.text_editing() && this.doc.borrow().tool != Tool::Type { this.finish_text_edit(); }
                 if n == 2 && this.doc.borrow().rulers && (x < RULER || y < RULER) {
                     // The single press already made and placed the guide; the second click leaves it there.
@@ -520,7 +521,7 @@ impl Canvas {
     }
 
     fn tool_changed(&self) {
-        self.handles_parked.set(false);
+        self.handles_parked.set(None);
         { let mut d = self.doc.borrow_mut(); d.crop = None; d.gradient_line = None; d.shape_draft = None; if d.tool != Tool::Gradient { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } } }
         let tool = self.doc.borrow().tool;
         *self.draft.borrow_mut() = None;
@@ -558,8 +559,9 @@ impl Canvas {
 
     /// The transform box of the active layer on screen, when the Move tool would show one.
     fn geometry(&self, d: &super::Doc) -> Option<Geometry> {
-        if !d.show_handles || self.handles_parked.get() { return None; }
+        if !d.show_handles { return None; }
         let id = d.document.active?;
+        if self.handles_parked.get() == Some(id) { return None; }
         let size = d.size();
         let vp = d.viewport;
         if d.document.transforms_as_group() { return d.document.group_box().map(|b| Geometry::new(&b, |p| vp.view_point(p, size))); }
@@ -716,7 +718,7 @@ impl Canvas {
         if self.doc.borrow().document.floating.is_some() && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Escape) {
             let result = { let mut d = self.doc.borrow_mut(); if key == gdk::Key::Escape { d.document.cancel_free_transform(); Ok(()) } else { d.document.commit_free_transform() } };
             if let Err(error) = result { self.notify(&format!("{error:#}")); } else { self.notify(if key == gdk::Key::Escape { "Free Transform cancelled." } else { "Free Transform applied." }); }
-            self.handles_parked.set(true);
+            self.handles_parked.set(self.doc.borrow().document.active);
             if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
             self.sync_inspector();
             self.area.queue_draw();
@@ -724,7 +726,7 @@ impl Canvas {
         }
         // Return with the Move tool: the layer is placed; its handles go away until the next click.
         if tool == Tool::Move && self.draft.borrow().is_none() && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
-            self.handles_parked.set(true);
+            self.handles_parked.set(self.doc.borrow().document.active);
             self.update_cursor();
             self.area.queue_draw();
             return true;
@@ -1099,6 +1101,9 @@ impl Canvas {
     pub fn cancel_crop(&self) { self.doc.borrow_mut().crop = None; self.area.queue_draw(); }
 
     /// Preview mode hides everything but the picture.
+    /// Handles come back: a new transform, or Transform Controls switched on.
+    pub fn unpark_handles(&self) { self.handles_parked.set(None); self.update_cursor(); self.area.queue_draw(); }
+
     pub fn set_panels_hidden(&self, on: bool) {
         self.rail.widget.set_visible(!on);
         self.options_scroller.set_visible(!on);

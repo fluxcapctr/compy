@@ -272,3 +272,74 @@ fn curves_color_balance_auto_levels_and_fade() {
     let mid = rgb_at(&mut low, 32, 0)[0] as i32;
     assert!((mid - 128).abs() < 20, "midtone pulled to gray: {mid}");
 }
+
+
+#[test]
+fn free_transform_refuses_an_oversized_merge_and_grows_a_mask_white() {
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.select_box(2.0, 2.0, 4.0, 4.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    let float = d.floating.unwrap().0;
+    let mut ft = d.renderer.layer(float).transform;
+    ft.size = compositor::format::Size(40_000.0, 40_000.0);
+    d.set_transform(float, ft, "Scale");
+    assert!(d.commit_free_transform().is_err(), "too large to land");
+    assert!(d.floating.is_none() && d.renderer.layers().len() == 2, "everything back as before Ctrl+T");
+    assert_eq!(alpha_at(&mut d, 3, 3), 255);
+    assert_eq!(d.renderer.layer(id).transform.size.0, 20.0);
+    assert_ne!(d.undo_name(), Some("Free Transform"));
+
+    // A black-edged mask on the source grows white where the moved pixels land.
+    let mask = compositor::raster::a8_filled(20, 20, 0).unwrap();
+    compositor::raster::with_bytes_raw_mut(&mask, |b, stride| { for y in 4..16 { for x in 4..16 { b[y * stride + x] = 255; } } }).unwrap();
+    d.renderer.set_mask(id, Some(mask));
+    d.select_box(6.0, 6.0, 4.0, 4.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    let float = d.floating.unwrap().0;
+    let mut ft = d.renderer.layer(float).transform;
+    ft.origin = compositor::format::Point(30.0, 30.0);
+    d.set_transform(float, ft, "Move");
+    d.commit_free_transform().unwrap();
+    assert_eq!(alpha_at(&mut d, 32, 32), 255, "the landed pixels show through the grown mask");
+    assert_eq!(alpha_at(&mut d, 1, 1), 0, "the old black edge still hides the old corner");
+}
+
+#[test]
+fn fade_is_only_offered_right_after_the_filter_and_auto_levels_refuse_a_mask() {
+    use compositor::filters::{Kind, Settings};
+    let mut d = Document::blank(20, 20, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.5, 0.5, 0.5], 0.0).unwrap();
+    let mut s = Settings::default();
+    s.curves.channels[0] = vec![(0.0, 0.0), (128.0, 192.0), (255.0, 255.0)];
+    d.apply_filter(Kind::Curves, &s).unwrap();
+    let mut t = d.renderer.layer(id).transform;
+    t.origin = compositor::format::Point(1.0, 0.0);
+    d.set_transform(id, t, "Move");
+    let mut f = Settings::default();
+    f.fade = 0.5;
+    assert!(d.apply_filter(Kind::Fade, &f).is_err(), "a move in between ends the offer");
+    d.apply_filter(Kind::Curves, &s).unwrap();
+    d.undo();
+    assert!(d.apply_filter(Kind::Fade, &f).is_err(), "undo ends it too");
+    d.apply_filter(Kind::Curves, &s).unwrap();
+    assert!(d.apply_filter(Kind::Fade, &f).is_ok(), "straight after the filter it works");
+    let mask = compositor::raster::a8_filled(20, 20, 128).unwrap();
+    d.renderer.set_mask(id, Some(mask));
+    d.set_mask_target(true);
+    assert!(d.auto_levels(compositor::document::AutoLevels::Tone).is_err(), "auto levels read pixels, not masks");
+    assert!(d.histogram().is_err());
+}
+
+#[test]
+fn color_balance_keeps_luminosity_even_when_a_channel_clips() {
+    use compositor::filters::{Kind, Settings};
+    let mut d = Document::blank(4, 4, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 4.0, 4.0), [0.0, 0.0, 0.0], 0.0).unwrap();
+    let mut b = Settings::default();
+    b.balance.shadows = [100.0, 0.0, 0.0];
+    d.apply_filter(Kind::ColorBalance, &b).unwrap();
+    let p = rgb_at(&mut d, 1, 1);
+    let luma = 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+    assert!(luma < 2.0, "black stays black in luminosity: {p:?}");
+}

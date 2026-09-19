@@ -210,9 +210,19 @@ impl ColorBalance {
             let (b, g, r) = (px[0] as f64 / 255.0, px[1] as f64 / 255.0, px[2] as f64 / 255.0);
             let mut out = [r + self.shift(0, r), g + self.shift(1, g), b + self.shift(2, b)].map(|c| c.clamp(0.0, 1.0));
             if self.preserve_luminosity {
-                let luma = |c: [f64; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
-                let delta = luma([r, g, b]) - luma(out);
-                out = out.map(|c| (c + delta).clamp(0.0, 1.0));
+                // The luma the shift took away goes back into the channels that still have room; a
+                // channel at a bound passes its share to the others.
+                let weights = [0.299, 0.587, 0.114];
+                let luma = |c: [f64; 3]| c[0] * weights[0] + c[1] * weights[1] + c[2] * weights[2];
+                let target = luma([r, g, b]);
+                for _ in 0..4 {
+                    let missing = target - luma(out);
+                    if missing.abs() < 1e-4 { break; }
+                    let free: f64 = (0..3).filter(|i| if missing > 0.0 { out[*i] < 1.0 } else { out[*i] > 0.0 }).map(|i| weights[i]).sum();
+                    if free <= 0.0 { break; }
+                    let step = missing / free;
+                    for i in 0..3 { if (missing > 0.0 && out[i] < 1.0) || (missing < 0.0 && out[i] > 0.0) { out[i] = (out[i] + step).clamp(0.0, 1.0); } }
+                }
             }
             px[2] = (out[0] * 255.0).round() as u8; px[1] = (out[1] * 255.0).round() as u8; px[0] = (out[2] * 255.0).round() as u8;
         }

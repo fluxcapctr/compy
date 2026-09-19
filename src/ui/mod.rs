@@ -434,7 +434,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("liquify", &["<Control><Shift>x"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().blur_mode = 0; p.canvas.set_tool(Tool::Blur); })),
         ("toggle-extras", &["<Control>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.hide_extras = !d.hide_extras; } p.canvas.area.queue_draw(); })),
         ("toggle-panels", &[], |s| s.toggle_panels()),
-        ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.update_cursor(); p.canvas.area.queue_draw(); })),
+        ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.unpark_handles(); })),
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
         ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
         ("delete-layer", &[], |s| s.edit(|d| { d.delete_layer(); Ok(()) })),
@@ -958,6 +958,7 @@ impl App {
             match result {
                 Ok(()) => {
                     p.canvas.set_tool(Tool::Move);
+                    p.canvas.unpark_handles();
                     p.refresh();
                     p.canvas.notify(if has_selection { "Free Transform: drag the handles to move, scale or rotate; Return commits, Escape cancels." } else { "Drag the handles to move, scale or rotate the layer (Shift keeps the ratio, Alt scales from the center)." });
                 }
@@ -1032,7 +1033,7 @@ impl App {
             let Some(id) = id else { return };
             let (panel, area) = (p.panel.clone(), p.canvas.area.clone());
             let finished: Rc<dyn Fn()> = Rc::new(move || { panel.rebuild(); area.queue_draw(); });
-            effects::open(self.window.upcast_ref(), doc, id, finished);
+            match effects::open(self.window.upcast_ref(), doc, id, finished) { Ok(()) => {} Err(message) => p.canvas.notify(&message) }
             opened = true;
         });
         if !opened && self.notebook.current_page().is_some() { self.alert("Select a pixel layer first", "Layer effects go on image, shape and type layers, not folders or adjustments."); }

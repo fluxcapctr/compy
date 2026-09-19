@@ -43,8 +43,13 @@ pub struct Document {
     pub last_selection: Option<Selection>,
     /// Free Transform in progress: the floating layer holding the selected pixels, and the layer they came from.
     pub floating: Option<(Uuid, Uuid)>,
-    /// The last filter, for Fade: the layer, its pixels before, its pixels after, and the filter's name.
-    pub last_filter: Option<(Uuid, ImageSurface, ImageSurface, String)>,
+    /// The last filter, for Fade: the layer, its pixels before, its pixels after, the filter's name, and
+    /// the edit serial right after it (Fade is only offered while nothing else has happened since).
+    pub last_filter: Option<(Uuid, ImageSurface, ImageSurface, String, u64)>,
+    /// Counts every finished edit, undo and redo.
+    pub edit_serial: u64,
+    /// A Layer Style dialog previewing effects on a layer: the layer and the record it had on open.
+    pub effects_preview: Option<(Uuid, Option<serde_json::Value>)>,
     /// View > Show Grid: (spacing of the major lines, subdivisions per spacing), or None when hidden.
     pub grid: Option<(f64, u32)>,
 }
@@ -107,7 +112,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -176,6 +181,7 @@ impl Document {
     pub fn end_edit(&mut self) { self.finish_edit(false); }
 
     fn finish_edit(&mut self, merge: bool) {
+        self.edit_serial += 1;
         let state = self.state();
         self.history.end_with(state, merge, |held, current| {
             let renders: Vec<&render::State> = held.iter().map(|s| &s.render).collect();
@@ -195,8 +201,8 @@ impl Document {
     pub fn can_redo(&self) -> bool { self.history.can_redo() }
     pub fn undo_name(&self) -> Option<&str> { self.history.undo_name() }
     pub fn redo_name(&self) -> Option<&str> { self.history.redo_name() }
-    pub fn undo(&mut self) -> bool { match self.history.undo() { Some(state) => { self.apply(&state); true } None => false } }
-    pub fn redo(&mut self) -> bool { match self.history.redo() { Some(state) => { self.apply(&state); true } None => false } }
+    pub fn undo(&mut self) -> bool { match self.history.undo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
+    pub fn redo(&mut self) -> bool { match self.history.redo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
 
     /// Sets the selection as one undo step; nothing happens when it is unchanged.
     pub fn set_selection(&mut self, selection: Option<Selection>, name: &str) {
@@ -328,8 +334,8 @@ impl Document {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
         if kind == Kind::Fade {
             // The last filter's before and after, mixed; only while its result is still what the layer shows.
-            let Some((fid, before, after, _)) = &self.last_filter else { bail!("Nothing to fade: run a filter or adjustment first.") };
-            if *fid != id || after.to_raw_none() != image.to_raw_none() { bail!("Nothing to fade: the layer has changed since its last filter."); }
+            let Some((fid, before, after, _, serial)) = &self.last_filter else { bail!("Nothing to fade: run a filter or adjustment first.") };
+            if *fid != id || after.to_raw_none() != image.to_raw_none() || *serial != self.edit_serial { bail!("Nothing to fade: something else has happened since the last filter."); }
             let (w, h) = (image.width(), image.height());
             let keep = settings.normalized().fade;
             let b = crate::raster::with_bytes(before, |d, _| d.to_vec())?;
@@ -427,7 +433,8 @@ impl Document {
         self.renderer.set_preview(id, None);
         // Fade can blend this result back toward what was there, as long as the grid did not change.
         let before = self.renderer.image(id).cloned();
-        self.last_filter = match (placed.is_none(), before, kind) { (true, Some(b), k) if k != Kind::Fade => Some((id, b, result.clone(), kind.name().to_string())), _ => None };
+        let fade = match (placed.is_none(), before, kind) { (true, Some(b), k) if k != Kind::Fade => Some((id, b, result.clone(), kind.name().to_string())), _ => None };
+        self.last_filter = None;
         self.begin_edit(if kind == Kind::Fade { "Fade" } else { kind.name() });
         if let Some(placed) = placed {
             // The layer's mask, covering the old grid, is carried onto the new one with its edge tone beyond.
@@ -440,6 +447,8 @@ impl Document {
             self.renderer.set_image(id, result);
         }
         self.end_edit();
+        // Offered until the next edit of any kind.
+        self.last_filter = fade.map(|(id, b, a, name)| (id, b, a, name, self.edit_serial));
         Ok(())
     }
 
@@ -711,9 +720,11 @@ impl Document {
     pub fn commit_free_transform(&mut self) -> Result<()> {
         let Some((id, source)) = self.floating.take() else { return Ok(()) };
         if !self.has_layer(id) || !self.has_layer(source) { self.end_edit(); return Ok(()); }
-        let result = self.merge_floating(id, source);
-        self.end_edit();
-        result
+        match self.merge_floating(id, source) {
+            Ok(()) => { self.end_edit(); Ok(()) }
+            // A merge that cannot be done leaves everything as it was before Ctrl+T (`ProjectError.tooLarge`).
+            Err(error) => { self.abort_edit(); Err(error) }
+        }
     }
 
     /// The floating pixels drawn onto the layer they came from, on that layer's own grid, which grows to
@@ -729,11 +740,11 @@ impl Document {
         let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| to_raster.transform_point(x, y));
         let (minx, miny) = corners.iter().fold((f64::MAX, f64::MAX), |a, c| (a.0.min(c.0), a.1.min(c.1)));
         let (maxx, maxy) = corners.iter().fold((f64::MIN, f64::MIN), |a, c| (a.0.max(c.0), a.1.max(c.1)));
-        let (mut left, mut top) = ((-minx.floor()).max(0.0) as i32, (-miny.floor()).max(0.0) as i32);
-        let (mut right, mut bottom) = ((maxx.ceil() - rw as f64).max(0.0) as i32, (maxy.ceil() - rh as f64).max(0.0) as i32);
-        let (mut nw, mut nh) = (rw + left + right, rh + top + bottom);
-        if nw > 30_000 || nh > 30_000 || nw as i64 * nh as i64 > 100_000_000 { left = 0; top = 0; right = 0; bottom = 0; nw = rw; nh = rh; }
-        let _ = (right, bottom);
+        let (left, top) = ((-minx.floor()).max(0.0) as i32, (-miny.floor()).max(0.0) as i32);
+        let (right, bottom) = ((maxx.ceil() - rw as f64).max(0.0) as i32, (maxy.ceil() - rh as f64).max(0.0) as i32);
+        let (nw, nh) = (rw as i64 + left as i64 + right as i64, rh as i64 + top as i64 + bottom as i64);
+        if nw > 30_000 || nh > 30_000 || nw * nh > 100_000_000 { bail!("The transformed pixels would need a layer over 30,000 pixels on a side or 100 megapixels. Scale them down and try again."); }
+        let (nw, nh) = (nw as i32, nh as i32);
         let out = new_argb(nw, nh)?;
         {
             let cr = Context::new(&out)?;
@@ -747,16 +758,19 @@ impl Document {
             self.renderer.draw_layer_plain(float, &cr)?;
         }
         let mut t = src.transform;
+        let mut grown_mask = None;
         if (nw, nh) != (rw, rh) {
             let scale = (t.size.0 / rw as f64, t.size.1 / rh as f64);
             let center = to_doc.transform_point(nw as f64 / 2.0 - left as f64, nh as f64 / 2.0 - top as f64);
             t.size = crate::format::Size(nw as f64 * scale.0, nh as f64 * scale.1);
             t.origin = crate::format::Point(center.0 - t.size.0 / 2.0, center.1 - t.size.1 / 2.0);
-            if self.renderer.mask(source).is_some() && src.mask_placement.is_none() { self.renderer.set_mask_placement(source, Some(src.transform)); }
+            // A mask on the layer's own grid grows with it, white where the new pixels land (`FloatingMerge`).
+            if self.renderer.mask(source).is_some() && src.mask_placement.is_none() { grown_mask = self.grown_mask(source, &src.transform, &t, nw, nh)?; }
         }
         self.select_layer_pixels(float, Mode::Replace)?;
         self.renderer.set_layer_transform(source, t);
         self.renderer.set_image(source, out);
+        if let Some(mask) = grown_mask { self.renderer.set_mask(source, Some(mask)); }
         self.renderer.remove_layer(float);
         self.select_layer(Some(source));
         Ok(())
@@ -1058,10 +1072,37 @@ impl Document {
         self.renderer.layer(id).effects.as_ref().and_then(crate::effects::Effects::from_record)
     }
 
-    /// The Layer Style dialog's session: one open edit from here until `end_layer_style`, so every change
-    /// previews live and the whole session is one step (or nothing, on Cancel).
-    pub fn begin_layer_style(&mut self) { self.begin_edit("Layer Style"); }
-    pub fn end_layer_style(&mut self, keep: bool) { if keep { self.end_edit(); } else { self.abort_edit(); } }
+    /// The Layer Style dialog's session on one layer: changes preview straight on the renderer, outside
+    /// the history, and `end_layer_style` makes them one "Layer Style" step (or puts the original back).
+    /// One session at a time; a second call on the same layer is refused.
+    pub fn begin_layer_style(&mut self, id: Uuid) -> Result<()> {
+        if self.effects_preview.is_some() { bail!("A Layer Style window is already open."); }
+        let layer = self.renderer.layer(id);
+        if layer.is_group() || layer.adjustment.is_some() { bail!("Layer effects go on pixel layers."); }
+        self.effects_preview = Some((id, layer.effects.clone()));
+        Ok(())
+    }
+
+    /// Shows `effects` on the session's layer without touching the history.
+    pub fn preview_effects(&mut self, effects: Option<&crate::effects::Effects>) {
+        let Some((id, _)) = self.effects_preview else { return };
+        if !self.has_layer(id) { return; }
+        let record = effects.filter(|e| **e != crate::effects::Effects::default()).map(|e| e.to_record());
+        if self.renderer.layer(id).effects != record { self.renderer.set_effects(id, record); }
+    }
+
+    /// Ends the session: the original comes back, and with `keep` the previewed effects become one step.
+    pub fn end_layer_style(&mut self, keep: bool) {
+        let Some((id, original)) = self.effects_preview.take() else { return };
+        if !self.has_layer(id) { return; }
+        let shown = self.renderer.layer(id).effects.clone();
+        self.renderer.set_effects(id, original.clone());
+        if keep && shown != original {
+            self.begin_edit("Layer Style");
+            self.renderer.set_effects(id, shown);
+            self.end_edit();
+        }
+    }
 
     /// Sets (or with None clears) a layer's effects; consecutive changes merge into one "Layer Style" step.
     pub fn set_effects(&mut self, id: Uuid, effects: Option<&crate::effects::Effects>) -> Result<()> {
@@ -1295,6 +1336,7 @@ impl Document {
 
     /// The active layer's histogram inside the selection, for the Levels dialog.
     pub fn histogram(&self) -> Result<[[f64; 256]; 4]> {
+        if self.mask_target() { bail!("Levels reads the layer's pixels; target the layer rather than its mask."); }
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
         let coverage = self.active_coverage(id, &image)?;
         filters::histogram(&image, coverage.as_ref())
@@ -2202,8 +2244,12 @@ impl Document {
     pub fn save(&mut self, path: &std::path::Path) -> Result<()> {
         // A floating selection lands first, as the Mac resolves it before writing.
         if self.floating.is_some() { self.commit_free_transform()?; }
+        // Effects only being previewed are not written: the file holds what OK or Cancel would keep.
+        let previewed = match &self.effects_preview { Some((id, original)) if self.has_layer(*id) => { let shown = self.renderer.layer(*id).effects.clone(); self.renderer.set_effects(*id, original.clone()); Some((*id, shown)) } _ => None };
         let manifest = self.manifest();
-        crate::format::save(path, &manifest, self.renderer.images(), self.renderer.masks())?;
+        let written = crate::format::save(path, &manifest, self.renderer.images(), self.renderer.masks());
+        if let Some((id, shown)) = previewed { self.renderer.set_effects(id, shown); }
+        written?;
         self.history.mark_saved();
         Ok(())
     }
@@ -2211,6 +2257,7 @@ impl Document {
     /// Unsaved changes, counting a Free Transform or Layer Style still in progress (their pixels are on
     /// screen even though the step has not closed).
     pub fn is_modified(&self) -> bool { self.history.is_modified() || self.floating.is_some() || self.history.is_editing() }
+    pub fn layer_style_open(&self) -> bool { self.effects_preview.is_some() }
 
     fn unique_name(&self, prefix: &str) -> String {
         let names: std::collections::HashSet<&str> = self.renderer.layers().iter().map(|l| l.name.as_str()).collect();
@@ -2441,7 +2488,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None };
         self.copy_layers(&snapshot, ids, place)
     }
 

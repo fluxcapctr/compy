@@ -445,7 +445,7 @@ impl Renderer {
         let Some(effects) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) else { return Ok(None) };
         let Some(image) = self.images.get(&id) else { return Ok(None) };
         let mask_ptr = self.masks.get(&id).map(|m| m.to_raw_none() as usize).unwrap_or(0);
-        let key = format!("{:?}|{:?}|{:?}|{}|{}|{}", layer.transform, layer.mask_placement, layer.mask_enabled, image.to_raw_none() as usize, mask_ptr, layer.effects.as_ref().map(|e| e.to_string()).unwrap_or_default());
+        let key = format!("{:?}|{:?}|{:?}|{}|{}|{}x{}|{}", layer.transform, layer.mask_placement, layer.mask_enabled, image.to_raw_none() as usize, mask_ptr, self.width, self.height, layer.effects.as_ref().map(|e| e.to_string()).unwrap_or_default());
         if let Some(s) = self.styled.get(&id) { if s.key == key { return Ok(Some(StyledDraw { x: s.x as f64, y: s.y as f64, below: s.below.clone(), inside: s.inside.clone(), above: s.above.clone() })); } }
         let reach = effects.reach();
         let (bx0, by0, bx1, by1) = layer.transform.bounds();

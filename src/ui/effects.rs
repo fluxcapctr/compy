@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 type Apply = Rc<dyn Fn()>;
 
-pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>) {
+pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>) -> Result<(), String> {
     let original = doc.borrow().document.effects(id).unwrap_or_default();
     let state = Rc::new(RefCell::new(original.clone()));
-    // One open edit for the whole session: OK closes it as a single step, Cancel drops it entirely.
-    doc.borrow_mut().document.begin_layer_style();
+    // The session previews on the layer outside the history; OK makes it one step, Cancel puts it back.
+    doc.borrow_mut().document.begin_layer_style(id).map_err(|e| format!("{e:#}"))?;
     let ended = Rc::new(std::cell::Cell::new(false));
     let end: Rc<dyn Fn(bool)> = {
         let (doc, ended, finished) = (doc.clone(), ended.clone(), finished.clone());
@@ -24,7 +24,7 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
         let (doc, state, finished) = (doc.clone(), state.clone(), finished.clone());
         Rc::new(move || {
             let effects = state.borrow().clone();
-            if let Ok(mut d) = doc.try_borrow_mut() { if d.document.has_layer(id) { if let Err(e) = d.document.set_effects(id, Some(&effects)) { eprintln!("layer style: {e:#}"); } } }
+            if let Ok(mut d) = doc.try_borrow_mut() { d.document.preview_effects(Some(&effects)); }
             finished();
         })
     };
@@ -83,6 +83,7 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
     { let cancel = cancel.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gtk::gdk::Key::Escape { cancel.emit_clicked(); gtk::glib::Propagation::Stop } else { gtk::glib::Propagation::Proceed } }); }
     window.add_controller(keys);
     window.present();
+    Ok(())
 }
 
 fn enabled(e: &Effects, key: &str) -> bool {
