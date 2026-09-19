@@ -160,7 +160,13 @@ Refine Edges (a guided filter that pulls the mask onto the image's own edges), C
 178 MB model is fetched once, on request, into `~/.local/share/compositor/models/`; the ONNX Runtime
 library itself is downloaded when the app is built.
 
-**Import.** PNG, JPEG, TIFF, GIF, WebP, BMP and HEIC files, and pixels dragged out of other apps.
+**Import.** PNG, JPEG, TIFF, GIF, WebP, BMP and HEIC files, and pixels dragged out of other apps. Ctrl+V
+pastes whatever image the clipboard holds (pixels from any app, or image files copied in a file manager) as
+a new layer, or opens it as a document when none is open; Ctrl+C copies the active layer's selected pixels
+out.
+
+**Brush popover.** Right-click on the canvas with any brush tool for the tip picker and Size, Hardness,
+Opacity, Spacing and Jitter sliders at the pointer.
 
 **Generative Fill and Expand.** Edit > Generative Fill (Ctrl+Shift+G) with a selection opens a panel: a
 prompt, a fal.ai model, how many variations, Generate. The selection plus a margin of half its size (at
@@ -199,8 +205,8 @@ is what lets the reduced copies be cropped instead of rebuilt.
 One honest gap against the Mac app: Content-Aware Fill works within the layer's own pixel grid and does not
 yet extend the layer to cover a selection past its edge.
 
-The canvas keeps its last composited frame and draws only the overlays (cursor, marching ants, transform
-box) on top of it, so moving the mouse costs nothing; the frame is rebuilt when the view changes (about
+The canvas keeps its last composited frame as a GPU texture under a transparent overlay widget, so moving
+the mouse, the marching ants and the brush cursor redraw only the overlay (no re-upload of the frame); the frame is rebuilt when the view changes (about
 35 ms for the 50-megapixel test document at fit, 85 ms at 100%) and only in the touched region while a
 stroke runs (1 to 5 ms per pointer step). Every offscreen buffer is sized to the window, not the document,
 and masks draw from the same sharp halvings as pixels. `COMPOSITOR_TRACE=1` prints what each frame did

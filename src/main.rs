@@ -46,6 +46,7 @@ fn main() {
                     "--pick-brush" => script.pick_brush = true,
                     "--rulers" => script.rulers = true,
                     "--genfill" => script.genfill = true,
+                    "--brush-popover" => script.brush_popover = true,
                     "--brush" => script.brush = text(),
                     "--window" => script.window = text().and_then(|v| { let (w, h) = v.split_once('x')?; Some((w.parse().ok()?, h.parse().ok()?)) }),
                     "--blur-mode" => script.blur_mode = text().and_then(|m| m.parse().ok()),

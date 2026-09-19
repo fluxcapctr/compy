@@ -575,6 +575,33 @@ impl Document {
 
     // MARK: Eyedropper
 
+    /// The active layer's pixels inside the selection (or all of them), as PNG bytes, with their place on the
+    /// document: what Copy puts on the clipboard.
+    pub fn copy_layer_pixels(&mut self) -> Result<Option<(Vec<u8>, (i32, i32, i32, i32))>> {
+        let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
+        let transform = self.renderer.layer(id).transform;
+        let (bx0, by0, bx1, by1) = transform.bounds();
+        let (mut x0, mut y0, mut x1, mut y1) = (bx0.floor().max(0.0) as i32, by0.floor().max(0.0) as i32, (bx1.ceil() as i32).min(self.width()), (by1.ceil() as i32).min(self.height()));
+        if let Some(sel) = &self.selection {
+            let Some(b) = sel.bounds else { return Ok(None) };
+            x0 = x0.max(b.0 as i32); y0 = y0.max(b.1 as i32); x1 = x1.min(b.2 as i32); y1 = y1.min(b.3 as i32);
+        }
+        if x1 <= x0 || y1 <= y0 { return Ok(None); }
+        let out = new_argb(x1 - x0, y1 - y0)?;
+        {
+            let cr = Context::new(&out)?;
+            cr.translate(-(x0 as f64), -(y0 as f64));
+            if let Some(sel) = &self.selection {
+                cr.push_group();
+                self.renderer.draw_layer_plain(id, &cr)?;
+                cr.pop_group_to_source()?;
+                cr.mask_surface(&sel.mask, 0.0, 0.0)?;
+            } else { self.renderer.draw_layer_plain(id, &cr)?; }
+        }
+        let _ = image;
+        Ok(Some((crate::png_io::png_bytes(&out)?, (x0, y0, x1 - x0, y1 - y0))))
+    }
+
     /// The color at a document pixel as the canvas shows it (every visible layer) or on the active layer's
     /// own pixels; None outside the canvas or over transparency (`sampleCompositeColor`).
     pub fn sample_color(&mut self, x: f64, y: f64, all_layers: bool) -> Result<Option<[f64; 3]>> {

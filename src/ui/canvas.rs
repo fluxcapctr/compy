@@ -39,6 +39,7 @@ pub struct Canvas {
     transform_drag: RefCell<Option<(Drag, Vec<(uuid::Uuid, crate::format::Transform)>)>>,
     /// The transform drag is moving selected pixels rather than a layer.
     pixel_moving: Cell<bool>,
+    picture: gtk::Picture,
     /// A gradient, shape or crop drag: what it started on and where (document pixels).
     tool_drag: Cell<Option<ToolDrag>>,
     /// The last composited frame, kept while nothing it shows has changed.
@@ -88,6 +89,11 @@ impl Drop for Canvas {
 impl Canvas {
     pub fn new(doc: DocRef, space_held: Rc<Cell<bool>>) -> Rc<Canvas> {
         let area = gtk::DrawingArea::builder().hexpand(true).vexpand(true).focusable(true).build();
+        // The composited frame lives in a texture GTK keeps on the GPU; the drawing area above it only
+        // paints overlays, so a cursor move or an ants step costs a few lines, not a 33 MB upload.
+        let picture = gtk::Picture::builder().hexpand(true).vexpand(true).can_shrink(true).content_fit(gtk::ContentFit::Fill).build();
+        let stage = gtk::Overlay::builder().child(&picture).build();
+        stage.add_overlay(&area);
         let zoom_label = gtk::Label::builder().label("100%").width_chars(7).xalign(1.0).css_classes(["numeric"]).build();
         let size_label = gtk::Label::builder().css_classes(["dim-label"]).build();
         let message = gtk::Label::builder().css_classes(["dim-label"]).hexpand(true).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build();
@@ -106,7 +112,7 @@ impl Canvas {
         let options_scroller = gtk::ScrolledWindow::builder().child(&options.widget).hscrollbar_policy(gtk::PolicyType::External).vscrollbar_policy(gtk::PolicyType::Never).propagate_natural_height(true).build();
         column.append(&options_scroller);
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        column.append(&area);
+        column.append(&stage);
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&status);
         let widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -117,7 +123,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), tool_drag: Cell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -189,11 +195,19 @@ impl Canvas {
                     Err(error) => { eprintln!("canvas draw failed: {error:#}"); "failed" }
                 };
                 let t = std::time::Instant::now();
-                if let Some(cache) = this.cache.borrow().as_ref() {
-                    cr.set_source_surface(&cache.surface, 0.0, 0.0).ok();
-                    cr.paint().ok();
+                // A changed frame becomes a new texture for the picture underneath; an unchanged one is left
+                // to the GPU copy GTK already holds.
+                if rendered != "cached" {
+                    if let Some(cache) = this.cache.borrow().as_ref() {
+                        let (cw, ch) = (cache.surface.width(), cache.surface.height());
+                        let stride = cache.surface.stride() as usize;
+                        if let Ok(bytes) = crate::raster::with_bytes(&cache.surface, |d, _| glib::Bytes::from(&d[..stride * ch as usize])) {
+                            let texture = gdk::MemoryTexture::new(cw, ch, gdk::MemoryFormat::B8g8r8a8Premultiplied, &bytes, stride);
+                            this.picture.set_paintable(Some(&texture));
+                        }
+                    }
                 }
-                if trace { eprintln!("  paint {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); }
+                if trace { eprintln!("  texture {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); }
                 if let Err(error) = draw_overlays(&mut d, cr, w as f64, h as f64, pointer.get(), draft.as_ref(), offset) { eprintln!("canvas overlay failed: {error:#}"); }
                 if trace { eprintln!("frame {:.1} ms at {} ({rendered})", start.elapsed().as_secs_f64() * 1000.0, zoom_text(d.viewport.zoom())); }
             });
@@ -270,6 +284,17 @@ impl Canvas {
         }
         area.add_controller(pinch);
 
+        let context = gtk::GestureClick::new();
+        context.set_button(3);
+        {
+            let this = self.clone();
+            context.connect_pressed(move |g, _, x, y| {
+                if !this.doc.borrow().tool.is_brush() { return; }
+                g.set_state(gtk::EventSequenceState::Claimed);
+                this.brush_popover(x, y);
+            });
+        }
+        area.add_controller(context);
         let click = gtk::GestureClick::new();
         click.set_button(1);
         {
@@ -1007,6 +1032,44 @@ impl Canvas {
         let end = std::time::Instant::now();
         self.finish_stroke();
         eprintln!("stroke finish {:.1} ms", end.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// Right-click with a brush: the tip and its settings in a popover at the pointer.
+    pub fn brush_popover(self: &Rc<Self>, x: f64, y: f64) {
+        let popover = gtk::Popover::builder().has_arrow(true).build();
+        popover.set_parent(&self.area);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
+        let head = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+        let this = self.clone();
+        let picker = super::brushes::BrushPicker::new(self.doc.clone(), Rc::new(move || this.sync_brush_options()));
+        head.append(&picker.widget);
+        head.append(&gtk::Label::builder().label("Brush").css_classes(["heading"]).build());
+        content.append(&head);
+        let grid = gtk::Grid::builder().row_spacing(4).column_spacing(8).build();
+        let settings = self.doc.borrow().brush.clone();
+        let rows: [(&str, f64, f64, f64, fn(&mut crate::brush::BrushSettings, f64)); 5] = [
+            ("Size", 1.0, 2000.0, settings.diameter, |b, v| b.diameter = v),
+            ("Hardness", 0.0, 100.0, settings.hardness * 100.0, |b, v| b.hardness = v / 100.0),
+            ("Opacity", 1.0, 100.0, settings.opacity * 100.0, |b, v| b.opacity = v / 100.0),
+            ("Spacing", 0.0, 300.0, settings.spacing.map_or(0.0, |s| s * 100.0), |b, v| b.spacing = if v <= 0.0 { None } else { Some(v / 100.0) }),
+            ("Jitter", 0.0, 100.0, settings.angle_jitter * 100.0, |b, v| b.angle_jitter = v / 100.0),
+        ];
+        for (i, (label, lo, hi, value, set)) in rows.into_iter().enumerate() {
+            grid.attach(&gtk::Label::builder().label(label).xalign(0.0).build(), 0, i as i32, 1, 1);
+            let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, lo, hi, 1.0);
+            scale.set_value(value);
+            scale.set_size_request(180, -1);
+            scale.set_draw_value(true);
+            scale.set_value_pos(gtk::PositionType::Right);
+            let this = self.clone();
+            scale.connect_value_changed(move |s| { { let mut d = this.doc.borrow_mut(); set(&mut d.brush, s.value()); } this.sync_brush_options(); this.area.queue_draw(); });
+            grid.attach(&scale, 1, i as i32, 1, 1);
+        }
+        content.append(&grid);
+        popover.set_child(Some(&content));
+        popover.connect_closed(move |p| { let p = p.clone(); glib::idle_add_local_once(move || p.unparent()); });
+        popover.popup();
     }
 
     /// Brush keys: [ and ] size, { and } hardness, digits opacity. True when the key was one of those.

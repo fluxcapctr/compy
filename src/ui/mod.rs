@@ -184,6 +184,8 @@ pub struct Script {
     pub rulers: bool,
     /// Opens the Generative Fill panel (after the wand selection) for a screenshot.
     pub genfill: bool,
+    /// Opens the brush popover at the canvas center for a screenshot.
+    pub brush_popover: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -197,7 +199,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -209,6 +211,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.rulers { p.canvas.doc().borrow_mut().rulers = true; p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
+                    if script.brush_popover { let (w, h) = (p.canvas.area.width() as f64, p.canvas.area.height() as f64); p.canvas.brush_popover(w / 2.0, h / 2.0); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
                     if let Some(size) = script.brush_size { p.canvas.doc().borrow_mut().brush.diameter = size; p.canvas.sync_brush_options(); }
                     if let Some(name) = &script.brush { let preset = brushes::presets().into_iter().find(|b| b.name.eq_ignore_ascii_case(name)); let mut d = p.canvas.doc().borrow_mut(); match preset { Some(pr) => { eprintln!("script: brush {} ({}x{}, spacing {})", pr.name, pr.width, pr.height, pr.spacing); d.brush.spacing = Some(pr.spacing / 100.0); d.brush.angle_jitter = pr.jitter; d.brush.preset = Some(pr); } None => eprintln!("script: no brush named {name}") } }
@@ -307,7 +310,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 62] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 64] = [
+        ("copy", &["<Control>c"], |s| s.copy_layer()),
+        ("paste", &["<Control>v"], |s| s.paste()),
         ("generative-fill", &["<Control><Shift>g"], |s| s.open_genfill(false)),
         ("generative-expand", &[], |s| s.generative_expand()),
         ("toggle-rulers", &["<Control>r"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.rulers = !d.rulers; } p.canvas.area.queue_draw(); })),
@@ -470,6 +475,8 @@ fn menu() -> gio::Menu {
     let edit = gio::Menu::new();
     edit.append(Some("Undo"), Some("win.undo"));
     edit.append(Some("Redo"), Some("win.redo"));
+    edit.append(Some("Copy"), Some("win.copy"));
+    edit.append(Some("Paste as New Layer"), Some("win.paste"));
     edit.append(Some("Copy Merged"), Some("win.copy-merged"));
     edit.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
     edit.append(Some("Fill with Background"), Some("win.fill-background"));
@@ -771,6 +778,44 @@ impl App {
                 Some(Ok(notes)) if !notes.is_empty() => state.alert("Exported with changes", &notes.join("\n")),
                 Some(Err(error)) => state.alert("Could not export", &format!("{error:#}")),
                 _ => {}
+            }
+        });
+    }
+
+    /// Ctrl+C: the active layer's selected pixels to the clipboard as an image.
+    fn copy_layer(&self) {
+        let mut result: Result<Option<(Vec<u8>, (i32, i32, i32, i32))>> = Ok(None);
+        self.with_current(|p| result = p.canvas.doc().borrow_mut().document.copy_layer_pixels());
+        match result {
+            Ok(Some((bytes, _))) => match gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
+                Ok(texture) => self.window.clipboard().set_texture(&texture),
+                Err(error) => self.alert("Could not copy", &format!("{error}")),
+            },
+            Ok(None) => {}
+            Err(error) => self.alert("Could not copy", &format!("{error:#}")),
+        }
+    }
+
+    /// Ctrl+V: whatever image the clipboard holds (pixels from any app, or image files) as a new layer.
+    fn paste(self: &Rc<Self>) {
+        let clipboard = self.window.clipboard();
+        let state = self.clone();
+        clipboard.read_texture_async(gio::Cancellable::NONE, move |result| {
+            match result {
+                Ok(Some(texture)) => {
+                    let bytes = texture.save_to_png_bytes();
+                    if state.notebook.current_page().is_some() { state.edit(|d| d.import_image_bytes(&bytes, "Pasted").map(|_| ())); }
+                    else { match Document::open_image_bytes(&bytes) { Ok(document) => state.add_page(Doc::from(document, "Pasted")), Err(e) => state.alert("Could not paste", &format!("{e:#}")) } }
+                }
+                _ => {
+                    // Not pixels: perhaps files copied from a file manager.
+                    let state = state.clone();
+                    state.window.clipboard().read_value_async(gdk::FileList::static_type(), glib::Priority::DEFAULT, gio::Cancellable::NONE, move |result| {
+                        let files = result.ok().and_then(|v| v.get::<gdk::FileList>().ok()).map(|l| l.files()).unwrap_or_default();
+                        if files.is_empty() { state.alert("Nothing to paste", "The clipboard holds no image or image files."); return; }
+                        for file in files { if let Some(path) = file.path() { if is_openable(&path) && state.notebook.current_page().is_none() { state.open_path(&path); } else { state.edit(|d| d.import_image(&path).map(|_| ())); } } }
+                    });
+                }
             }
         });
     }
