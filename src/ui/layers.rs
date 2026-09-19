@@ -78,18 +78,7 @@ impl LayersPanel {
             context.connect_pressed(move |g, _, x, y| {
                 if list_ref.row_at_y(y as i32).is_some() { return; }
                 g.set_state(gtk::EventSequenceState::Claimed);
-                let menu = gtk::gio::Menu::new();
-                menu.append(Some("New Layer"), Some("win.new-layer"));
-                menu.append(Some("New Folder"), Some("win.new-folder"));
-                menu.append(Some("Paste as New Layer"), Some("win.paste"));
-                menu.append(Some("Import Image…"), Some("win.import"));
-                menu.append(Some("Stamp Visible"), Some("win.stamp-visible"));
-                menu.append(Some("Select All Layers"), Some("win.select-all-layers"));
-                let popover = gtk::PopoverMenu::from_model(Some(&menu));
-                popover.set_parent(&list_ref);
-                popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                popover.connect_closed(move |p| { let p = p.clone(); gtk::glib::idle_add_local_once(move || p.unparent()); });
-                popover.popup();
+                background_menu(&list_ref, x, y);
             });
             list.add_controller(context);
         }
@@ -124,6 +113,8 @@ impl LayersPanel {
     }
 
     pub fn rebuild(&self) { self.inner.rebuild(); }
+    /// The empty-space menu, for a script (opened below the rows).
+    pub fn background_menu(&self) { let h = self.inner.list.height() as f64; background_menu(&self.inner.list, 40.0, h.max(60.0) - 10.0); }
     pub fn set_on_select(&self, f: Rc<dyn Fn()>) { *self.inner.on_select.borrow_mut() = Some(f); }
 }
 
@@ -531,4 +522,24 @@ fn zone(group: bool, y: f64, height: f64) -> &'static str {
     let frac = if height > 0.0 { y / height } else { 0.5 };
     if group { if frac < 0.25 { "drop-above" } else if frac > 0.75 { "drop-below" } else { "drop-into" } }
     else if frac < 0.5 { "drop-above" } else { "drop-below" }
+}
+
+/// The menu for the empty part of the layers panel. The popover hangs off the panel's own box rather than
+/// the list, which does not size popover children.
+pub fn background_menu(list: &gtk::ListBox, x: f64, y: f64) {
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("New Layer"), Some("win.new-layer"));
+    menu.append(Some("New Folder"), Some("win.new-folder"));
+    menu.append(Some("Paste as New Layer"), Some("win.paste"));
+    menu.append(Some("Import Image…"), Some("win.import"));
+    menu.append(Some("Stamp Visible"), Some("win.stamp-visible"));
+    menu.append(Some("Select All Layers"), Some("win.select-all-layers"));
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    let Some(parent) = list.parent() else { return };
+    let (px, py) = list.translate_coordinates(&parent, x, y).unwrap_or((x, y));
+    popover.set_parent(&parent);
+    popover.set_has_arrow(false);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px as i32, py as i32, 1, 1)));
+    popover.connect_closed(move |p| { let p = p.clone(); gtk::glib::idle_add_local_once(move || p.unparent()); });
+    popover.popup();
 }
