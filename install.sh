@@ -26,7 +26,7 @@ StartupNotify=true
 StartupWMClass=co.ericstevens.compositor
 Categories=Graphics;2DGraphics;RasterGraphics;Photography;
 Keywords=image;photo;layers;compositor;photoshop;psd;
-MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/tiff;image/gif;image/webp;image/bmp;
+MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/tiff;image/gif;image/webp;image/bmp;image/heic;image/heif;
 DESKTOP
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true

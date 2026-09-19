@@ -127,6 +127,46 @@ fn draw(tool: Tool, cr: &cairo::Context) {
             cr.close_path();
             cr.stroke().ok();
         }
+        Tool::Crop => {
+            // Two overlapping right angles, as crop.
+            cr.move_to(6.0, 2.0); cr.line_to(6.0, 14.0); cr.line_to(18.0, 14.0);
+            cr.move_to(2.0, 6.0); cr.line_to(14.0, 6.0); cr.line_to(14.0, 18.0);
+            cr.stroke().ok();
+        }
+        Tool::Eyedropper => {
+            // A pipette: a slanted tube with a bulb at the top.
+            cr.move_to(4.0, 16.0); cr.line_to(11.0, 9.0);
+            cr.stroke().ok();
+            cr.move_to(9.5, 7.5); cr.line_to(12.5, 10.5);
+            cr.stroke().ok();
+            cr.arc(14.0, 6.0, 2.6, 0.0, TAU);
+            cr.stroke().ok();
+            cr.move_to(3.0, 17.0); cr.line_to(4.5, 15.5);
+            cr.stroke().ok();
+        }
+        Tool::Gradient => {
+            // A square fading from a hatched side to an open one.
+            cr.rectangle(3.0, 4.0, 14.0, 12.0);
+            cr.stroke().ok();
+            for i in 0..4 { let x = 5.0 + i as f64 * 1.8; cr.move_to(x, 6.0); cr.line_to(x, 14.0); }
+            cr.stroke().ok();
+            cr.set_line_width(0.8);
+            for i in 0..3 { let x = 12.4 + i as f64 * 1.4; cr.move_to(x, 6.0); cr.line_to(x, 14.0); }
+            cr.stroke().ok();
+        }
+        Tool::Shape => {
+            // A rounded square behind a circle.
+            let r = 2.5;
+            cr.new_sub_path();
+            cr.arc(13.0 - r, 3.0 + r, r, -PI / 2.0, 0.0);
+            cr.arc(13.0 - r, 13.0 - r, r, 0.0, PI / 2.0);
+            cr.arc(3.0 + r, 13.0 - r, r, PI / 2.0, PI);
+            cr.arc(3.0 + r, 3.0 + r, r, PI, 3.0 * PI / 2.0);
+            cr.close_path();
+            cr.stroke().ok();
+            cr.arc(13.0, 13.0, 4.5, 0.0, TAU);
+            cr.stroke().ok();
+        }
         Tool::Hand => {
             // A raised hand: palm, four fingers and the thumb.
             cr.move_to(6.0, 17.5);

@@ -179,6 +179,18 @@ impl Renderer {
     pub fn set_image(&mut self, id: Uuid, surface: ImageSurface) { self.touch();
         self.images.insert(id, surface);
         self.ensure_image_record(id);
+        // Pixels edited any other way stop being the shape the layer was drawn as.
+        let i = self.index[&id];
+        self.layers[i].shape = None;
+        self.invalidate(id);
+    }
+
+    /// A shape layer's raster, drawn again by its style (kept on the record).
+    pub fn set_shape_image(&mut self, id: Uuid, surface: ImageSurface, style: serde_json::Value) { self.touch();
+        self.images.insert(id, surface);
+        self.ensure_image_record(id);
+        let i = self.index[&id];
+        self.layers[i].shape = Some(style);
         self.invalidate(id);
     }
 
@@ -457,6 +469,13 @@ impl Renderer {
     }
 
     /// Swaps two records in the array (which orders siblings bottom to top).
+    /// The whole layer array in a new order (the same records); pixels and masks stay by id.
+    pub fn replace_layers(&mut self, layers: Vec<Layer>) { self.touch();
+        self.layers = layers;
+        self.reindex();
+        self.placed.clear();
+    }
+
     pub fn swap_layers(&mut self, a: usize, b: usize) { self.touch();
         if a < self.layers.len() && b < self.layers.len() { self.layers.swap(a, b); self.reindex(); }
     }
@@ -883,7 +902,7 @@ impl Renderer {
 
     /// What a mask shows beyond its pixels once placed apart from its layer: white or black, whichever most
     /// of its edge is. The reference reads a 96-pixel thumbnail's border; this averages the same band at full size.
-    fn mask_background(&mut self, id: Uuid) -> Result<u8> {
+    pub fn mask_background(&mut self, id: Uuid) -> Result<u8> {
         let mask = self.masks.get_mut(&id).unwrap();
         let (w, h) = (mask.width() as usize, mask.height() as usize);
         let band = w.max(h).div_ceil(96);

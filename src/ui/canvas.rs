@@ -30,13 +30,17 @@ pub struct Canvas {
     pointer: Rc<Cell<(f64, f64)>>,
     dragging: Rc<Cell<bool>>,
     rail: Rc<ToolRail>,
-    options: OptionsBar,
+    pub options: OptionsBar,
     ants: Cell<Option<glib::SourceId>>,
     painting: Cell<bool>,
     stroke_start: Cell<(f64, f64)>,
     refresh: RefCell<Option<Rc<dyn Fn()>>>,
     /// A transform drag in progress: the drag, the layers it moves and their transforms when it began.
     transform_drag: RefCell<Option<(Drag, Vec<(uuid::Uuid, crate::format::Transform)>)>>,
+    /// The transform drag is moving selected pixels rather than a layer.
+    pixel_moving: Cell<bool>,
+    /// A gradient, shape or crop drag: what it started on and where (document pixels).
+    tool_drag: Cell<Option<ToolDrag>>,
     /// The last composited frame, kept while nothing it shows has changed.
     cache: RefCell<Option<FrameCache>>,
     /// A marquee or lasso being drawn.
@@ -67,6 +71,15 @@ pub struct Draft {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind { Rectangle, Ellipse, Freehand, Polygonal }
+
+/// What a Gradient, Shape or Crop drag is doing, from `start` (document pixels).
+#[derive(Clone, Copy, PartialEq)]
+enum ToolDrag {
+    Gradient { start: (f64, f64) },
+    Shape { anchor: (f64, f64) },
+    /// Creating a frame, moving it, or dragging one of its handles; `original` is the frame at the press.
+    Crop { start: (f64, f64), original: Option<(f64, f64, f64, f64)>, mode: DragMode },
+}
 
 impl Drop for Canvas {
     fn drop(&mut self) { if let Some(id) = self.ants.take() { id.remove(); } }
@@ -102,7 +115,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), tool_drag: Cell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -293,6 +306,8 @@ impl Canvas {
                         this.notify("Clone source set. Paint to copy from it.");
                         this.area.queue_draw();
                     }
+                    Tool::Eyedropper => this.sample_at(x, y, state.contains(gdk::ModifierType::ALT_MASK)),
+                    Tool::Brush if state.contains(gdk::ModifierType::ALT_MASK) => this.sample_at(x, y, false),
                     Tool::Wand => {
                         let mode = selection_mode(state, this.doc.borrow().mode);
                         this.wand_view(x, y, mode);
@@ -332,6 +347,11 @@ impl Canvas {
                         return;
                     }
                     if button == 1 && tool == Tool::Move { if this.begin_transform((x, y), state) { this.stroke_start.set((x, y)); return; } }
+                    if button == 1 && matches!(tool, Tool::Gradient | Tool::Shape | Tool::Crop) {
+                        this.stroke_start.set((x, y));
+                        this.begin_tool_drag((x, y), state);
+                        return;
+                    }
                     if button == 1 && (tool == Tool::Marquee || (tool == Tool::Lasso && !this.doc.borrow().lasso_polygonal)) {
                         this.stroke_start.set((x, y));
                         this.begin_draft((x, y), state);
@@ -359,6 +379,11 @@ impl Canvas {
                         this.update_draft((sx + dx, sy + dy), state);
                         return;
                     }
+                    if this.tool_drag.get().is_some() {
+                        let (sx, sy) = this.stroke_start.get();
+                        this.update_tool_drag((sx + dx, sy + dy), state);
+                        return;
+                    }
                     if !this.dragging.get() { return; }
                     let (lx, ly) = last.get();
                     this.doc.borrow_mut().viewport.translate(dx - lx, dy - ly);
@@ -370,6 +395,7 @@ impl Canvas {
                 if this.painting.get() { this.finish_stroke(); }
                 if this.transform_drag.borrow().is_some() { this.finish_transform(); }
                 if this.outline_move.get().is_some() { this.finish_outline_move(); }
+                if this.tool_drag.get().is_some() { this.finish_tool_drag(); }
                 else if this.draft.borrow().as_ref().is_some_and(|d| d.kind != DraftKind::Polygonal) { this.finish_draft(); }
                 this.dragging.set(false);
                 this.update_cursor();
@@ -379,6 +405,7 @@ impl Canvas {
     }
 
     fn tool_changed(&self) {
+        { let mut d = self.doc.borrow_mut(); d.crop = None; d.gradient_line = None; d.shape_draft = None; if d.tool != Tool::Gradient { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } } }
         let tool = self.doc.borrow().tool;
         *self.draft.borrow_mut() = None;
         self.options.update(tool);
@@ -397,6 +424,7 @@ impl Canvas {
             let d = self.doc.borrow();
             match d.tool {
                 Tool::Hand => "grab", Tool::Zoom => "zoom-in", Tool::Wand => "crosshair", Tool::Marquee | Tool::Lasso => "crosshair",
+                Tool::Crop | Tool::Gradient | Tool::Shape | Tool::Eyedropper => "crosshair",
                 t if t.is_brush() => "none",
                 Tool::Move => match self.geometry(&d).and_then(|g| g.hit(self.pointer.get())) {
                     Some(DragMode::Rotate) => "alias",
@@ -412,11 +440,12 @@ impl Canvas {
     /// The transform box of the active layer on screen, when the Move tool would show one.
     fn geometry(&self, d: &super::Doc) -> Option<Geometry> {
         let id = d.document.active?;
+        let size = d.size();
+        let vp = d.viewport;
+        if d.document.transforms_as_group() { return d.document.group_box().map(|b| Geometry::new(&b, |p| vp.view_point(p, size))); }
         let layer = d.document.renderer.layer(id);
         if layer.is_group() || !d.document.renderer.has_image(id) { return None; }
         if !crate::format::visible_layers(d.document.renderer.layers()).contains(&id) { return None; }
-        let size = d.size();
-        let vp = d.viewport;
         Some(Geometry::new(&layer.transform, |p| vp.view_point(p, size)))
     }
 
@@ -434,6 +463,24 @@ impl Canvas {
             drop(d);
             if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
             self.sync_inspector();
+            self.area.queue_draw();
+            return true;
+        }
+        if tool == Tool::Crop && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Escape) {
+            if key == gdk::Key::Escape { self.doc.borrow_mut().crop = None; } else { self.apply_crop(); }
+            self.area.queue_draw();
+            return true;
+        }
+        if self.draft.borrow().is_none() && matches!(key, gdk::Key::Delete | gdk::Key::BackSpace | gdk::Key::KP_Delete) && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+            // Delete clears the selection when there is one; otherwise the targeted mask, or the layer, goes.
+            let result = {
+                let mut d = self.doc.borrow_mut();
+                if d.document.selection.as_ref().is_some_and(|s| !s.is_empty()) { let white = !d.mask_paint_white; d.document.clear_selection(white) }
+                else if d.document.mask_target() { d.document.delete_mask(); Ok(()) }
+                else { d.document.delete_layer(); Ok(()) }
+            };
+            if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
             self.area.queue_draw();
             return true;
         }
@@ -463,6 +510,15 @@ impl Canvas {
         if d.document.stroke_active() { return false; }
         let size = d.size();
         let point = d.viewport.document_point(view, size);
+        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+        // Ctrl-drag inside the selection moves its pixels (Alt as well copies them).
+        if ctrl && d.document.selection.as_ref().is_some_and(|s| !s.is_empty() && s.contains(point.0.floor(), point.1.floor())) && d.document.active_image().is_some() && !d.document.mask_target() {
+            match d.document.begin_pixel_move(state.contains(gdk::ModifierType::ALT_MASK)) {
+                Ok(true) => { *self.transform_drag.borrow_mut() = Some((Drag { original: d.document.renderer.layer(d.document.active.unwrap()).transform, start: point, mode: DragMode::Move }, Vec::new())); self.pixel_moving.set(true); drop(d); self.area.set_cursor_from_name(Some("move")); return true; }
+                Ok(false) => {}
+                Err(error) => { drop(d); self.notify(&format!("{error:#}")); return false; }
+            }
+        }
         let mut mode = self.geometry(&d).and_then(|g| g.hit(view));
         let mut target = d.document.active;
         if mode.is_none() {
@@ -475,18 +531,18 @@ impl Canvas {
             mode = Some(DragMode::Move);
         }
         let (Some(mode), Some(id)) = (mode, target) else { return false };
-        if d.document.active != Some(id) { d.document.active = Some(id); d.document.set_mask_target(false); }
+        if d.document.active != Some(id) && !d.document.selected.contains(&id) { d.document.select_layer(Some(id)); }
+        else if d.document.active != Some(id) { d.document.active = Some(id); d.document.set_mask_target(false); }
         let members = d.document.transform_members(id);
         if members.is_empty() { return false; }
         let originals: Vec<(uuid::Uuid, crate::format::Transform)> = members.iter().map(|m| (*m, d.document.renderer.layer(*m).transform)).collect();
-        let original = if d.document.renderer.layer(id).is_group() {
-            // A folder drags as one upright box around its contents; only moving is offered for it.
-            let boxes: Vec<_> = originals.iter().map(|(_, t)| t.bounds()).collect();
-            let (x0, y0) = (boxes.iter().map(|b| b.0).fold(f64::MAX, f64::min), boxes.iter().map(|b| b.1).fold(f64::MAX, f64::min));
-            let (x1, y1) = (boxes.iter().map(|b| b.2).fold(f64::MIN, f64::max), boxes.iter().map(|b| b.3).fold(f64::MIN, f64::max));
-            crate::format::Transform { origin: crate::format::Point(x0, y0), size: crate::format::Size((x1 - x0).max(1.0), (y1 - y0).max(1.0)), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() }
-        } else { originals[0].1 };
-        let mode = if d.document.renderer.layer(id).is_group() { DragMode::Move } else { mode };
+        // Several layers, or a folder, drag as one upright box around their contents.
+        let grouped = d.document.transforms_as_group();
+        let original = if grouped { d.document.group_box().unwrap_or(originals[0].1) } else { originals[0].1 };
+        // Ctrl on a corner handle of one pixel layer starts a free distortion.
+        if let (true, false, DragMode::Resize(i)) = (ctrl, grouped, mode) {
+            if i % 2 == 0 { d.distort = Some(crate::distort::corners(&original)); }
+        }
         *self.transform_drag.borrow_mut() = Some((Drag { original, start: point, mode }, originals));
         drop(d);
         if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
@@ -501,6 +557,30 @@ impl Canvas {
         let point = d.viewport.document_point(view, size);
         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
         let alt = state.contains(gdk::ModifierType::ALT_MASK);
+        if self.pixel_moving.get() {
+            let (mut dx, mut dy) = (point.0 - drag.start.0, point.1 - drag.start.1);
+            if shift { if dx.abs() >= dy.abs() { dy = 0.0; } else { dx = 0.0; } }
+            let result = d.document.move_pixels(dx, dy);
+            drop(d);
+            if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            self.area.queue_draw();
+            return;
+        }
+        if let (Some(mut corners), DragMode::Resize(i)) = (d.distort, drag.mode) {
+            // The dragged corner follows the pointer; Shift keeps it on one axis. A twisted shape is ignored.
+            let index = i / 2;
+            let start_corner = crate::distort::corners(&drag.original)[index];
+            let (mut dx, mut dy) = (point.0 - drag.start.0, point.1 - drag.start.1);
+            if shift { if dx.abs() >= dy.abs() { dy = 0.0; } else { dx = 0.0; } }
+            corners[index] = ((start_corner.0 + dx).round(), (start_corner.1 + dy).round());
+            if crate::distort::is_usable(&corners) {
+                d.distort = Some(corners);
+                if let Some((id, original)) = originals.first().copied() { if let Err(error) = d.document.preview_distort(id, &original, &corners) { drop(d); self.notify(&format!("{error:#}")); return; } }
+            }
+            drop(d);
+            self.area.queue_draw();
+            return;
+        }
         let mut draft = drag.updated(point, d.lock_ratio, shift, alt).rounded();
         d.snap_guides = (None, None);
         if drag.mode == DragMode::Move && !state.contains(gdk::ModifierType::CONTROL_MASK) {
@@ -524,11 +604,32 @@ impl Canvas {
         let Some((drag, originals)) = self.transform_drag.borrow_mut().take() else { return };
         let mut d = self.doc.borrow_mut();
         d.snap_guides = (None, None);
+        if self.pixel_moving.replace(false) {
+            let result = d.document.finish_pixel_move();
+            drop(d);
+            if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+            self.update_cursor();
+            return;
+        }
+        if let Some(corners) = d.distort.take() {
+            let result = match originals.first().copied() {
+                Some((id, original)) if corners != crate::distort::corners(&original) => d.document.commit_distort(&[(id, original, corners)]),
+                Some((id, _)) => { d.document.renderer.set_preview(id, None); Ok(()) }
+                None => Ok(()),
+            };
+            drop(d);
+            if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+            self.sync_inspector();
+            self.update_cursor();
+            return;
+        }
         // Put the originals back silently, then apply the result as one undo step with mask carry-over.
         let finals: Vec<(uuid::Uuid, crate::format::Transform)> = originals.iter().map(|(id, _)| (*id, d.document.renderer.layer(*id).transform)).collect();
         for (id, original) in &originals { d.document.renderer.set_layer_transform(*id, *original); }
         if finals.iter().zip(&originals).any(|(f, o)| f.1 != o.1) {
-            d.document.begin_edit(match drag.mode { DragMode::Move => "Move Layer", DragMode::Rotate => "Rotate Layer", DragMode::Resize(_) => "Scale Layer" });
+            d.document.begin_edit(match (drag.mode, originals.len() > 1) { (DragMode::Move, false) => "Move Layer", (DragMode::Move, true) => "Move Layers", (DragMode::Rotate, false) => "Rotate Layer", (DragMode::Rotate, true) => "Rotate Layers", (DragMode::Resize(_), false) => "Scale Layer", (DragMode::Resize(_), true) => "Scale Layers" });
             for (id, t) in finals { d.document.set_transform(id, t, "Transform Layer"); }
             d.document.end_edit();
         }
@@ -537,6 +638,191 @@ impl Canvas {
         self.sync_inspector();
         self.update_cursor();
     }
+
+    // Eyedropper
+
+    /// Picks the color under a view point into the foreground (or, `background`, the background) swatch.
+    fn sample_at(&self, x: f64, y: f64, background: bool) {
+        let result = {
+            let mut d = self.doc.borrow_mut();
+            let size = d.size();
+            let point = d.viewport.document_point((x, y), size);
+            let all = d.eyedropper_all_layers;
+            match d.document.sample_color(point.0, point.1, all) {
+                Ok(Some(color)) => {
+                    if d.document.mask_target() { d.mask_paint_white = color[0] + color[1] + color[2] > 1.5; }
+                    else if background { d.background = color; } else { d.brush.color = color; }
+                    Ok(Some((d.brush.color, d.background, color)))
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        match result {
+            Ok(Some((fg, bg, c))) => { self.rail.sync_palette(fg, bg); self.notify(&format!("Picked {}", super::color_wheel::hex(c))); }
+            Ok(None) => self.notify("Nothing to pick here: the canvas is transparent at that point."),
+            Err(error) => self.notify(&format!("{error:#}")),
+        }
+    }
+
+    // Gradient, shape and crop drags
+
+    /// The gradient's two colors from the palette and options, with alpha.
+    fn gradient_colors(d: &super::Doc) -> [[f64; 4]; 2] {
+        let fg = d.brush.color;
+        let mut colors = if d.gradient_to_transparent { [[fg[0], fg[1], fg[2], 1.0], [fg[0], fg[1], fg[2], 0.0]] } else { let bg = d.background; [[fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0]] };
+        if d.document.mask_target() { let w = if d.mask_paint_white { 1.0 } else { 0.0 }; colors = if d.gradient_to_transparent { [[w, w, w, 1.0], [w, w, w, 0.0]] } else { [[w, w, w, 1.0], [1.0 - w, 1.0 - w, 1.0 - w, 1.0]] }; }
+        if d.gradient_reversed { colors.swap(0, 1); }
+        colors
+    }
+
+    fn crop_ratio(d: &super::Doc) -> Option<f64> {
+        match d.crop_ratio { 1 => Some(d.document.width() as f64 / d.document.height() as f64), 2 => Some(1.0), 3 => Some(4.0 / 3.0), 4 => Some(16.0 / 9.0), _ => None }
+    }
+
+    fn begin_tool_drag(&self, view: (f64, f64), state: gdk::ModifierType) {
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let point = d.viewport.document_point(view, size);
+        let drag = match d.tool {
+            Tool::Gradient => {
+                if d.document.active.is_none() { drop(d); self.notify("Select a layer first."); return; }
+                d.gradient_line = Some((point, point));
+                ToolDrag::Gradient { start: point }
+            }
+            Tool::Shape => {
+                let anchor = (point.0.round(), point.1.round());
+                d.shape_draft = Some((anchor.0, anchor.1, 0.0, 0.0));
+                ToolDrag::Shape { anchor }
+            }
+            Tool::Crop => {
+                // A handle resizes the frame, a press inside moves it, anywhere else starts a new one.
+                let vp = d.viewport;
+                let mode = d.crop.and_then(|(x, y, w, h)| {
+                    let t = crate::format::Transform { origin: crate::format::Point(x, y), size: crate::format::Size(w, h), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
+                    let g = Geometry::new(&t, |p| vp.view_point(p, size));
+                    match g.hit(view) { Some(DragMode::Resize(i)) => Some(DragMode::Resize(i)), Some(DragMode::Rotate) => None, _ => if t.contains(point) { Some(DragMode::Move) } else { None } }
+                });
+                let original = d.crop;
+                match mode {
+                    Some(mode) => ToolDrag::Crop { start: point, original, mode },
+                    None => { let anchor = (point.0.round(), point.1.round()); d.crop = Some((anchor.0, anchor.1, 0.0, 0.0)); ToolDrag::Crop { start: anchor, original: None, mode: DragMode::Resize(4) } }
+                }
+            }
+            _ => return,
+        };
+        self.tool_drag.set(Some(drag));
+        let _ = state;
+        drop(d);
+        self.area.queue_draw();
+    }
+
+    fn update_tool_drag(&self, view: (f64, f64), state: gdk::ModifierType) {
+        let Some(drag) = self.tool_drag.get() else { return };
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let point = d.viewport.document_point(view, size);
+        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+        let alt = state.contains(gdk::ModifierType::ALT_MASK);
+        match drag {
+            ToolDrag::Gradient { start } => {
+                let mut end = point;
+                if shift {
+                    // Snap the line to 45 degree steps.
+                    let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+                    let len = dx.hypot(dy);
+                    let angle = (dy.atan2(dx) / (std::f64::consts::PI / 4.0)).round() * (std::f64::consts::PI / 4.0);
+                    end = (start.0 + len * angle.cos(), start.1 + len * angle.sin());
+                }
+                d.gradient_line = Some((start, end));
+                let (colors, radial, opacity) = (Self::gradient_colors(&d), d.gradient_radial, d.gradient_opacity);
+                let result = d.document.gradient(start, end, radial, colors, opacity, false);
+                drop(d);
+                if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            }
+            ToolDrag::Shape { anchor } => {
+                d.shape_draft = Some(drag_box(anchor, point, shift, alt));
+                drop(d);
+            }
+            ToolDrag::Crop { start, original, mode } => {
+                let ratio = Self::crop_ratio(&d);
+                let mut rect = match (mode, original) {
+                    (DragMode::Move, Some((x, y, w, h))) => ((x + point.0 - start.0).round(), (y + point.1 - start.1).round(), w, h),
+                    (DragMode::Resize(i), Some((x, y, w, h))) => {
+                        let t = crate::format::Transform { origin: crate::format::Point(x, y), size: crate::format::Size(w, h), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
+                        let next = Drag { original: t, start, mode: DragMode::Resize(i) }.updated(point, ratio.is_some(), false, alt);
+                        (next.origin.0.round(), next.origin.1.round(), next.size.0.round().max(1.0), next.size.1.round().max(1.0))
+                    }
+                    _ => {
+                        let (mut dx, mut dy) = (point.0 - start.0, point.1 - start.1);
+                        if let Some(r) = ratio { if dx.abs() > dy.abs() * r { dy = dy.signum() * dx.abs() / r; } else { dx = dx.signum() * dy.abs() * r; } }
+                        if alt { ((start.0 - dx.abs()).round(), (start.1 - dy.abs()).round(), (dx.abs() * 2.0).round(), (dy.abs() * 2.0).round()) }
+                        else { (start.0.min(start.0 + dx).round(), start.1.min(start.1 + dy).round(), dx.abs().round(), dy.abs().round()) }
+                    }
+                };
+                // Edges snap to the canvas and the layers' bounds; with a fixed ratio only moves snap.
+                if !state.contains(gdk::ModifierType::CONTROL_MASK) && (ratio.is_none() || mode == DragMode::Move) {
+                    let tolerance = SNAP_DISTANCE / d.viewport.points_per_pixel().max(0.0001);
+                    let (xs, ys) = d.document.crop_snap_targets();
+                    let nearest = |v: f64, targets: &[f64]| targets.iter().copied().filter(|t| (t - v).abs() <= tolerance).min_by(|a, b| (a - v).abs().partial_cmp(&(b - v).abs()).unwrap());
+                    let (x0, y0, x1, y1) = (rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3);
+                    if mode == DragMode::Move {
+                        let sx = [x0, x1].iter().filter_map(|e| nearest(*e, &xs).map(|t| t - e)).min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap()).unwrap_or(0.0);
+                        let sy = [y0, y1].iter().filter_map(|e| nearest(*e, &ys).map(|t| t - e)).min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap()).unwrap_or(0.0);
+                        rect.0 += sx; rect.1 += sy;
+                    } else {
+                        let (mut nx0, mut nx1, mut ny0, mut ny1) = (x0, x1, y0, y1);
+                        if (point.0 - x0).abs() <= (point.0 - x1).abs() { if let Some(t) = nearest(x0, &xs) { if t < x1 { nx0 = t; } } } else if let Some(t) = nearest(x1, &xs) { if t > x0 { nx1 = t; } }
+                        if (point.1 - y0).abs() <= (point.1 - y1).abs() { if let Some(t) = nearest(y0, &ys) { if t < y1 { ny0 = t; } } } else if let Some(t) = nearest(y1, &ys) { if t > y0 { ny1 = t; } }
+                        rect = (nx0, ny0, nx1 - nx0, ny1 - ny0);
+                    }
+                }
+                if rect.2 >= 1.0 && rect.3 >= 1.0 { d.crop = Some(rect); }
+                drop(d);
+            }
+        }
+        self.area.queue_draw();
+    }
+
+    fn finish_tool_drag(&self) {
+        let Some(drag) = self.tool_drag.take() else { return };
+        let result = {
+            let mut d = self.doc.borrow_mut();
+            match drag {
+                ToolDrag::Gradient { .. } => {
+                    let line = d.gradient_line.take();
+                    match line {
+                        Some((start, end)) if (end.0 - start.0).hypot(end.1 - start.1) >= 0.5 => {
+                            let (colors, radial, opacity) = (Self::gradient_colors(&d), d.gradient_radial, d.gradient_opacity);
+                            d.document.gradient(start, end, radial, colors, opacity, true)
+                        }
+                        _ => { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } Ok(()) }
+                    }
+                }
+                ToolDrag::Shape { .. } => {
+                    let draft = d.shape_draft.take();
+                    match draft {
+                        Some(rect) if rect.2 >= 1.0 && rect.3 >= 1.0 => { let (ellipse, color, radius) = (d.shape_ellipse, d.brush.color, d.shape_radius); d.document.add_shape_layer(ellipse, rect, color, radius).map(|_| ()) }
+                        _ => Ok(()),
+                    }
+                }
+                ToolDrag::Crop { .. } => { if d.crop.is_some_and(|c| c.2 < 1.0 || c.3 < 1.0) { d.crop = None; } Ok(()) }
+            }
+        };
+        if let Err(error) = result { self.notify(&format!("{error:#}")); }
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.area.queue_draw();
+    }
+
+    /// Return with the Crop tool: the canvas becomes the frame.
+    pub fn apply_crop(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); match d.crop.take() { Some(rect) => d.document.crop(rect), None => Ok(()) } };
+        if let Err(error) = result { self.notify(&format!("{error:#}")); }
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.fit();
+    }
+
+    pub fn cancel_crop(&self) { self.doc.borrow_mut().crop = None; self.area.queue_draw(); }
 
     // Marquee and lasso
 
@@ -642,10 +928,12 @@ impl Canvas {
             };
             // Shift-click paints a straight line from where the last stroke ended.
             let start = if shift { d.last_brush_point.unwrap_or(point) } else { point };
-            let mask = d.document.mask_target() && matches!(d.tool, Tool::Brush | Tool::Eraser);
+            let mask = d.document.mask_target() && matches!(d.tool, Tool::Brush | Tool::Eraser | Tool::Blur);
             let white = d.mask_paint_white && d.tool == Tool::Brush;
             let warp = match (d.tool, d.blur_mode) { (Tool::Blur, 0) => Some(crate::warp::WarpMode::Liquify), (Tool::Blur, 2) => Some(crate::warp::WarpMode::Smudge), _ => None };
-            let mut result = if let Some(mode) = warp { d.document.begin_warp(start, &settings, mode) }
+            // On a mask the Smear tool always blurs: Liquify and Smudge move pixels, which a mask has none of.
+            let mut result = if mask && d.tool == Tool::Blur { d.document.begin_mask_blur(start, &settings) }
+                else if let Some(mode) = warp { d.document.begin_warp(start, &settings, mode) }
                 else if mask { d.document.begin_mask_stroke(start, &settings, white) } else { d.document.begin_stroke(start, &settings, kind) };
             if result.is_ok() && start != point { result = d.document.continue_stroke(point); }
             if result.is_ok() { d.last_brush_point = Some(point); }
@@ -722,7 +1010,23 @@ impl Canvas {
     /// Brush keys: [ and ] size, { and } hardness, digits opacity. True when the key was one of those.
     pub fn brush_key(&self, c: char) -> bool {
         let mut d = self.doc.borrow_mut();
-        if !d.tool.is_brush() || d.document.stroke_active() { return false; }
+        if d.document.stroke_active() { return false; }
+        // The palette: X swaps foreground and background, D resets them (on a mask, the paint tone).
+        match c {
+            'x' | 'X' => {
+                if d.document.mask_target() { d.mask_paint_white = !d.mask_paint_white; } else { let fg = d.brush.color; d.brush.color = d.background; d.background = fg; }
+                let (fg, bg) = (d.brush.color, d.background); let mask = d.document.mask_target();
+                drop(d); self.rail.sync_palette(fg, bg); self.sync_inspector(); if mask { self.options.sync_mask_paint(&self.doc); } return true;
+            }
+            'd' | 'D' => {
+                if d.document.mask_target() { d.mask_paint_white = false; } else { d.brush.color = [0.0; 3]; d.background = [1.0; 3]; }
+                let (fg, bg) = (d.brush.color, d.background); let mask = d.document.mask_target();
+                drop(d); self.rail.sync_palette(fg, bg); if mask { self.options.sync_mask_paint(&self.doc); } return true;
+            }
+            'U' if d.tool == Tool::Shape => { d.shape_ellipse = !d.shape_ellipse; let e = d.shape_ellipse; drop(d); self.options.sync_shape_kind(e); return true; }
+            _ => {}
+        }
+        if !d.tool.is_brush() { return false; }
         let b = &mut d.brush;
         match c {
             ']' => { b.diameter = (b.diameter + 1.0).max((b.diameter * 1.2).round()).min(2000.0); }
@@ -913,22 +1217,21 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         if let Some(id) = doc.document.active {
             let layer = doc.document.renderer.layer(id).clone();
             let visible = crate::format::visible_layers(doc.document.renderer.layers()).contains(&id);
-            let boxed = if layer.is_group() {
-                let members = doc.document.transform_members(id);
-                if members.is_empty() { None } else {
-                    let boxes: Vec<_> = members.iter().map(|m| doc.document.renderer.layer(*m).transform.bounds()).collect();
-                    let (x0, y0) = (boxes.iter().map(|b| b.0).fold(f64::MAX, f64::min), boxes.iter().map(|b| b.1).fold(f64::MAX, f64::min));
-                    let (x1, y1) = (boxes.iter().map(|b| b.2).fold(f64::MIN, f64::max), boxes.iter().map(|b| b.3).fold(f64::MIN, f64::max));
-                    Some(crate::format::Transform { origin: crate::format::Point(x0, y0), size: crate::format::Size(x1 - x0, y1 - y0), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() })
-                }
-            } else if visible && doc.document.renderer.has_image(id) { Some(layer.transform) } else { None };
+            let grouped = doc.document.transforms_as_group();
+            let boxed = if grouped { doc.document.group_box() } else if !layer.is_group() && visible && doc.document.renderer.has_image(id) { Some(layer.transform) } else { None };
             if let Some(t) = boxed {
-                let g = Geometry::new(&t, |p| vp.view_point(p, size));
+                let mut g = Geometry::new(&t, |p| vp.view_point(p, size));
+                if let Some(corners) = doc.distort {
+                    // While distorting, the box is the shape's four corners.
+                    let c = corners.map(|p| vp.view_point(p, size));
+                    for (i, p) in c.iter().enumerate() { g.handles[i * 2] = *p; }
+                    for i in 0..4 { let (a, b) = (c[i], c[(i + 1) % 4]); g.handles[i * 2 + 1] = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0); }
+                }
                 cr.new_path();
                 cr.move_to(g.handles[0].0, g.handles[0].1);
                 for i in [2, 4, 6] { cr.line_to(g.handles[i].0, g.handles[i].1); }
                 cr.close_path();
-                if !layer.is_group() { cr.move_to(g.handles[1].0, g.handles[1].1); cr.line_to(g.rotation.0, g.rotation.1); }
+                if doc.distort.is_none() { cr.move_to(g.handles[1].0, g.handles[1].1); cr.line_to(g.rotation.0, g.rotation.1); }
                 let (ar, ag, ab) = super::theme::accent();
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
                 cr.set_line_width(3.0);
@@ -943,7 +1246,7 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
                     cr.set_source_rgb(ar, ag, ab);
                     cr.stroke()?;
                 }
-                if !layer.is_group() {
+                if doc.distort.is_none() {
                     cr.arc(g.rotation.0, g.rotation.1, 4.0, 0.0, std::f64::consts::TAU);
                     cr.set_source_rgb(1.0, 1.0, 1.0);
                     cr.fill_preserve()?;
@@ -958,6 +1261,42 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         if let Some(y) = doc.snap_guides.1 { let (_, vy0) = vp.view_point((0.0, y), size); cr.move_to(0.0, vy0); cr.line_to(width, vy0); cr.stroke()?; }
     }
 
+    // The gradient's line while it is dragged.
+    if let Some((start, end)) = doc.gradient_line {
+        let (a, b) = (vp.view_point(start, size), vp.view_point(end, size));
+        cr.move_to(a.0, a.1); cr.line_to(b.0, b.1);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.8); cr.set_line_width(3.0); cr.stroke_preserve()?;
+        cr.set_source_rgb(1.0, 1.0, 1.0); cr.set_line_width(1.0); cr.stroke()?;
+        for p in [a, b] { cr.arc(p.0, p.1, 4.0, 0.0, std::f64::consts::TAU); cr.set_source_rgb(1.0, 1.0, 1.0); cr.fill_preserve()?; cr.set_source_rgb(0.0, 0.0, 0.0); cr.stroke()?; }
+    }
+    // The shape being dragged out, in the color it will be.
+    if let Some((x, y, w, h)) = doc.shape_draft {
+        if w >= 1.0 && h >= 1.0 {
+            let (a, b) = (vp.view_point((x, y), size), vp.view_point((x + w, y + h), size));
+            let c = doc.brush.color;
+            if doc.shape_ellipse { cr.save()?; cr.translate((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0); cr.scale((b.0 - a.0) / 2.0, (b.1 - a.1) / 2.0); cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU); cr.restore()?; }
+            else { cr.rectangle(a.0, a.1, b.0 - a.0, b.1 - a.1); }
+            cr.set_source_rgba(c[0], c[1], c[2], 0.6); cr.fill_preserve()?;
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.8); cr.set_line_width(1.0); cr.stroke()?;
+        }
+    }
+    // The crop frame: everything outside it dimmed, handles on its edges.
+    if doc.tool == Tool::Crop {
+        if let Some((x, y, w, h)) = doc.crop {
+            let (a, b) = (vp.view_point((x, y), size), vp.view_point((x + w, y + h), size));
+            cr.set_fill_rule(cairo::FillRule::EvenOdd);
+            cr.rectangle(0.0, 0.0, width, height);
+            cr.rectangle(a.0, a.1, b.0 - a.0, b.1 - a.1);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+            cr.fill()?;
+            cr.set_fill_rule(cairo::FillRule::Winding);
+            let t = crate::format::Transform { origin: crate::format::Point(x, y), size: crate::format::Size(w, h), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
+            let g = Geometry::new(&t, |p| vp.view_point(p, size));
+            cr.rectangle(a.0, a.1, b.0 - a.0, b.1 - a.1);
+            cr.set_source_rgb(1.0, 1.0, 1.0); cr.set_line_width(1.0); cr.stroke()?;
+            for (hx, hy) in g.handles { cr.rectangle(hx - 3.5, hy - 3.5, 7.0, 7.0); cr.set_source_rgb(1.0, 1.0, 1.0); cr.fill_preserve()?; cr.set_source_rgb(0.0, 0.0, 0.0); cr.stroke()?; }
+        }
+    }
     // A marquee or lasso being drawn.
     if let Some(draft) = draft {
         let mut points: Vec<(f64, f64)> = draft.points.iter().map(|p| vp.view_point(*p, size)).collect();
@@ -1056,4 +1395,13 @@ fn intersect(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> Option<(f64, f
     let right = (a.0 + a.2).min(b.0 + b.2);
     let bottom = (a.1 + a.3).min(b.1 + b.3);
     if right > x && bottom > y { Some((x, y, right - x, bottom - y)) } else { None }
+}
+
+/// A box dragged from `anchor` to `point` in whole document pixels: Shift squares it, Alt grows it from the
+/// anchor as its center (`DragBox.rect`).
+fn drag_box(anchor: (f64, f64), point: (f64, f64), square: bool, from_center: bool) -> (f64, f64, f64, f64) {
+    let (mut dx, mut dy) = (point.0.round() - anchor.0, point.1.round() - anchor.1);
+    if square { let side = dx.abs().max(dy.abs()); dx = if dx < 0.0 { -side } else { side }; dy = if dy < 0.0 { -side } else { side }; }
+    if from_center { (anchor.0 - dx.abs(), anchor.1 - dy.abs(), dx.abs() * 2.0, dy.abs() * 2.0) }
+    else { (anchor.0.min(anchor.0 + dx), anchor.1.min(anchor.1 + dy), dx.abs(), dy.abs()) }
 }

@@ -28,6 +28,8 @@ fn main() {
                     "--wand" => script.wand = text().and_then(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }),
                     "--tool" => script.tool = text().and_then(|t| ui::Tool::ALL.into_iter().find(|tool| format!("{tool:?}").to_lowercase() == *t)),
                     "--ellipse" => script.ellipse = true,
+                    "--pick-color" => script.pick_color = true,
+                    "--window" => script.window = text().and_then(|v| { let (w, h) = v.split_once('x')?; Some((w.parse().ok()?, h.parse().ok()?)) }),
                     "--blur-mode" => script.blur_mode = text().and_then(|m| m.parse().ok()),
                     "--layer" => script.layer = text(),
                     "--adjustment" => script.adjustment = text(),
@@ -36,7 +38,7 @@ fn main() {
                     "--filter" => script.filter = text().and_then(|f| match f.as_str() {
                         "noise" => Some(compositor::filters::Kind::AddNoise), "grain" => Some(compositor::filters::Kind::Grain),
                         "lens" => Some(compositor::filters::Kind::LensCorrection), "gradient" => Some(compositor::filters::Kind::GradientMap),
-                        "levels" => Some(compositor::filters::Kind::Levels), "gaussian" => Some(compositor::filters::Kind::GaussianBlur),
+                        "levels" => Some(compositor::filters::Kind::Levels), "gaussian" => Some(compositor::filters::Kind::GaussianBlur), "background" => Some(compositor::filters::Kind::RemoveBackground),
                         "motion" => Some(compositor::filters::Kind::MotionBlur), _ => None }),
                     _ => paths.push(PathBuf::from(arg)),
                 }

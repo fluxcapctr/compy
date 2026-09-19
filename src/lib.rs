@@ -5,11 +5,14 @@
 
 pub mod blur;
 pub mod brush;
+pub mod distort;
 pub mod document;
 pub mod ffi;
 pub mod filters;
 pub mod history;
 pub mod format;
+pub mod heic;
+pub mod matte;
 pub mod png_io;
 pub mod psd;
 pub mod raster;

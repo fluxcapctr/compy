@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use cairo::ImageSurface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur }
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground }
 
 impl Kind {
     pub fn name(self) -> &'static str {
@@ -17,7 +17,7 @@ impl Kind {
             Kind::AddNoise => "Add Noise", Kind::Grain => "Grain", Kind::LensCorrection => "Lens Correction",
             Kind::GradientMap => "Gradient Map", Kind::Levels => "Levels", Kind::ContentAwareFill => "Content-Aware Fill",
             Kind::SpotHeal => "Heal Selection", Kind::Exposure => "Exposure", Kind::HueSaturation => "Hue/Saturation",
-            Kind::GaussianBlur => "Gaussian Blur", Kind::MotionBlur => "Motion Blur",
+            Kind::GaussianBlur => "Gaussian Blur", Kind::MotionBlur => "Motion Blur", Kind::Invert => "Invert", Kind::RemoveBackground => "Remove Background",
         }
     }
     /// Filters that work on the selection itself rather than the layer's colors, and need one.
@@ -51,11 +51,12 @@ pub struct Settings {
     pub angle: f64,
     /// Motion Blur streak length in layer pixels, 1 to 2000.
     pub distance: f64,
+    pub matte: crate::matte::MatteSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0 }
+        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default() }
     }
 }
 
@@ -69,6 +70,7 @@ impl Settings {
         s.distance = clamp(s.distance, 1.0, 2000.0, 10.0);
         s.grain = s.grain.normalized();
         s.levels = s.levels.normalized();
+        s.matte = s.matte.normalized();
         s
     }
 }
@@ -218,6 +220,9 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
             heal_region(&mut pixels, mask, w, h, settings.heal_mode, settings.seed)?;
             return argb_from_packed(w as i32, h as i32, pixels);
         }
+        // Premultiplied: each color becomes alpha minus color, so transparency is kept (`PixelInvert`).
+        Kind::Invert => { for px in pixels.chunks_exact_mut(4) { let a = px[3]; px[0] = a - px[0]; px[1] = a - px[1]; px[2] = a - px[2]; } }
+        Kind::RemoveBackground => bail!("Remove Background runs through the document, not as a pixel filter."),
         Kind::GaussianBlur => crate::blur::gaussian(&mut pixels, w, h, 4, settings.radius),
         Kind::MotionBlur => motion_blur(&mut pixels, w, h, settings.angle, settings.distance),
         Kind::Exposure => Adjustment::Exposure(settings.exposure.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),

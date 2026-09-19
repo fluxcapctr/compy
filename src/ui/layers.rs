@@ -2,6 +2,7 @@
 //! first, each row with its visibility toggle, folder disclosure, thumbnail, name and details.
 
 use super::DocRef;
+use crate::document::Place;
 use crate::format::BlendMode;
 use gtk::gio;
 use gtk::prelude::*;
@@ -15,6 +16,11 @@ const ROW_HEIGHT: i32 = 52;
 const THUMBNAIL: i32 = 36;
 const MASK_THUMBNAIL: i32 = 30;
 const DISCLOSURE: i32 = 28;
+
+// The layers being dragged, from whichever panel they started in, so a drop on another project's panel can
+// copy them across. GTK carries only a marker string.
+thread_local! { static DRAG: RefCell<Option<(DocRef, Vec<Uuid>)>> = const { RefCell::new(None) }; }
+const LAYER_DRAG: &str = "compositor-layers";
 
 pub struct LayersPanel {
     pub widget: gtk::Box,
@@ -96,7 +102,7 @@ impl Inner {
         self.list.connect_row_selected(move |_, row| {
             let selected = row.and_then(|r| this.rows.borrow().get(r.index() as usize).copied());
             if let Ok(mut d) = this.doc.try_borrow_mut() {
-                if d.document.active != selected { d.document.active = selected; d.document.set_mask_target(false); }
+                if d.document.active != selected || d.document.selected.len() > 1 { d.document.select_layer(selected); }
             }
             this.sync_controls();
             if let Some(f) = this.on_select.borrow().as_ref() { f(); }
@@ -129,7 +135,7 @@ impl Inner {
     /// Rebuilds every row from the document. Rows inside collapsed folders are left out.
     fn rebuild(self: &Rc<Self>) {
         struct RowInfo { id: Uuid, depth: usize, visible: bool, own_visible: bool, group: bool, collapsed: bool, name: String, detail: String, thumbnail: Option<cairo::ImageSurface>, kind: &'static str, mask: Option<cairo::ImageSurface>, mask_enabled: bool, mask_target: bool, clipped: bool }
-        let (infos, selected, total) = {
+        let (infos, selected, total, multi) = {
             let mut d = self.doc.borrow_mut();
             let mut infos = Vec::new();
             let mut hidden_below: Option<usize> = None;
@@ -145,7 +151,7 @@ impl Inner {
                 let mask_target = d.document.mask_target() && d.document.active == Some(id);
                 infos.push(RowInfo { id, depth, visible, own_visible: layer.is_visible, group, collapsed, name: layer.name.clone(), detail: detail_text(&d.document.renderer, id), thumbnail, kind, mask, mask_enabled: layer.mask_enabled(), mask_target, clipped: layer.mask_source_id.is_some() });
             }
-            (infos, d.document.active, d.document.renderer.layers().len())
+            (infos, d.document.active, d.document.renderer.layers().len(), d.document.selected.clone())
         };
         self.count.set_label(&total.to_string());
         while let Some(child) = self.list.first_child() { self.list.remove(&child); }
@@ -194,7 +200,7 @@ impl Inner {
                         let click = gtk::GestureClick::new();
                         click.connect_pressed(move |g, _, _, _| {
                             let ctrl = g.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
-                            { let mut d = this.doc.borrow_mut(); d.document.active = Some(id); d.document.set_mask_target(false); if ctrl { let _ = d.document.select_layer_pixels(id, crate::selection::Mode::Replace); } }
+                            { let mut d = this.doc.borrow_mut(); d.document.select_layer(Some(id)); if ctrl { let _ = d.document.select_layer_pixels(id, crate::selection::Mode::Replace); } }
                             this.canvas.queue_draw();
                             this.rebuild();
                         });
@@ -229,8 +235,9 @@ impl Inner {
                 {
                     let (this, id) = (self.clone(), info.id);
                     let click = gtk::GestureClick::new();
-                    click.connect_pressed(move |_, _, _, _| {
-                        { let mut d = this.doc.borrow_mut(); d.document.active = Some(id); d.document.set_mask_target(true); }
+                    click.connect_pressed(move |g, _, _, _| {
+                        let ctrl = g.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                        { let mut d = this.doc.borrow_mut(); d.document.select_layer(Some(id)); d.document.set_mask_target(true); if ctrl { let _ = d.document.select_mask_pixels(id, crate::selection::Mode::Replace); } }
                         this.canvas.queue_draw();
                         this.rebuild();
                     });
@@ -269,21 +276,52 @@ impl Inner {
             row.set_opacity(if info.visible { 1.0 } else { 0.45 });
 
             let list_row = gtk::ListBoxRow::builder().child(&row).build();
+            if multi.contains(&info.id) && Some(info.id) != selected { list_row.add_css_class("multi"); }
+            self.connect_drag(&list_row, info.id, info.group);
+            {
+                // Double-click on the name edits it in place.
+                let (this, id, text, name_label) = (self.clone(), info.id, text.clone(), name.clone());
+                let click = gtk::GestureClick::new();
+                click.connect_pressed(move |g, n, _, _| {
+                    if n != 2 { return; }
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    let entry = gtk::Entry::builder().text(name_label.label().as_str()).hexpand(true).build();
+                    text.remove(&name_label);
+                    text.prepend(&entry);
+                    entry.grab_focus();
+                    entry.select_region(0, -1);
+                    { let this = this.clone(); entry.connect_activate(move |e| { this.doc.borrow_mut().document.rename_layer(id, &e.text()); this.rebuild(); }); }
+                    { let this = this.clone(); let focus = gtk::EventControllerFocus::new(); focus.connect_leave(move |_| { let this = this.clone(); gtk::glib::idle_add_local_once(move || this.rebuild()); }); entry.add_controller(focus); }
+                    { let this = this.clone(); let keys = gtk::EventControllerKey::new(); keys.connect_key_pressed(move |_, key, _, _| { if key == gtk::gdk::Key::Escape { this.rebuild(); gtk::glib::Propagation::Stop } else { gtk::glib::Propagation::Proceed } }); entry.add_controller(keys); }
+                });
+                name.add_controller(click);
+            }
             {
                 let (this, id) = (self.clone(), info.id);
                 let click = gtk::GestureClick::new();
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
                 click.connect_pressed(move |g, n, _, _| {
                     if n == 2 {
+                        // Adjustment layers open their settings; other rows rename in place (on the name).
                         let is_adjustment = this.doc.borrow().document.renderer.layer(id).adjustment.is_some();
-                        this.doc.borrow_mut().document.active = Some(id);
-                        let name = if is_adjustment { "edit-adjustment" } else { "rename-layer" };
+                        if !is_adjustment { return; }
+                        this.doc.borrow_mut().document.select_layer(Some(id));
                         if let Some(window) = this.list.root().and_downcast::<gtk::ApplicationWindow>() {
-                            if let Some(action) = gtk::prelude::ActionMapExt::lookup_action(&window, name) { action.activate(None); }
+                            if let Some(action) = gtk::prelude::ActionMapExt::lookup_action(&window, "edit-adjustment") { action.activate(None); }
                         }
                         return;
                     }
-                    if !g.current_event_state().contains(gtk::gdk::ModifierType::ALT_MASK) { return; }
+                    let state = g.current_event_state();
+                    // Ctrl adds to or removes from the selection, Shift extends it to this row.
+                    if state.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK) {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                        { let mut d = this.doc.borrow_mut(); if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) { d.document.select_layer_range(id); } else { d.document.toggle_layer_selected(id); } }
+                        this.canvas.queue_draw();
+                        this.rebuild();
+                        if let Some(f) = this.on_select.borrow().as_ref() { f(); }
+                        return;
+                    }
+                    if !state.contains(gtk::gdk::ModifierType::ALT_MASK) { return; }
                     g.set_state(gtk::EventSequenceState::Claimed);
                     this.doc.borrow_mut().document.toggle_clipping(id);
                     this.canvas.queue_draw();
@@ -306,6 +344,56 @@ impl Inner {
     }
 
     /// Points the blend and opacity controls at the selected layer, or disables them.
+    /// Rows drag (the selection when the row is part of it) and take drops: above, below, or into a folder.
+    /// A drop from another project's panel copies the layers; Ctrl while dropping copies within one.
+    fn connect_drag(self: &Rc<Self>, row: &gtk::ListBoxRow, id: Uuid, group: bool) {
+        let source = gtk::DragSource::builder().actions(gtk::gdk::DragAction::MOVE | gtk::gdk::DragAction::COPY).build();
+        {
+            let this = self.clone();
+            source.connect_prepare(move |_, _, _| {
+                let ids = { let d = this.doc.borrow(); if d.document.selected.contains(&id) && d.document.selected.len() > 1 { d.document.renderer.layers().iter().filter(|l| d.document.selected.contains(&l.id)).map(|l| l.id).collect() } else { vec![id] } };
+                DRAG.with(|s| *s.borrow_mut() = Some((this.doc.clone(), ids)));
+                Some(gtk::gdk::ContentProvider::for_value(&LAYER_DRAG.to_value()))
+            });
+        }
+        row.add_controller(source);
+        let target = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE | gtk::gdk::DragAction::COPY);
+        {
+            let moved = row.clone();
+            target.connect_motion(move |t, _, y| {
+                for c in ["drop-above", "drop-below", "drop-into"] { moved.remove_css_class(c); }
+                moved.add_css_class(zone(group, y, moved.height() as f64));
+                if t.current_drop().is_some_and(|d| d.actions().contains(gtk::gdk::DragAction::COPY) && !d.actions().contains(gtk::gdk::DragAction::MOVE)) { gtk::gdk::DragAction::COPY } else { gtk::gdk::DragAction::MOVE }
+            });
+            let left = row.clone();
+            target.connect_leave(move |_| { for c in ["drop-above", "drop-below", "drop-into"] { left.remove_css_class(c); } });
+        }
+        {
+            let (this, row) = (self.clone(), row.clone());
+            target.connect_drop(move |t, value, _, y| {
+                for c in ["drop-above", "drop-below", "drop-into"] { row.remove_css_class(c); }
+                if value.get::<String>().ok().as_deref() != Some(LAYER_DRAG) { return false; }
+                let Some((from, ids)) = DRAG.with(|s| s.borrow_mut().take()) else { return false };
+                let place = match zone(group, y, row.height() as f64) { "drop-above" => Place::Above(id), "drop-below" => Place::Below(id), _ => Place::Into(id) };
+                let copy = t.current_drop().is_some_and(|d| d.actions() == gtk::gdk::DragAction::COPY);
+                let result = if Rc::ptr_eq(&from, &this.doc) {
+                    let mut d = this.doc.borrow_mut();
+                    if copy { d.document.copy_layers_within(&ids, place).map(|_| ()) } else { d.document.move_layers(&ids, place) }
+                } else {
+                    let src = from.borrow();
+                    let mut d = this.doc.borrow_mut();
+                    d.document.copy_layers(&src.document, &ids, place).map(|_| ())
+                };
+                if let Err(error) = result { if let Some(window) = this.list.root().and_downcast::<gtk::Window>() { gtk::AlertDialog::builder().message("Could not move the layers").detail(format!("{error:#}")).modal(true).build().show(Some(&window)); } }
+                this.canvas.queue_draw();
+                this.rebuild();
+                if let Some(f) = this.on_select.borrow().as_ref() { f(); }
+                true
+            });
+        }
+        row.add_controller(target);
+    }
+
     fn sync_controls(&self) {
         let d = self.doc.borrow();
         let layer = d.document.active.map(|id| d.document.renderer.layer(id).clone());
@@ -338,4 +426,12 @@ fn detail_text(renderer: &crate::render::Renderer, id: Uuid) -> String {
     if layer.mask_file.is_some() { parts.push(if layer.mask_enabled() { "Mask".into() } else { "Mask off".into() }); }
     if layer.mask_source_id.is_some() { parts.push("Clipped".into()); }
     parts.join(" · ")
+}
+
+/// Which part of a row the pointer is over: the top or bottom edge places beside it; a folder's middle
+/// places inside it.
+fn zone(group: bool, y: f64, height: f64) -> &'static str {
+    let frac = if height > 0.0 { y / height } else { 0.5 };
+    if group { if frac < 0.25 { "drop-above" } else if frac > 0.75 { "drop-below" } else { "drop-into" } }
+    else if frac < 0.5 { "drop-above" } else { "drop-below" }
 }

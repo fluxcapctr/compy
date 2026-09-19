@@ -17,8 +17,9 @@ Progress follows the phases in the build plan:
 
 ## Build
 
-Needs Rust (stable, edition 2024), a C compiler, and the GTK4 and Cairo development packages (`gtk4` and
-`cairo` on Arch; `libgtk-4-dev` on Debian, which pulls in Cairo).
+Needs Rust (stable, edition 2024), a C compiler, the GTK4 and Cairo development packages (`gtk4` and
+`cairo` on Arch; `libgtk-4-dev` on Debian, which pulls in Cairo), and `libheif` for HEIC. The build fetches
+the ONNX Runtime library once (the `ort` crate), so the first build needs the network.
 
 ```
 git clone --recurse-submodules <this repo>
@@ -48,7 +49,8 @@ to pan, Ctrl+0 fits, Ctrl+1 is 100%, Ctrl+plus and Ctrl+minus step the zoom, Ctr
 the tab. The layers panel toggles visibility, collapses folders, and sets the selected layer's blend mode
 and opacity, redrawing as you go. From 200% the canvas shows hard-edged document pixels; from 800% a
 pixel grid. `--screenshot out.png [--zoom 4]` renders the window to a file and quits, for checking the UI
-from a script; `COMPOSITOR_TRACE=1` prints each frame's draw time.
+from a script (open popovers land beside it with a `-popover` suffix; `--pick-color` opens the color picker,
+`--window WxH` asks for a size, though a tiling compositor decides); `COMPOSITOR_TRACE=1` prints each frame's draw time.
 
 **Editing (phase 3).** The rail on the left holds the Magic Wand (W), Hand (H) and Zoom (Z). The wand's
 options bar sets New / Add / Subtract (Shift adds, Alt subtracts while clicking), tolerance, point or
@@ -61,7 +63,8 @@ here. `--wand x,y` and `--filter levels` script those for screenshots.
 
 **Painting (phase 4).** Brush (B), Eraser (E), Spot Healing Brush (J), Clone Stamp (S, Alt-click sets the
 source) and Smear (R, with Liquify, Blur and Smudge modes: Liquify pushes pixels along the drag, Smudge
-drags color, Blur softens) share size, hardness and opacity in the options bar; `[` and `]` step the size, `{`
+drags color, Blur softens) share size, hardness and opacity in the options bar; the brush's color swatch opens a
+picker with a hue ring around a saturation and value square, a hex field, and the colors used lately; `[` and `]` step the size, `{`
 and `}` the hardness, and the number keys set opacity. Shift-click paints a straight line from where the
 last stroke ended. Strokes follow a smoothed curve through the pointer samples, accumulate coverage in
 256-pixel tiles with the opacity as a cap on the whole stroke, respect the selection, and commit as one undo
@@ -108,24 +111,42 @@ layer, or imports as a layer when dropped on a document that is already open. An
 works dropped on the empty window, passed on the command line, or opened from a file manager once
 `install.sh` has registered the types.
 
-**Photoshop files.** File has Export PSD, and a `.psd` opens through Open, a drop or the command line. The reader and writer are in `src/psd.rs`, with no outside library:
-8-bit RGB with layers, folders (nested), layer and folder masks, opacity, the thirteen blend modes, hidden
-layers, clipping and the document resolution all carry across. Export bakes each layer's position, scale,
-rotation and flips into pixels at its document placement (PSD has no live transforms), so a round trip
-keeps the picture but not the ability to un-rotate. Adjustment layers are left out of an export (the
-flattened preview still shows their effect) and come in from a PSD as the same kind with default settings,
-since Photoshop's settings blocks are not read; either case is reported when it happens. 16-bit and 32-bit
-files open at 8 bits; CMYK, Lab, indexed and PSB files are refused with a message. A PSD opens as an
-unsaved document that saves as `.comp`.
-
+**Photoshop files.** File has Export PSD, and a `.psd` opens through Open, a drop or the command line.
 The Filter menu also has Gaussian Blur and Motion Blur, which give the layer a transparent margin to spread
 into and trim the rim they did not reach, so a blurred layer grows a little, as in the reference.
 
-Not built: the GPU brush (the software path meets the phase 4 budget), Remove Background (needs an ONNX
-runtime and a bundled model; the mask plumbing it would feed is in place), free distort, multi-layer
-selection, a Curves editor (curve points load, save and render, but there is no widget to edit them), the
-Gradient, Shape and Eyedropper tools, a Crop tool with handles (Crop to Selection exists), moving pixels
-inside a selection, Merge Down, drag-to-reorder in the layer panel, Flip Canvas, and HEIC import.
+**Layers and masks.** Merge Down, Merge Layers (several selected) and Merge Group (Ctrl+E) bake the
+composite into one trimmed pixel layer; Ctrl-click and Shift-click in the panel select several layers, which
+then move, scale, rotate, flip, merge and delete together; rows drag to reorder and to nest inside folders
+(drop on a folder's middle), Ctrl-drop duplicates, and a row dragged onto another project's panel copies it
+there with everything inside it; double-click a name to rename it in place. Masks can be filled (Edit >
+Fill, Alt+Backspace foreground, Ctrl+Backspace background), cleared (Delete), inverted (Ctrl+I), and run
+through any filter (Gaussian Blur feathers), and the Smear tool blurs them; Ctrl-click a mask thumbnail to
+load it as a selection. Image has Invert and Flip Canvas.
+
+**Transform.** Ctrl-drag a corner handle for free distort (Shift keeps it to one axis): the corners move on
+their own and Apply resamples the pixels and mask into the shape. Ctrl-drag inside a selection moves its
+pixels (Alt as well duplicates them, Ctrl+arrows nudge them); the layer grows if they leave it.
+
+**Tools.** Crop (C): drag a frame that snaps to layer and canvas edges, Alt keeps its center, a ratio
+dropdown fixes the proportions, Return applies. Eyedropper (I): picks the foreground color from the canvas
+(Alt-click the background); Alt-click with the Brush does the same. Gradient (G): linear or radial, foreground
+to background or to transparent, reversed, at an opacity, over the layer or its mask inside the selection.
+Shape (U): rectangles with rounded corners and ellipses in the foreground color on a new layer, redrawn
+crisp when scaled (Shift+U swaps the kind). The palette at the bottom of the rail holds the foreground and
+background colors; X swaps them, D resets them.
+
+**Remove Background.** Filter > Remove Background finds the subject with a segmentation model (ISNet,
+through ONNX Runtime) and lays down a layer mask that hides the rest, with the Mac app's refinements:
+Refine Edges (a guided filter that pulls the mask onto the image's own edges), Contrast and Shift Edge. The
+178 MB model is fetched once, on request, into `~/.local/share/compositor/models/`; the ONNX Runtime
+library itself is downloaded when the app is built.
+
+**Import.** PNG, JPEG, TIFF, GIF, WebP, BMP and HEIC files, and pixels dragged out of other apps.
+
+Not built: the GPU brush (the software path meets the phase 4 budget), a Curves editor (curve points load,
+save and render, but there is no widget to edit them), and Cmd+T-style floating transforms of a selection
+(pixels inside a selection move and duplicate, but do not scale or rotate on their own).
 
 The tool icons are drawn as line glyphs in the style of the Mac app's SF Symbols, in the theme's text color.
 
@@ -188,6 +209,10 @@ src/history  value-snapshot undo with entry and byte limits
 src/viewport the canvas view math (fit, zoom around a point, pan), a port of CanvasViewport
 src/ui/      the GTK4 app: window and tabs, canvas widget, layers panel
 src/ui/theme Omarchy palette to GTK CSS, watched for live theme switches
+src/ui/color_wheel the brush color picker: hue ring, saturation/value square, hex, recents
+src/distort   the perspective warp behind free distort
+src/heic      HEIC and HEIF decoding through libheif
+src/matte     Remove Background: the model run, the guided-filter refinement, the model download
 tests/       fixture-built .comp packages with pixel-exact expectations
 reference/   the macOS app, as a submodule, read-only
 ```

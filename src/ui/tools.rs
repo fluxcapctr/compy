@@ -3,14 +3,13 @@
 use super::DocRef;
 use crate::selection::Mode;
 use gtk::prelude::*;
-use gtk::gdk;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Move, Marquee, Lasso, Wand, Brush, Eraser, Heal, Clone, Blur, Hand, Zoom }
+pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Shape, Hand, Zoom }
 
 impl Tool {
-    pub const ALL: [Tool; 11] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Hand, Tool::Zoom];
+    pub const ALL: [Tool; 15] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Shape, Tool::Hand, Tool::Zoom];
     pub fn help(self) -> &'static str {
         match self {
             Tool::Move => "Move / Transform (V): drag to move; handles scale, the top handle rotates; Shift constrains; Alt scales from the center; Ctrl-click picks the layer under the pointer; arrow keys nudge",
@@ -22,11 +21,15 @@ impl Tool {
             Tool::Heal => "Spot Healing Brush (J): paint over a blemish; it is rebuilt from its surroundings",
             Tool::Clone => "Clone Stamp (S): Alt-click a source, then paint copies of it",
             Tool::Blur => "Smear (R): Liquify pushes pixels, Blur softens, Smudge drags color",
+            Tool::Crop => "Crop (C): drag a frame, then Return crops the canvas to it; edges snap to layers; Alt keeps the center; Escape cancels",
+            Tool::Eyedropper => "Eyedropper (I): click to pick the foreground color from the canvas; Alt-click sets the background color",
+            Tool::Gradient => "Gradient (G): drag a line to fill the layer (or its mask) with a gradient inside the selection; Shift snaps the angle",
+            Tool::Shape => "Shape (U): drag a rectangle or ellipse onto a new layer in the foreground color; Shift squares it, Alt grows from the center; Shift+U swaps the kind",
             Tool::Hand => "Hand (H): drag to pan",
             Tool::Zoom => "Zoom (Z): click to zoom in, Alt-click to zoom out",
         }
     }
-    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Hand => 'h', Tool::Zoom => 'z' } }
+    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
     pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur) }
     pub fn is_selection(self) -> bool { matches!(self, Tool::Marquee | Tool::Lasso | Tool::Wand) }
 }
@@ -34,6 +37,8 @@ impl Tool {
 pub struct ToolRail {
     pub widget: gtk::Box,
     buttons: Vec<(Tool, gtk::ToggleButton)>,
+    foreground: Rc<super::color_wheel::ColorButton>,
+    background: Rc<super::color_wheel::ColorButton>,
 }
 
 impl ToolRail {
@@ -57,8 +62,21 @@ impl ToolRail {
             widget.append(&button);
             buttons.push((tool, button));
         }
-        Rc::new(ToolRail { widget, buttons })
+        // The palette: foreground over background, as Photoshop's rail has them (X swaps, D resets).
+        let (fg, bg) = { let d = doc.borrow(); (d.brush.color, d.background) };
+        let foreground = { let doc = doc.clone(); super::color_wheel::ColorButton::new(fg, Rc::new(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.color = c; } })) };
+        let background = { let doc = doc.clone(); super::color_wheel::ColorButton::new(bg, Rc::new(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.background = c; } })) };
+        foreground.widget.set_tooltip_text(Some("Foreground color (X swaps with the background, D resets to black and white)"));
+        background.widget.set_tooltip_text(Some("Background color"));
+        let palette = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).margin_top(10).build();
+        palette.append(&foreground.widget);
+        palette.append(&background.widget);
+        widget.append(&palette);
+        Rc::new(ToolRail { widget, buttons, foreground, background })
     }
+
+    /// Shows the palette as the document has it (after X, D or the eyedropper).
+    pub fn sync_palette(&self, foreground: [f64; 3], background: [f64; 3]) { self.foreground.set_color(foreground); self.background.set_color(background); }
 
     pub fn select(&self, tool: Tool) {
         for (t, button) in &self.buttons { if *t == tool && !button.is_active() { button.set_active(true); } }
@@ -73,6 +91,7 @@ pub struct OptionsBar {
     opacity: gtk::SpinButton,
     move_fields: Vec<gtk::SpinButton>,
     mask_paint: gtk::DropDown,
+    color: Rc<super::color_wheel::ColorButton>,
     syncing: std::cell::Cell<bool>,
 }
 
@@ -189,11 +208,8 @@ impl OptionsBar {
         // Brush: the paint color.
         let paint = row();
         paint.append(&gtk::Label::new(Some("Color")));
-        let color = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-        let c = settings.color;
-        color.set_rgba(&gdk::RGBA::new(c[0] as f32, c[1] as f32, c[2] as f32, 1.0));
-        { let doc = doc.clone(); color.connect_rgba_notify(move |b| { let c = b.rgba(); if let Ok(mut d) = doc.try_borrow_mut() { d.brush.color = [c.red() as f64, c.green() as f64, c.blue() as f64]; } }); }
-        paint.append(&color);
+        let color = { let doc = doc.clone(); super::color_wheel::ColorButton::new(settings.color, Rc::new(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.color = c; } })) };
+        paint.append(&color.widget);
         extra.add_named(&paint, Some("brush"));
         extra.add_named(&gtk::Box::new(gtk::Orientation::Horizontal, 0), Some("eraser"));
         let blur = row();
@@ -221,7 +237,57 @@ impl OptionsBar {
         brushes.append(&extra);
         stack.add_named(&brushes, Some("brushes"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, syncing: std::cell::Cell::new(false) };
+        // Gradient.
+        let gradient = row();
+        let gshape = gtk::DropDown::from_strings(&["Linear", "Radial"]);
+        gshape.set_tooltip_text(Some("Linear runs from the start to the end; radial is centered on the start with the end on its rim"));
+        { let doc = doc.clone(); gshape.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_radial = s.selected() == 1; } }); }
+        gradient.append(&gshape);
+        let gstyle = gtk::DropDown::from_strings(&["Foreground to Transparent", "Foreground to Background"]);
+        { let doc = doc.clone(); gstyle.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_to_transparent = s.selected() == 0; } }); }
+        gradient.append(&gstyle);
+        let reverse = gtk::CheckButton::builder().label("Reverse").build();
+        { let doc = doc.clone(); reverse.connect_toggled(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_reversed = c.is_active(); } }); }
+        gradient.append(&reverse);
+        gradient.append(&gtk::Label::new(Some("Opacity")));
+        let gopacity = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
+        gopacity.set_value(100.0);
+        { let doc = doc.clone(); gopacity.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_opacity = s.value() / 100.0; } }); }
+        gradient.append(&gopacity);
+        stack.add_named(&gradient, Some("gradient"));
+
+        // Shape.
+        let shape_row = row();
+        let skind = gtk::DropDown::from_strings(&["Rectangle", "Ellipse"]);
+        { let doc = doc.clone(); skind.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.shape_ellipse = s.selected() == 1; } }); }
+        shape_row.append(&skind);
+        shape_row.append(&gtk::Label::new(Some("Corner radius")));
+        let radius = gtk::SpinButton::with_range(0.0, 10_000.0, 1.0);
+        radius.set_tooltip_text(Some("Document pixels; rectangles only, at most half the shorter side"));
+        { let doc = doc.clone(); radius.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.shape_radius = s.value(); } }); }
+        shape_row.append(&radius);
+        stack.add_named(&shape_row, Some("shape"));
+
+        // Crop.
+        let crop = row();
+        crop.append(&gtk::Label::new(Some("Ratio")));
+        let ratio = gtk::DropDown::from_strings(&["Free", "Original", "1:1", "4:3", "16:9"]);
+        { let doc = doc.clone(); ratio.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.crop_ratio = s.selected(); } }); }
+        crop.append(&ratio);
+        crop.append(&gtk::Button::builder().label("Apply").action_name("win.crop-apply").css_classes(["suggested-action"]).tooltip_text("Crop the canvas to the frame (Return)").build());
+        crop.append(&gtk::Button::builder().label("Cancel").action_name("win.crop-cancel").tooltip_text("Drop the frame (Escape)").build());
+        stack.add_named(&crop, Some("crop"));
+
+        // Eyedropper.
+        let eye = row();
+        eye.append(&gtk::Label::new(Some("Sample")));
+        let sample = gtk::DropDown::from_strings(&["All Layers", "Current Layer"]);
+        { let doc = doc.clone(); sample.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.eyedropper_all_layers = s.selected() == 0; } }); }
+        eye.append(&sample);
+        eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
+        stack.add_named(&eye, Some("eyedropper"));
+
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -260,6 +326,10 @@ impl OptionsBar {
     }
 
     pub fn show_mask_paint(&self, on: bool) { self.mask_paint.set_visible(on); }
+    pub fn sync_mask_paint(&self, doc: &DocRef) { let white = doc.borrow().mask_paint_white; self.mask_paint.set_selected(if white { 1 } else { 0 }); }
+    pub fn sync_shape_kind(&self, ellipse: bool) {
+        if let Some(page) = self.widget.child_by_name("shape") { if let Some(dropdown) = page.first_child().and_downcast::<gtk::DropDown>() { dropdown.set_selected(if ellipse { 1 } else { 0 }); } }
+    }
 
     pub fn update(&self, tool: Tool) {
         let hint = self.widget.child_by_name("hint").and_downcast::<gtk::Label>();
@@ -277,11 +347,18 @@ impl OptionsBar {
                     }
                 }
             }
+            Tool::Gradient => self.widget.set_visible_child_name("gradient"),
+            Tool::Shape => self.widget.set_visible_child_name("shape"),
+            Tool::Crop => self.widget.set_visible_child_name("crop"),
+            Tool::Eyedropper => self.widget.set_visible_child_name("eyedropper"),
             other => { if let Some(hint) = hint { hint.set_label(other.help()); } self.widget.set_visible_child_name("hint"); }
         }
     }
 
     /// Reflects settings changed from the keyboard.
+    /// Opens the color picker once the button is on screen (the options page may just have switched).
+    pub fn show_color_picker(&self) { let button = self.color.widget.clone(); gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || button.popup()); }
+
     pub fn sync_brush(&self, settings: &crate::brush::BrushSettings) {
         self.size.set_value(settings.diameter);
         self.hardness.set_value((settings.hardness * 100.0).round());

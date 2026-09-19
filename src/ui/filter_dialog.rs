@@ -293,7 +293,49 @@ impl FilterDialog {
                 self.slider(&grid, 0, "Angle", -90.0, 90.0, 1.0, s.angle, |s, v| s.angle = v, self);
                 self.slider(&grid, 1, "Distance", 1.0, 2000.0, 1.0, s.distance, |s, v| s.distance = v, self);
             }
-            Kind::ContentAwareFill | Kind::SpotHeal => {}
+            Kind::ContentAwareFill | Kind::SpotHeal | Kind::Invert => {}
+            Kind::RemoveBackground => {
+                let quality = gtk::DropDown::from_strings(&["Basic", "Advanced"]);
+                quality.set_selected(if s.matte.advanced { 1 } else { 0 });
+                quality.set_tooltip_text(Some("Basic is the model's mask as it comes; Advanced refines its edges with the controls below"));
+                { let this = self.clone(); quality.connect_selected_notify(move |d| { this.settings.borrow_mut().matte.advanced = d.selected() == 1; this.schedule(); }); }
+                grid.attach(&gtk::Label::builder().label("Quality").xalign(0.0).build(), 0, 0, 1, 1);
+                grid.attach(&quality, 1, 0, 1, 1);
+                self.slider(&grid, 1, "Refine Edges", 0.0, 40.0, 1.0, s.matte.refine_edges, |s, v| s.matte.refine_edges = v, self);
+                self.slider(&grid, 2, "Contrast", 0.0, 100.0, 1.0, s.matte.contrast, |s, v| s.matte.contrast = v, self);
+                self.slider(&grid, 3, "Shift Edge", -10.0, 10.0, 1.0, s.matte.shift_edge, |s, v| s.matte.shift_edge = v, self);
+                if !crate::matte::model_ready() {
+                    // First use: the model is fetched on request, with progress, then the preview starts.
+                    let download = gtk::Button::builder().label(format!("Download model ({} MB)", crate::matte::MODEL_BYTES / 1_000_000)).css_classes(["suggested-action"]).build();
+                    let note = gtk::Label::builder().label("Remove Background needs a segmentation model (ISNet), fetched once from GitHub into ~/.local/share/compositor.").wrap(true).xalign(0.0).css_classes(["dim-label"]).build();
+                    grid.attach(&note, 0, 4, 2, 1);
+                    grid.attach(&download, 0, 5, 2, 1);
+                    let this = self.clone();
+                    download.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let progress = Rc::new(Cell::new((0u64, crate::matte::MODEL_BYTES)));
+                        let done: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
+                        let shared = std::sync::Arc::new(std::sync::Mutex::new((0u64, crate::matte::MODEL_BYTES, None::<Result<(), String>>)));
+                        {
+                            let shared = shared.clone();
+                            std::thread::spawn(move || {
+                                let outcome = crate::matte::download_model(|d, t| { if let Ok(mut s) = shared.lock() { s.0 = d; s.1 = t; } }).map_err(|e| format!("{e:#}"));
+                                if let Ok(mut s) = shared.lock() { s.2 = Some(outcome); }
+                            });
+                        }
+                        let (this, button) = (this.clone(), button.clone());
+                        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                            let (d, t, outcome) = shared.lock().map(|s| (s.0, s.1, s.2.clone())).unwrap_or((0, 1, None));
+                            progress.set((d, t));
+                            match outcome {
+                                None => { this.status.set_label(&format!("Downloading: {} of {} MB", d / 1_000_000, t / 1_000_000)); glib::ControlFlow::Continue }
+                                Some(Ok(())) => { *done.borrow_mut() = Some(Ok(())); button.set_visible(false); this.status.set_label("Model ready."); this.schedule(); glib::ControlFlow::Break }
+                                Some(Err(e)) => { this.status.set_label(&format!("Download failed: {e}")); button.set_sensitive(true); glib::ControlFlow::Break }
+                            }
+                        });
+                    });
+                }
+            }
         }
         content.append(&grid);
     }

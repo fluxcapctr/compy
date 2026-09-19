@@ -26,6 +26,29 @@ pub struct Document {
     pub path: Option<std::path::PathBuf>,
     /// Document pixels the last stroke step changed (x0, y0, x1, y1), when the change was that local.
     dirty: Option<(f64, f64, f64, f64)>,
+    /// Every selected layer (the active one among them) for group transforms, merges and deletes; not undone.
+    pub selected: std::collections::HashSet<Uuid>,
+    /// Selected pixels being dragged (Ctrl-drag with the Move tool).
+    pixel_move: Option<PixelMove>,
+    /// The background removal model's mask for the image it was made from (by surface pointer), so a slider
+    /// only redoes the refining.
+    matte_cache: Option<(usize, Vec<f32>)>,
+}
+
+/// Selected pixels lifted off their layer while they are dragged (`PixelMove`): everything in the layer's own
+/// pixel grid, the outline they started from, and where they are now.
+struct PixelMove {
+    id: Uuid,
+    lifted: ImageSurface,
+    /// Where the lifted pixels came from in the layer's grid.
+    region: (i32, i32),
+    /// The layer with the hole (or as it was, when duplicating).
+    base: ImageSurface,
+    origin_selection: Selection,
+    duplicate: bool,
+    /// Layer pixels moved so far, and the document pixels that is.
+    offset: (i32, i32),
+    document_offset: (i32, i32),
 }
 
 #[derive(Clone)]
@@ -38,6 +61,10 @@ pub struct State {
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool { self.render == other.render && self.selection == other.selection && self.active == other.active }
 }
+
+/// Where dragged layers land in the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place { Above(Uuid), Below(Uuid), Into(Uuid) }
 
 /// The Magic Wand's options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +92,8 @@ impl Document {
         let document_id = project.manifest.document_id;
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None })
+        let selected = active.into_iter().collect();
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -76,6 +104,49 @@ impl Document {
         self.renderer.restore(&state.render);
         self.selection = state.selection.clone();
         self.active = state.active;
+        self.selected.retain(|id| self.renderer.layer_index(*id).is_some());
+        if let Some(a) = self.active { self.selected.insert(a); }
+    }
+
+    // MARK: Selecting layers
+
+    /// Makes `id` the only selected layer (and the active one).
+    pub fn select_layer(&mut self, id: Option<Uuid>) {
+        self.active = id.filter(|i| self.has_layer(*i));
+        self.selected = self.active.into_iter().collect();
+        self.mask_target = false;
+    }
+
+    /// Ctrl-click in the panel: adds or removes a layer from the selection; the active layer stays selected.
+    pub fn toggle_layer_selected(&mut self, id: Uuid) {
+        if !self.has_layer(id) { return; }
+        if self.selected.contains(&id) && self.selected.len() > 1 { self.selected.remove(&id); if self.active == Some(id) { self.active = self.selected.iter().next().copied(); } }
+        else { self.selected.insert(id); self.active = Some(id); }
+        self.mask_target = false;
+    }
+
+    /// Shift-click in the panel: selects every row between the active layer and `id`, in panel order.
+    pub fn select_layer_range(&mut self, id: Uuid) {
+        let order: Vec<Uuid> = crate::format::entries_ordered(self.renderer.layers(), true).iter().map(|e| e.layer.id).collect();
+        let (Some(a), Some(b)) = (self.active.and_then(|a| order.iter().position(|x| *x == a)), order.iter().position(|x| *x == id)) else { self.select_layer(Some(id)); return };
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.selected.extend(order[lo..=hi].iter().copied());
+        self.mask_target = false;
+    }
+
+    /// Several layers, or one folder, transform as one box (`transformsAsGroup`).
+    pub fn transforms_as_group(&self) -> bool {
+        self.selected.len() > 1 || self.active.is_some_and(|id| self.has_layer(id) && self.renderer.layer(id).is_group())
+    }
+
+    /// The upright box around what a group transform moves (`groupTransformBox`).
+    pub fn group_box(&self) -> Option<Transform> {
+        let members = self.active.map(|id| self.transform_members(id)).unwrap_or_default();
+        if members.is_empty() { return None; }
+        let boxes: Vec<_> = members.iter().map(|m| self.renderer.layer(*m).transform.bounds()).collect();
+        let (x0, y0) = (boxes.iter().map(|b| b.0).fold(f64::MAX, f64::min), boxes.iter().map(|b| b.1).fold(f64::MAX, f64::min));
+        let (x1, y1) = (boxes.iter().map(|b| b.2).fold(f64::MIN, f64::max), boxes.iter().map(|b| b.3).fold(f64::MIN, f64::max));
+        Some(Transform { origin: crate::format::Point(x0, y0), size: crate::format::Size((x1 - x0).max(1.0), (y1 - y0).max(1.0)), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() })
     }
 
     pub fn begin_edit(&mut self, name: &str) { let state = self.state(); self.history.begin(name, state); }
@@ -192,31 +263,73 @@ impl Document {
 
     /// The filter's result on the active layer, and the placement it needs when the filter spread past the
     /// layer's edge (a blur gets a transparent margin to spread into, then the empty rim is cut away again).
+    /// The active mask and the grid it is painted in, when the mask is the target.
+    fn active_mask(&self) -> Option<(Uuid, ImageSurface, Transform)> {
+        if !self.mask_target { return None; }
+        let id = self.active?;
+        let layer = self.renderer.layer(id);
+        if !layer.mask_enabled() { return None; }
+        let mask = self.renderer.mask(id)?.clone();
+        Some((id, mask, layer.mask_placement.unwrap_or(layer.transform)))
+    }
+
+    /// A filter run on the active mask: the mask as opaque gray, filtered like pixels, back to coverage.
+    fn filtered_mask(&self, kind: Kind, settings: &Settings) -> Result<(Uuid, ImageSurface)> {
+        let Some((id, mask, grid)) = self.active_mask() else { bail!("Select a layer with a mask first.") };
+        if kind.needs_selection() { bail!("{} works on image pixels, not masks.", kind.name()); }
+        let (w, h) = (mask.width(), mask.height());
+        // A uniform 1 x 1 mask cannot hold a partial result; give it the layer's grid first.
+        let (mask, w, h) = if (w, h) == (1, 1) {
+            let (gw, gh) = self.renderer.image_size(id).unwrap_or((grid.size.0.round().max(1.0) as i32, grid.size.1.round().max(1.0) as i32));
+            let value = with_bytes(&mask, |d, _| d[0])?;
+            (crate::raster::a8_filled(gw, gh, value)?, gw, gh)
+        } else { (mask, w, h) };
+        let gray = gray_from_a8(&mask)?;
+        let coverage = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&grid, w, h)?), None => None };
+        let result = filters::run(kind, &gray, settings, coverage.as_ref())?;
+        Ok((id, a8_from_gray(&result)?))
+    }
+
     fn filtered(&self, kind: Kind, settings: &Settings) -> Result<(Uuid, ImageSurface, Option<Transform>)> {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
         if kind.needs_selection() && self.selection.as_ref().is_none_or(|s| s.is_empty()) { bail!("{} needs a selection.", kind.name()); }
+        let transform = self.renderer.layer(id).transform;
+        let (iw, ih) = (image.width(), image.height());
         let margin = kind.margin(&settings.normalized()) as i32;
-        if margin == 0 {
+        // Content-Aware Fill extends the layer over any of the selection on the canvas past its edge.
+        let extent: Option<(i32, i32, i32, i32)> = if kind == Kind::ContentAwareFill {
+            self.selection.as_ref().and_then(|s| s.bounds).and_then(|(bx0, by0, bx1, by1)| {
+                let (cx0, cy0, cx1, cy1) = (bx0.max(0) as f64, by0.max(0) as f64, (bx1 as i64).min(self.width() as i64) as f64, (by1 as i64).min(self.height() as i64) as f64);
+                if cx1 <= cx0 || cy1 <= cy0 { return None; }
+                let to_layer = crate::selection::document_to_layer(&transform, iw, ih).ok()?;
+                let corners = [(cx0, cy0), (cx1, cy0), (cx1, cy1), (cx0, cy1)].map(|(x, y)| to_layer.transform_point(x, y));
+                let (mut x0, mut y0, mut x1, mut y1) = (0.0f64, 0.0f64, iw as f64, ih as f64);
+                for (x, y) in corners { x0 = x0.min(x.floor()); y0 = y0.min(y.floor()); x1 = x1.max(x.ceil()); y1 = y1.max(y.ceil()); }
+                let grown = (x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+                if grown == (0, 0, iw, ih) { None } else { Some(grown) }
+            })
+        } else { None };
+        if margin == 0 && extent.is_none() {
             let coverage = self.active_coverage(id, &image)?;
             let result = filters::run(kind, &image, settings, coverage.as_ref())?;
             return Ok((id, result, None));
         }
-        let transform = self.renderer.layer(id).transform;
-        let (iw, ih) = (image.width(), image.height());
-        let (gw, gh) = (iw + 2 * margin, ih + 2 * margin);
-        if gw > 30_000 || gh > 30_000 || gw as i64 * gh as i64 > 100_000_000 { bail!("The blur needs more room than the 30,000-pixel side or 100-megapixel limit allows."); }
+        let (ox, oy, gw, gh) = match extent { Some((x0, y0, x1, y1)) => (-x0, -y0, x1 - x0, y1 - y0), None => (margin, margin, iw + 2 * margin, ih + 2 * margin) };
+        if gw > 30_000 || gh > 30_000 || gw as i64 * gh as i64 > 100_000_000 { bail!("The filter needs more room than the 30,000-pixel side or 100-megapixel limit allows."); }
         let grown = new_argb(gw, gh)?;
         {
             let cr = Context::new(&grown)?;
-            cr.set_source_surface(&image, margin as f64, margin as f64)?;
+            cr.set_source_surface(&image, ox as f64, oy as f64)?;
             cr.paint()?;
         }
         let mut grown_transform = transform;
         grown_transform.size = crate::format::Size(transform.size.0 * gw as f64 / iw as f64, transform.size.1 * gh as f64 / ih as f64);
-        let c = transform.center();
-        grown_transform.origin = crate::format::Point(c.0 - grown_transform.size.0 / 2.0, c.1 - grown_transform.size.1 / 2.0);
+        let to_document = crate::render::pixel_to_document(&transform, iw, ih);
+        let (mx, my) = to_document.transform_point(gw as f64 / 2.0 - ox as f64, gh as f64 / 2.0 - oy as f64);
+        grown_transform.origin = crate::format::Point(mx - grown_transform.size.0 / 2.0, my - grown_transform.size.1 / 2.0);
         let coverage = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&grown_transform, gw, gh)?), None => None };
         let blurred = filters::run(kind, &grown, settings, coverage.as_ref())?;
+        if extent.is_some() { return Ok((id, blurred, Some(grown_transform))); }
         // Trim the transparent rim the blur did not reach.
         let bounds = with_bytes(&blurred, |data, stride| crate::ffi::alpha_bounds(data, gw as usize, gh as usize, stride))?;
         let Some((x0, y0, x1, y1)) = bounds else { return Ok((id, blurred, Some(grown_transform))) };
@@ -249,6 +362,15 @@ impl Document {
             _ => false,
         };
         if identity { self.clear_preview(); return Ok(()); }
+        if kind == Kind::RemoveBackground { return self.remove_background(&s.matte, true); }
+        if self.active_mask().is_some() {
+            let (id, mask) = self.filtered_mask(kind, settings)?;
+            self.renderer.end_mask_preview(id);
+            self.begin_edit(&format!("{} Mask", kind.name()));
+            self.renderer.set_mask(id, Some(mask));
+            self.end_edit();
+            return Ok(());
+        }
         let (id, result, placed) = self.filtered(kind, settings)?;
         self.renderer.set_preview(id, None);
         self.begin_edit(kind.name());
@@ -268,6 +390,15 @@ impl Document {
 
     /// Shows what the filter would do without committing it.
     pub fn preview_filter(&mut self, kind: Kind, settings: &Settings) -> Result<()> {
+        if kind == Kind::RemoveBackground { return self.remove_background(&settings.matte, false); }
+        if self.active_mask().is_some() {
+            let (id, mask) = self.filtered_mask(kind, settings)?;
+            let (w, h) = (mask.width(), mask.height());
+            let preview = self.renderer.begin_mask_preview(id, w, h)?;
+            let rows = with_bytes(&mask, |d, _| d.to_vec())?;
+            crate::raster::with_bytes_raw_mut(&preview, |d, _| d.copy_from_slice(&rows))?;
+            return self.renderer.mask_preview_changed(id, (0, 0, w, h));
+        }
         let (id, result, placed) = self.filtered(kind, settings)?;
         match placed {
             Some(t) => self.renderer.set_preview_placed(id, result, t),
@@ -277,7 +408,404 @@ impl Document {
     }
 
     pub fn clear_preview(&mut self) {
-        if let Some(id) = self.active { self.renderer.set_preview(id, None); }
+        if let Some(id) = self.active { self.renderer.set_preview(id, None); self.renderer.end_mask_preview(id); }
+    }
+
+    /// Ctrl+I: inverts the active layer's colors (transparency kept) or its mask, inside the selection.
+    pub fn invert(&mut self) -> Result<()> { self.apply_filter(Kind::Invert, &Settings::default()) }
+
+    // MARK: Remove Background
+
+    /// The subject mask for the active layer, refined by `settings`, previewed as transparency or committed as
+    /// a layer mask that hides the background (what the layer already masks stays hidden: `subjectMask`).
+    pub fn remove_background(&mut self, settings: &crate::matte::MatteSettings, commit: bool) -> Result<()> {
+        let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
+        let key = image.to_raw_none() as usize;
+        if self.matte_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let mask = crate::matte::subject_mask(&image)?;
+            if mask.iter().all(|v| *v < 0.05) { bail!("No foreground subject was detected in this layer. Try an image with a more distinct subject."); }
+            self.matte_cache = Some((key, mask));
+        }
+        let raw = self.matte_cache.as_ref().unwrap().1.clone();
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        let refined = crate::matte::refine(&raw, &image, settings, if commit { usize::MAX / 2 } else { 1400 })?;
+        if commit {
+            self.renderer.set_preview(id, None);
+            let mut levels = refined;
+            if let Some(existing) = self.renderer.mask(id).cloned() {
+                if self.renderer.layer(id).mask_placement.is_none() {
+                    // Both masks hide: what either one hides stays hidden.
+                    let existing = if (existing.width() as usize, existing.height() as usize) == (w, h) { existing } else { let v = with_bytes(&existing, |d, _| d[0])?; crate::raster::a8_filled(w as i32, h as i32, v)? };
+                    with_bytes(&existing, |d, stride| { for y in 0..h { for x in 0..w { levels[y * w + x] *= d[y * stride + x] as f32 / 255.0; } } })?;
+                }
+            }
+            let mask = crate::matte::a8_from_levels(&levels, w, h)?;
+            self.begin_edit("Remove Background");
+            self.renderer.set_mask(id, Some(mask));
+            self.renderer.set_mask_placement(id, None);
+            self.renderer.set_mask_enabled(id, true);
+            self.end_edit();
+        } else {
+            let mask = crate::matte::a8_from_levels(&refined, w, h)?;
+            let shown = new_argb(w as i32, h as i32)?;
+            let cr = Context::new(&shown)?;
+            cr.set_source_surface(&image, 0.0, 0.0)?;
+            cr.mask_surface(&mask, 0.0, 0.0)?;
+            drop(cr);
+            self.renderer.set_preview(id, Some(shown));
+        }
+        Ok(())
+    }
+
+    // MARK: Eyedropper
+
+    /// The color at a document pixel as the canvas shows it (every visible layer) or on the active layer's
+    /// own pixels; None outside the canvas or over transparency (`sampleCompositeColor`).
+    pub fn sample_color(&mut self, x: f64, y: f64, all_layers: bool) -> Result<Option<[f64; 3]>> {
+        let (px, py) = (x.floor(), y.floor());
+        if px < 0.0 || py < 0.0 || px >= self.width() as f64 || py >= self.height() as f64 { return Ok(None); }
+        let one = new_argb(1, 1)?;
+        {
+            let cr = Context::new(&one)?;
+            cr.translate(-px, -py);
+            cr.rectangle(px, py, 1.0, 1.0);
+            cr.clip();
+            if all_layers { self.renderer.draw(&cr)?; }
+            else if let Some(id) = self.active { if !self.renderer.layer(id).is_group() { self.renderer.draw_layer_plain(id, &cr)?; } }
+        }
+        let p = with_bytes(&one, |d, _| [d[0], d[1], d[2], d[3]])?;
+        if p[3] == 0 { return Ok(None); }
+        let a = p[3] as f64;
+        let un = |c: u8| ((c as f64).min(a) / a * 255.0).round() / 255.0;
+        Ok(Some([un(p[2]), un(p[1]), un(p[0])]))
+    }
+
+    // MARK: Gradients
+
+    /// A gradient from `start` to `end` (document pixels) over the active layer or its mask, inside the
+    /// selection, previewed (`commit` false) or committed as one undo step (`fillGradient`). `colors` are the
+    /// two ends with alpha; on a mask their gray is used. Linear runs start to end; radial is centered on
+    /// start with end on its rim.
+    pub fn gradient(&mut self, start: (f64, f64), end: (f64, f64), radial: bool, colors: [[f64; 4]; 2], opacity: f64, commit: bool) -> Result<()> {
+        let Some(id) = self.active else { bail!("Select a layer first.") };
+        if self.selection.as_ref().is_some_and(|s| s.is_empty()) { bail!("Nothing is selected."); }
+        let layer = self.renderer.layer(id).clone();
+        if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
+        let mask_target = self.active_mask().is_some();
+        let (w, h, grid, base): (i32, i32, Transform, ImageSurface) = if let Some((_, mask, grid)) = self.active_mask() {
+            let (w, h) = if mask.width() == 1 && mask.height() == 1 { self.renderer.image_size(id).unwrap_or((grid.size.0.round().max(1.0) as i32, grid.size.1.round().max(1.0) as i32)) } else { (mask.width(), mask.height()) };
+            let target = if (w, h) == (mask.width(), mask.height()) { mask } else { let v = with_bytes(&mask, |d, _| d[0])?; crate::raster::a8_filled(w, h, v)? };
+            (w, h, grid, gray_from_a8(&target)?)
+        } else {
+            let (w, h) = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
+            let base = new_argb(w, h)?;
+            if let Some(image) = self.renderer.image(id) { let cr = Context::new(&base)?; cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
+            (w, h, layer.transform, base)
+        };
+        let result = new_argb(w, h)?;
+        {
+            let cr = Context::new(&result)?;
+            cr.set_source_surface(&base, 0.0, 0.0)?;
+            cr.paint()?;
+            // The gradient is defined on the document and drawn through the grid's placement.
+            cr.transform(crate::selection::document_to_layer(&grid, w, h)?);
+            let stops = if mask_target { colors.map(|c| { let g = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]; [g, g, g, c[3]] }) } else { colors };
+            let pattern: cairo::Gradient = if radial {
+                let r = (end.0 - start.0).hypot(end.1 - start.1).max(0.001);
+                (*cairo::RadialGradient::new(start.0, start.1, 0.0, start.0, start.1, r)).clone()
+            } else { (*cairo::LinearGradient::new(start.0, start.1, end.0, end.1)).clone() };
+            for (i, c) in stops.iter().enumerate() { pattern.add_color_stop_rgba(i as f64, c[0], c[1], c[2], c[3]); }
+            pattern.set_extend(cairo::Extend::Pad);
+            cr.set_source(&pattern)?;
+            match &self.selection {
+                Some(sel) => {
+                    cr.identity_matrix();
+                    let coverage = sel.coverage_on_layer(&grid, w, h)?;
+                    cr.push_group();
+                    cr.transform(crate::selection::document_to_layer(&grid, w, h)?);
+                    cr.set_source(&pattern)?;
+                    cr.paint_with_alpha(opacity.clamp(0.0, 1.0))?;
+                    cr.pop_group_to_source()?;
+                    cr.mask_surface(&coverage, 0.0, 0.0)?;
+                }
+                None => cr.paint_with_alpha(opacity.clamp(0.0, 1.0))?,
+            }
+        }
+        if mask_target {
+            let a8 = a8_from_gray(&result)?;
+            if commit {
+                self.renderer.end_mask_preview(id);
+                self.begin_edit("Gradient Mask");
+                self.renderer.set_mask(id, Some(a8));
+                self.end_edit();
+            } else {
+                let preview = self.renderer.begin_mask_preview(id, w, h)?;
+                let rows = with_bytes(&a8, |d, _| d.to_vec())?;
+                crate::raster::with_bytes_raw_mut(&preview, |d, _| d.copy_from_slice(&rows))?;
+                self.renderer.mask_preview_changed(id, (0, 0, w, h))?;
+            }
+        } else if commit {
+            self.renderer.set_preview(id, None);
+            self.begin_edit("Gradient");
+            self.renderer.set_image(id, result);
+            self.end_edit();
+        } else {
+            self.renderer.set_preview(id, Some(result));
+        }
+        Ok(())
+    }
+
+    // MARK: Shape layers
+
+    /// A rectangle (corners rounded by `radius`, at most half the shorter side) or ellipse filling `rect`
+    /// (document pixels, whole), in `color`, on a new layer above the active one (`finishShape`).
+    pub fn add_shape_layer(&mut self, ellipse: bool, rect: (f64, f64, f64, f64), color: [f64; 3], radius: f64) -> Result<Uuid> {
+        let (x, y, w, h) = (rect.0.round(), rect.1.round(), rect.2.round(), rect.3.round());
+        if w < 1.0 || h < 1.0 { bail!("Drag out a shape first."); }
+        if w * h > 100_000_000.0 || w > 30_000.0 || h > 30_000.0 { bail!("That shape is too large. A shape can cover up to 100 megapixels."); }
+        let kind = if ellipse { "Ellipse" } else { "Rectangle" };
+        let image = shape_image(ellipse, w as i32, h as i32, color, radius)?;
+        let style = serde_json::json!({"kind": kind, "red": color[0], "green": color[1], "blue": color[2], "cornerRadius": radius});
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(self.unique_name(kind), parent);
+        record.transform.origin = crate::format::Point(x, y);
+        record.transform.size = crate::format::Size(w, h);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        record.shape = Some(style);
+        let id = record.id;
+        self.begin_edit(kind);
+        self.renderer.insert_layer(index, record, Some(image), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// A shape layer scaled to a new size draws its shape again at that size, so a rounded corner keeps its
+    /// radius instead of stretching (`redrawShape`). Part of the edit that changed the size.
+    fn redraw_shape(&mut self, id: Uuid) -> Result<()> {
+        let layer = self.renderer.layer(id).clone();
+        let Some(style) = layer.shape.clone() else { return Ok(()) };
+        let (w, h) = (layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32);
+        if self.renderer.image_size(id) == Some((w, h)) || w as i64 * h as i64 > 100_000_000 { return Ok(()); }
+        let n = |k: &str| style.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let ellipse = style.get("kind").and_then(serde_json::Value::as_str) == Some("Ellipse");
+        let image = shape_image(ellipse, w, h, [n("red"), n("green"), n("blue")], n("cornerRadius"))?;
+        // A mask on the layer's grid stays where it is while that grid changes size.
+        if self.renderer.mask(id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(id, Some(layer.transform)); }
+        self.renderer.set_shape_image(id, image, style);
+        Ok(())
+    }
+
+    // MARK: Crop
+
+    /// Crops the canvas to `rect` (document pixels), as one undo step (`commitCrop`).
+    pub fn crop(&mut self, rect: (f64, f64, f64, f64)) -> Result<()> {
+        let (x, y, w, h) = (rect.0.round(), rect.1.round(), rect.2.round(), rect.3.round());
+        if !(1.0..=30_000.0).contains(&w) || !(1.0..=30_000.0).contains(&h) || x.abs() > 1_000_000.0 || y.abs() > 1_000_000.0 { bail!("Crop sizes run from 1 to 30,000 pixels per side."); }
+        self.begin_edit("Crop");
+        self.canvas_size(w as i32, h as i32, 4, None, Some((-x, -y)), "Crop")?;
+        self.selection = None;
+        self.end_edit();
+        Ok(())
+    }
+
+    /// What crop edges snap to: the canvas edges and every visible layer's bounds, in whole pixels.
+    pub fn crop_snap_targets(&self) -> (Vec<f64>, Vec<f64>) {
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let (mut xs, mut ys) = (vec![0.0, w], vec![0.0, h]);
+        for id in crate::format::visible_layers(self.renderer.layers()) {
+            if !self.renderer.has_image(id) { continue; }
+            let (x0, y0, x1, y1) = self.renderer.layer(id).transform.bounds();
+            xs.extend([x0.round(), x1.round()]);
+            ys.extend([y0.round(), y1.round()]);
+        }
+        (xs, ys)
+    }
+
+    // MARK: Fill and clear
+
+    /// Fills the selection (or the whole layer) with `color` on the active image layer, or with black or
+    /// white on its mask when the mask is targeted, as one undo step (`fillSelection`).
+    pub fn fill(&mut self, color: [f64; 3]) -> Result<()> {
+        let Some(id) = self.active else { bail!("Select a layer first.") };
+        if self.selection.as_ref().is_some_and(|s| s.is_empty()) { return Ok(()); }
+        if let Some((_, mask, grid)) = self.active_mask() {
+            let white = color[0] + color[1] + color[2] > 1.5;
+            let (w, h) = if mask.width() == 1 && mask.height() == 1 { self.renderer.image_size(id).unwrap_or((grid.size.0.round().max(1.0) as i32, grid.size.1.round().max(1.0) as i32)) } else { (mask.width(), mask.height()) };
+            let target = if (w, h) == (mask.width(), mask.height()) { mask } else { let v = with_bytes(&mask, |d, _| d[0])?; crate::raster::a8_filled(w, h, v)? };
+            let coverage = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&grid, w, h)?), None => None };
+            let value = if white { 255 } else { 0 };
+            let cov = coverage.map(|c| with_bytes(&c, |d, stride| (0..h as usize).flat_map(|y| d[y * stride..y * stride + w as usize].to_vec()).collect::<Vec<u8>>())).transpose()?;
+            let filled = crate::raster::a8_filled(w, h, value)?;
+            let result = if let Some(cov) = cov {
+                let (wu, hu) = (w as usize, h as usize);
+                let original = with_bytes(&target, |d, stride| (0..hu).flat_map(|y| d[y * stride..y * stride + wu].to_vec()).collect::<Vec<u8>>())?;
+                let stride = cairo::Format::A8.stride_for_width(w as u32)? as usize;
+                let mut data = vec![0u8; stride * hu];
+                for y in 0..hu { for x in 0..wu { let c = cov[y * wu + x] as u32; let o = original[y * wu + x] as u32; data[y * stride + x] = ((value as u32 * c + o * (255 - c) + 127) / 255) as u8; } }
+                crate::raster::a8_from_data(w, h, data, stride as i32)?
+            } else { filled };
+            self.begin_edit("Fill Mask");
+            self.renderer.set_mask(id, Some(result));
+            self.end_edit();
+            return Ok(());
+        }
+        let layer = self.renderer.layer(id).clone();
+        if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
+        let (w, h) = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
+        let result = new_argb(w, h)?;
+        {
+            let cr = Context::new(&result)?;
+            if let Some(image) = self.renderer.image(id) { cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
+            cr.set_source_rgb(color[0], color[1], color[2]);
+            match &self.selection {
+                Some(sel) => { let coverage = sel.coverage_on_layer(&layer.transform, w, h)?; cr.mask_surface(&coverage, 0.0, 0.0)?; }
+                None => cr.paint()?,
+            }
+        }
+        self.begin_edit("Fill");
+        self.renderer.set_image(id, result);
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Delete with a selection: the selected pixels become transparent; on a mask they take the background
+    /// (hide) tone (`clearSelectedPixels`). Nothing happens without a selection.
+    pub fn clear_selection(&mut self, mask_background_white: bool) -> Result<()> {
+        let Some(selection) = self.selection.clone() else { return Ok(()) };
+        if selection.is_empty() { return Ok(()); }
+        if self.active_mask().is_some() { return self.fill(if mask_background_white { [1.0; 3] } else { [0.0; 3] }); }
+        let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
+        let transform = self.renderer.layer(id).transform;
+        let (w, h) = (image.width(), image.height());
+        let result = new_argb(w, h)?;
+        {
+            let cr = Context::new(&result)?;
+            cr.set_source_surface(&image, 0.0, 0.0)?;
+            cr.paint()?;
+            let coverage = selection.coverage_on_layer(&transform, w, h)?;
+            cr.set_operator(cairo::Operator::DestOut);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+            cr.mask_surface(&coverage, 0.0, 0.0)?;
+        }
+        self.begin_edit("Clear");
+        self.renderer.set_image(id, result);
+        self.end_edit();
+        Ok(())
+    }
+
+    // MARK: Merging
+
+    /// What Ctrl+E merges (`mergePlan`): a folder merges its contents and goes; a layer merges with the
+    /// layer beneath it in the same folder. Ids in stacking order, the ids that go, the result's name, parent
+    /// and place, and the undo name.
+    fn merge_plan(&self) -> Option<(Vec<Uuid>, std::collections::HashSet<Uuid>, String, Option<Uuid>, Uuid, &'static str)> {
+        let active = self.active?;
+        let layers = self.renderer.layers();
+        let record = self.renderer.layer(active);
+        if self.selected.len() > 1 {
+            let mut picked = self.selected.clone();
+            for id in self.selected.clone() { picked.extend(self.descendants(id)); }
+            let ordered: Vec<&crate::format::Layer> = layers.iter().filter(|l| picked.contains(&l.id)).collect();
+            if !ordered.iter().any(|l| !l.is_group()) { return None; }
+            let top = ordered.iter().rev().find(|l| self.selected.contains(&l.id))?;
+            return Some((ordered.iter().map(|l| l.id).collect(), picked, top.name.clone(), top.parent_id, top.id, "Merge Layers"));
+        }
+        if record.is_group() {
+            let inside = self.descendants(active);
+            if !layers.iter().any(|l| inside.contains(&l.id) && !l.is_group()) { return None; }
+            let ids: Vec<Uuid> = layers.iter().filter(|l| inside.contains(&l.id) || l.id == active).map(|l| l.id).collect();
+            let removed = ids.iter().copied().collect();
+            return Some((ids, removed, record.name.clone(), record.parent_id, active, "Merge Group"));
+        }
+        let index = self.renderer.layer_index(active)?;
+        let below = layers[..index].iter().rev().find(|l| l.parent_id == record.parent_id)?;
+        if below.is_group() || below.adjustment.is_some() || record.adjustment.is_some() { return None; }
+        Some((vec![below.id, active], [below.id, active].into_iter().collect(), below.name.clone(), record.parent_id, active, "Merge Down"))
+    }
+
+    fn descendants(&self, id: Uuid) -> std::collections::HashSet<Uuid> {
+        let mut out = std::collections::HashSet::new();
+        let mut frontier = vec![id];
+        while let Some(current) = frontier.pop() {
+            for l in self.renderer.layers() { if l.parent_id == Some(current) && out.insert(l.id) { frontier.push(l.id); } }
+        }
+        out
+    }
+
+    pub fn can_merge(&self) -> bool { self.merge_plan().is_some() }
+    pub fn merge_title(&self) -> &'static str { self.merge_plan().map_or("Merge Down", |p| p.5) }
+
+    /// Ctrl+E: the layers composited as the canvas shows them (blend modes, opacity, masks, clipping and
+    /// adjustments baked in) into one pixel layer, trimmed to what is there, in their place (`mergeLayers`).
+    pub fn merge_layers(&mut self) -> Result<()> {
+        let Some((ids, removed, name, parent, anchor, action)) = self.merge_plan() else { return Ok(()) };
+        let kept: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
+        // Only the merged layers, cut loose from anything outside the merge.
+        let subset: Vec<crate::format::Layer> = self.renderer.layers().iter().filter(|l| kept.contains(&l.id)).cloned().map(|mut l| {
+            if l.parent_id.is_some_and(|p| !kept.contains(&p)) { l.parent_id = None; }
+            if l.mask_source_id.is_some_and(|s| !kept.contains(&s)) { l.mask_source_id = None; }
+            l
+        }).collect();
+        let images = self.renderer.images().iter().filter(|(k, _)| kept.contains(k)).map(|(k, v)| (*k, v.clone())).collect();
+        let masks = self.renderer.masks().iter().filter(|(k, _)| kept.contains(k)).map(|(k, v)| (*k, v.clone())).collect();
+        let mut manifest = self.manifest();
+        manifest.layers = subset;
+        manifest.active_layer_id = None;
+        let mut flat = render::Renderer::new(Project { path: std::path::PathBuf::new(), manifest, images, masks })?;
+        let full = flat.render_flat()?;
+        let (w, h) = (full.width(), full.height());
+        let bounds = with_bytes(&full, |d, stride| crate::ffi::alpha_bounds(d, w as usize, h as usize, stride))?;
+        let (x0, y0, x1, y1) = bounds.unwrap_or((0, 0, 1, 1));
+        let (cw, ch) = ((x1 - x0).max(1) as i32, (y1 - y0).max(1) as i32);
+        let trimmed = new_argb(cw, ch)?;
+        {
+            let cr = Context::new(&trimmed)?;
+            cr.set_source_surface(&full, -(x0 as f64), -(y0 as f64))?;
+            cr.set_operator(cairo::Operator::Source);
+            cr.paint()?;
+        }
+        let mut merged = self.blank_record(name, parent);
+        merged.transform.origin = crate::format::Point(x0 as f64, y0 as f64);
+        merged.transform.size = crate::format::Size(cw as f64, ch as f64);
+        merged.image_file = Some(format!("{}.png", crate::format::upper(merged.id)));
+        let merged_id = merged.id;
+        let layers = self.renderer.layers();
+        let slot = self.renderer.layer_index(anchor).unwrap_or(layers.len());
+        let insertion = slot - layers[..slot].iter().filter(|l| removed.contains(&l.id)).count();
+        self.begin_edit(action);
+        // Layers clipped to anything that was merged now clip to the result.
+        let reclip: Vec<Uuid> = self.renderer.layers().iter().filter(|l| l.mask_source_id.is_some_and(|s| removed.contains(&s)) && !removed.contains(&l.id)).map(|l| l.id).collect();
+        for id in removed.iter() { self.renderer.remove_layer(*id); }
+        self.renderer.insert_layer(insertion, merged, Some(trimmed), None);
+        for id in reclip { self.renderer.set_mask_source(id, Some(merged_id)); }
+        self.select_layer(Some(merged_id));
+        self.end_edit();
+        Ok(())
+    }
+
+    // MARK: Flip canvas
+
+    /// Flips the whole canvas: every layer, placed mask and the selection mirrored across its middle
+    /// (`flipCanvas`).
+    pub fn flip_canvas(&mut self, horizontally: bool) -> Result<()> {
+        let (w, h) = (self.width(), self.height());
+        let axis = if horizontally { w as f64 / 2.0 } else { h as f64 / 2.0 };
+        self.begin_edit(if horizontally { "Flip Canvas Horizontal" } else { "Flip Canvas Vertical" });
+        for layer in self.renderer.layers().to_vec() {
+            self.renderer.set_layer_transform(layer.id, layer.transform.mirrored(horizontally, axis));
+            if let Some(p) = layer.mask_placement { self.renderer.set_mask_placement(layer.id, Some(p.mirrored(horizontally, axis))); }
+        }
+        if let Some(selection) = self.selection.clone() {
+            self.selection = Some(Selection::from_shape(w, h, selection.antialiased, |cr| {
+                if horizontally { cr.translate(w as f64, 0.0); cr.scale(-1.0, 1.0); } else { cr.translate(0.0, h as f64); cr.scale(1.0, -1.0); }
+                cr.set_source_surface(&selection.mask, 0.0, 0.0)?;
+                cr.paint()?;
+                Ok(())
+            })?);
+        }
+        self.end_edit();
+        Ok(())
     }
 
     /// The active layer's histogram inside the selection, for the Levels dialog.
@@ -533,21 +1061,222 @@ impl Document {
         self.begin_edit(name);
         if self.renderer.mask(id).is_some() { self.renderer.set_mask_placement(id, placement); }
         self.renderer.set_layer_transform(id, transform);
+        if old.size != transform.size { let _ = self.redraw_shape(id); }
         self.end_edit();
     }
 
-    /// The layers a transform of `id` moves: a folder's visible descendants, or the layer itself.
+    /// The layers a transform of `id` moves: with several layers selected, the visible pixel layers selected
+    /// or inside selected folders (`groupTransformMembers`); a folder's visible descendants; or the layer.
     pub fn transform_members(&self, id: Uuid) -> Vec<Uuid> {
-        let layer = self.renderer.layer(id);
-        if !layer.is_group() { return vec![id]; }
         let layers = self.renderer.layers();
+        let roots: std::collections::HashSet<Uuid> = if self.selected.len() > 1 { self.selected.clone() } else { [id].into_iter().collect() };
+        if roots.len() == 1 && !self.renderer.layer(id).is_group() { return if self.renderer.has_image(id) { vec![id] } else { Vec::new() }; }
         let mut result = Vec::new();
         for entry in crate::format::entries(layers) {
-            if entry.layer.is_group() || !self.renderer.has_image(entry.layer.id) { continue; }
-            let mut parent = entry.layer.parent_id;
-            while let Some(p) = parent { if p == id { result.push(entry.layer.id); break; } parent = layers.iter().find(|l| l.id == p).and_then(|l| l.parent_id); }
+            if entry.layer.is_group() || !self.renderer.has_image(entry.layer.id) || !entry.visible { continue; }
+            let mut current = Some(entry.layer.id);
+            for _ in 0..64 {
+                let Some(c) = current else { break };
+                if roots.contains(&c) { result.push(entry.layer.id); break; }
+                current = layers.iter().find(|l| l.id == c).and_then(|l| l.parent_id);
+            }
         }
         result
+    }
+
+    // MARK: Moving selected pixels
+
+    /// Starts moving (or, `duplicate`, copying) the selected pixels of the active image layer; false when
+    /// there is nothing to move (`beginPixelMove`). The pixels lift off the layer in its own grid.
+    pub fn begin_pixel_move(&mut self, duplicate: bool) -> Result<bool> {
+        if self.pixel_move.is_some() || self.mask_target { return Ok(false); }
+        let Some(selection) = self.selection.clone() else { return Ok(false) };
+        let Some((x0, y0, x1, y1)) = selection.bounds else { return Ok(false) };
+        let Some((id, image)) = self.active_image() else { return Ok(false) };
+        let transform = self.renderer.layer(id).transform;
+        let (w, h) = (image.width(), image.height());
+        let to_layer = crate::selection::document_to_layer(&transform, w, h)?;
+        let corners = [(x0 as f64, y0 as f64), (x1 as f64, y0 as f64), (x1 as f64, y1 as f64), (x0 as f64, y1 as f64)].map(|(x, y)| to_layer.transform_point(x, y));
+        let (lx0, ly0) = (corners.iter().map(|c| c.0).fold(f64::MAX, f64::min).floor().max(0.0) as i32, corners.iter().map(|c| c.1).fold(f64::MAX, f64::min).floor().max(0.0) as i32);
+        let (lx1, ly1) = ((corners.iter().map(|c| c.0).fold(f64::MIN, f64::max).ceil() as i32).min(w), (corners.iter().map(|c| c.1).fold(f64::MIN, f64::max).ceil() as i32).min(h));
+        if lx1 <= lx0 || ly1 <= ly0 { return Ok(false); }
+        let coverage = selection.coverage_on_layer(&transform, w, h)?;
+        let (rw, rh) = (lx1 - lx0, ly1 - ly0);
+        let lifted = new_argb(rw, rh)?;
+        {
+            let cr = Context::new(&lifted)?;
+            cr.set_source_surface(&image, -(lx0 as f64), -(ly0 as f64))?;
+            cr.mask_surface(&coverage, -(lx0 as f64), -(ly0 as f64))?;
+        }
+        let base = if duplicate { image.clone() } else {
+            let hole = new_argb(w, h)?;
+            let cr = Context::new(&hole)?;
+            cr.set_source_surface(&image, 0.0, 0.0)?;
+            cr.paint()?;
+            cr.set_operator(cairo::Operator::DestOut);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+            cr.mask_surface(&coverage, 0.0, 0.0)?;
+            drop(cr);
+            hole
+        };
+        self.pixel_move = Some(PixelMove { id, lifted, region: (lx0, ly0), base, origin_selection: selection, duplicate, offset: (0, 0), document_offset: (0, 0) });
+        Ok(true)
+    }
+
+    pub fn pixel_move_active(&self) -> bool { self.pixel_move.is_some() }
+
+    /// Previews the pixels `dx`, `dy` document pixels (whole pixels) from where they started; the outline
+    /// follows (`movePixels`).
+    pub fn move_pixels(&mut self, dx: f64, dy: f64) -> Result<()> {
+        let Some(pm) = self.pixel_move.as_ref() else { return Ok(()) };
+        let id = pm.id;
+        let transform = self.renderer.layer(id).transform;
+        let (dx, dy) = (dx.round(), dy.round());
+        // The move in the layer's own grid: the transform's linear part, inverted.
+        let (bw, bh) = (pm.base.width(), pm.base.height());
+        let mut to_layer = crate::selection::document_to_layer(&transform, bw, bh)?;
+        to_layer.set_x0(0.0); to_layer.set_y0(0.0);
+        let (mx, my) = to_layer.transform_distance(dx, dy);
+        let offset = (mx.round() as i32, my.round() as i32);
+        let (composed, placed) = self.compose_pixel_move(offset)?;
+        self.renderer.set_preview_placed(id, composed, placed);
+        if let Some(pm) = self.pixel_move.as_mut() { pm.offset = offset; pm.document_offset = (dx as i32, dy as i32); }
+        let origin = self.pixel_move.as_ref().unwrap().origin_selection.clone();
+        self.selection = Some(origin.translated(dx as i32, dy as i32)?);
+        Ok(())
+    }
+
+    /// The layer with the hole plus the lifted pixels at `offset`, on a grid grown to hold both, and the
+    /// transform placing that grid.
+    fn compose_pixel_move(&self, offset: (i32, i32)) -> Result<(ImageSurface, Transform)> {
+        let pm = self.pixel_move.as_ref().unwrap();
+        let transform = self.renderer.layer(pm.id).transform;
+        let (bw, bh) = (pm.base.width(), pm.base.height());
+        let (lw, lh) = (pm.lifted.width(), pm.lifted.height());
+        let (tx, ty) = (pm.region.0 + offset.0, pm.region.1 + offset.1);
+        let (x0, y0) = (tx.min(0), ty.min(0));
+        let (x1, y1) = ((tx + lw).max(bw), (ty + lh).max(bh));
+        let (gw, gh) = (x1 - x0, y1 - y0);
+        if gw > 30_000 || gh > 30_000 || gw as i64 * gh as i64 > 100_000_000 { bail!("The moved pixels would take the layer past the 30,000-pixel side or 100-megapixel limit."); }
+        let out = new_argb(gw, gh)?;
+        {
+            let cr = Context::new(&out)?;
+            cr.set_source_surface(&pm.base, -(x0 as f64), -(y0 as f64))?;
+            cr.paint()?;
+            cr.set_source_surface(&pm.lifted, (tx - x0) as f64, (ty - y0) as f64)?;
+            cr.paint()?;
+        }
+        let mut placed = transform;
+        placed.size = crate::format::Size(transform.size.0 * gw as f64 / bw as f64, transform.size.1 * gh as f64 / bh as f64);
+        let to_document = crate::render::pixel_to_document(&transform, bw, bh);
+        let (cx, cy) = to_document.transform_point((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
+        placed.origin = crate::format::Point(cx - placed.size.0 / 2.0, cy - placed.size.1 / 2.0);
+        Ok((out, placed))
+    }
+
+    /// Commits the pixels and the moved outline together as one undo step (`finishPixelMove`); a move of
+    /// nothing leaves no step.
+    pub fn finish_pixel_move(&mut self) -> Result<()> {
+        let Some(pm) = self.pixel_move.take() else { return Ok(()) };
+        self.renderer.set_preview(pm.id, None);
+        let moved = self.selection.clone();
+        self.selection = Some(pm.origin_selection.clone());
+        if pm.offset == (0, 0) && !pm.duplicate { return Ok(()); }
+        self.pixel_move = Some(pm);
+        let (composed, placed) = self.compose_pixel_move(self.pixel_move.as_ref().unwrap().offset)?;
+        let pm = self.pixel_move.take().unwrap();
+        let old = self.renderer.layer(pm.id).transform;
+        self.begin_edit(if pm.duplicate { "Duplicate Pixels" } else { "Move Pixels" });
+        // A mask on the layer's grid grows with it, revealing the new area (`FloatingMerge.merge`).
+        let layer = self.renderer.layer(pm.id).clone();
+        let carried = if layer.mask_file.is_some() && layer.mask_placement.is_none() && !placed.same_placement(&old) { self.grown_mask(pm.id, &old, &placed, composed.width(), composed.height())? } else { None };
+        self.renderer.set_image(pm.id, composed);
+        self.renderer.set_layer_transform(pm.id, placed);
+        if let Some(mask) = carried { self.renderer.set_mask(pm.id, Some(mask)); }
+        self.selection = moved;
+        self.end_edit();
+        Ok(())
+    }
+
+    /// The layer's mask on a grown grid, white where the layer grew.
+    fn grown_mask(&mut self, id: Uuid, old: &Transform, grown: &Transform, width: i32, height: i32) -> Result<Option<ImageSurface>> {
+        let Some(mask) = self.renderer.mask(id).cloned() else { return Ok(None) };
+        let (ow, oh) = self.renderer.image_size(id).unwrap_or((mask.width(), mask.height()));
+        let to_document = crate::render::pixel_to_document(old, ow, oh);
+        let to_new = crate::selection::document_to_layer(grown, width, height)?;
+        let (ox, oy) = { let (x, y) = to_document.transform_point(0.0, 0.0); to_new.transform_point(x, y) };
+        let out = crate::raster::a8_filled(width, height, 255)?;
+        {
+            let cr = Context::new(&out)?;
+            cr.translate(ox.round(), oy.round());
+            cr.scale(ow as f64 / mask.width() as f64, oh as f64 / mask.height() as f64);
+            cr.set_source_surface(&mask, 0.0, 0.0)?;
+            cr.set_operator(cairo::Operator::Source);
+            cr.rectangle(0.0, 0.0, mask.width() as f64, mask.height() as f64);
+            cr.fill()?;
+        }
+        Ok(Some(out))
+    }
+
+    pub fn cancel_pixel_move(&mut self) {
+        if let Some(pm) = self.pixel_move.take() { self.renderer.set_preview(pm.id, None); self.selection = Some(pm.origin_selection); }
+    }
+
+    /// Ctrl-arrow: moves the selected pixels as one undo step (`nudgePixels`).
+    pub fn nudge_pixels(&mut self, dx: f64, dy: f64) -> Result<()> {
+        if !self.begin_pixel_move(false)? { return Ok(()); }
+        self.move_pixels(dx, dy)?;
+        self.finish_pixel_move()
+    }
+
+    // MARK: Free distort
+
+    /// The layer warped into `corners` at preview size, and the transform placing it (`distortPreview`).
+    pub fn preview_distort(&mut self, id: Uuid, transform: &Transform, corners: &crate::distort::Corners) -> Result<()> {
+        let Some(image) = self.renderer.image(id).cloned() else { return Ok(()) };
+        let (warped, placed) = crate::distort::warp(&image, transform, corners, false, Some(2048.0))?;
+        self.renderer.set_preview_placed(id, warped, placed);
+        Ok(())
+    }
+
+    /// Apply for a distortion: the layer's pixels and mask resampled into the shape, as one undo step
+    /// (`commitDistort`). `transform` is what the layer showed through while its corners were dragged.
+    pub fn commit_distort(&mut self, targets: &[(Uuid, Transform, crate::distort::Corners)]) -> Result<()> {
+        for (id, _, _) in targets { self.renderer.set_preview(*id, None); }
+        let name = if targets.len() == 1 { "Distort" } else { "Distort Layers" };
+        self.begin_edit(name);
+        let result = (|| -> Result<()> {
+            for (id, transform, corners) in targets {
+                let Some(image) = self.renderer.image(*id).cloned() else { continue };
+                let (warped, placed, crop) = crate::distort::warp_trimmed(&image, transform, corners)?;
+                let layer = self.renderer.layer(*id).clone();
+                let mut new_mask = None;
+                let mut new_placement = layer.mask_placement;
+                if let Some(mask) = self.renderer.mask(*id).cloned() {
+                    let linked = layer.mask_linked.unwrap_or(true);
+                    if layer.mask_placement.is_none() && linked {
+                        let (wm, _) = crate::distort::warp(&mask, transform, corners, true, None)?;
+                        new_mask = Some(if mask.width() == 1 && mask.height() == 1 { mask } else { crate::distort::crop(&wm, crop.0, crop.1, crop.2, crop.3, true)? });
+                    } else if let (true, Some(p)) = (linked, layer.mask_placement) {
+                        let placement = p.following(&layer.transform, transform);
+                        if let Some(carried) = crate::distort::carried(&placement, transform, corners).filter(crate::distort::is_usable) {
+                            let background = self.renderer.mask_background(*id)?;
+                            let (moved, moved_placement) = crate::distort::warp_mask(&mask, &placement, &carried, background, None)?;
+                            new_mask = Some(moved);
+                            new_placement = Some(moved_placement);
+                        }
+                    } else {
+                        new_placement = Some(layer.mask_placement.unwrap_or(layer.transform));
+                    }
+                }
+                self.renderer.set_image(*id, warped);
+                self.renderer.set_layer_transform(*id, placed);
+                if let Some(m) = new_mask { self.renderer.set_mask(*id, Some(m)); }
+                if self.renderer.mask(*id).is_some() { self.renderer.set_mask_placement(*id, new_placement); }
+            }
+            Ok(())
+        })();
+        match result { Ok(()) => { self.end_edit(); Ok(()) } Err(e) => { self.abort_edit(); Err(e) } }
     }
 
     /// Moves the active layer (or every layer in the active folder) by whole pixels.
@@ -677,6 +1406,19 @@ impl Document {
         self.apply_selection(shape, mode, "Load Layer Selection")
     }
 
+    /// Ctrl-click on a mask thumbnail: the mask's coverage on the document as a selection.
+    pub fn select_mask_pixels(&mut self, id: Uuid, mode: Mode) -> Result<()> {
+        if self.renderer.mask(id).is_none() { return Ok(()); }
+        let (w, h) = (self.width(), self.height());
+        let mask = crate::raster::a8_filled(w, h, 0)?;
+        {
+            let cr = Context::new(&mask)?;
+            self.renderer.draw_mask_plain(id, &cr)?;
+        }
+        let shape = Selection::from_mask(mask, true)?;
+        self.apply_selection(shape, mode, "Load Mask Selection")
+    }
+
     // Masks
 
     /// Whether strokes and fills go to the active layer's mask rather than its pixels.
@@ -790,7 +1532,13 @@ impl Document {
 
 impl Document {
     /// Starts a stroke on the active layer's mask. Brush paints `white` or black; every other kind paints black.
-    pub fn begin_mask_stroke(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, white: bool) -> Result<()> {
+    pub fn begin_mask_stroke(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, white: bool) -> Result<()> { self.begin_mask_stroke_kind(point, settings, white, false) }
+
+    /// The Blur tool on a mask softens it (`blurSample(mask:)`): the sample is the mask as the canvas shows
+    /// it, at document size, blurred by an amount that follows the brush size.
+    pub fn begin_mask_blur(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings) -> Result<()> { self.begin_mask_stroke_kind(point, settings, true, true) }
+
+    fn begin_mask_stroke_kind(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, white: bool, blur: bool) -> Result<()> {
         if self.stroke.is_some() { bail!("a stroke is already in progress"); }
         let Some(id) = self.active else { bail!("Select a layer first.") };
         let layer = self.renderer.layer(id).clone();
@@ -805,8 +1553,23 @@ impl Document {
         let mut paint = settings.clone();
         paint.color = if white { [1.0; 3] } else { [0.0; 3] };
         let canvas = (self.width() as f64, self.height() as f64);
+        let kind = if blur {
+            // Past its pixels a mask keeps its edge tone, so blurring near its edge does not pull in the wrong one.
+            let (w, h) = (self.width(), self.height());
+            let edge = with_bytes(&mask, |d, stride| { let (mw, mh) = (mask.width() as usize, mask.height() as usize); let mut sum = 0u64; let mut n = 0u64; for y in 0..mh { for x in 0..mw { if y == 0 || x == 0 || y + 1 == mh || x + 1 == mw { sum += d[y * stride + x] as u64; n += 1; } } } if n > 0 && sum / n >= 128 { 255u8 } else { 0u8 } })?;
+            let doc = crate::raster::a8_filled(w, h, edge)?;
+            {
+                let cr = Context::new(&doc)?;
+                cr.set_operator(cairo::Operator::Source);
+                self.renderer.draw_mask_plain(id, &cr)?;
+            }
+            let (wu, hu) = (w as usize, h as usize);
+            let pixels = with_bytes(&doc, |d, stride| { let mut out = vec![0u8; wu * hu * 4]; for y in 0..hu { for x in 0..wu { let v = d[y * stride + x]; let o = (y * wu + x) * 4; out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255; } } out })?;
+            let sigma = (settings.diameter / 10.0).clamp(1.5, 30.0);
+            crate::brush::Kind::Blur { sample: std::rc::Rc::new(crate::blur::LazyBlur::new(pixels, wu, hu, sigma)) }
+        } else { crate::brush::Kind::Paint };
         let a8 = self.renderer.begin_mask_preview(id, grid.0, grid.1)?;
-        let mut stroke = crate::brush::Stroke::new(true, grid, &transform, canvas, &paint, crate::brush::Kind::Paint, self.selection.clone(), false, |_, _, w, h, _| {
+        let mut stroke = crate::brush::Stroke::new(true, grid, &transform, canvas, &paint, kind, self.selection.clone(), false, |_, _, w, h, _| {
             // The stroke's grid is the mask as opaque gray.
             let surface = new_argb(w, h)?;
             let (wu, hu) = (w as usize, h as usize);
@@ -981,7 +1744,7 @@ impl Document {
     /// Deletes the active layer (a folder with its contents); clipping links to it are dropped.
     pub fn delete_layer(&mut self) {
         let Some(id) = self.active else { return };
-        let mut ids = vec![id];
+        let mut ids: Vec<Uuid> = if self.selected.len() > 1 { self.renderer.layers().iter().filter(|l| self.selected.contains(&l.id)).map(|l| l.id).collect() } else { vec![id] };
         let layers = self.renderer.layers().to_vec();
         let mut i = 0;
         while i < ids.len() { let parent = ids[i]; for l in &layers { if l.parent_id == Some(parent) { ids.push(l.id); } } i += 1; }
@@ -989,8 +1752,8 @@ impl Document {
         self.begin_edit("Delete Layer");
         for id in ids { self.renderer.remove_layer(id); }
         let remaining = self.renderer.layers();
-        self.active = if remaining.is_empty() { None } else { Some(remaining[index.min(remaining.len() - 1)].id) };
-        self.mask_target = false;
+        let next = if remaining.is_empty() { None } else { Some(remaining[index.min(remaining.len() - 1)].id) };
+        self.select_layer(next);
         self.end_edit();
     }
 
@@ -1013,6 +1776,101 @@ impl Document {
         self.active = Some(new_id);
         self.end_edit();
         Some(new_id)
+    }
+
+    /// Where dragged layers land in the panel: above or below another row, or inside a folder (at its top).
+    pub fn move_layers(&mut self, ids: &[Uuid], place: Place) -> Result<()> {
+        let layers = self.renderer.layers().to_vec();
+        // The whole blocks: each dragged layer with everything inside it, in stacking order.
+        let mut moving: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for id in ids { if self.has_layer(*id) { moving.insert(*id); moving.extend(self.descendants(*id)); } }
+        let roots: Vec<Uuid> = layers.iter().filter(|l| ids.contains(&l.id)).map(|l| l.id).collect();
+        if roots.is_empty() { return Ok(()); }
+        let (anchor, parent, after) = match place {
+            Place::Above(a) => (a, self.renderer.layer(a).parent_id, true),
+            Place::Below(a) => (a, self.renderer.layer(a).parent_id, false),
+            Place::Into(f) => (f, Some(f), true),
+        };
+        if moving.contains(&anchor) { if matches!(place, Place::Into(_)) { bail!("A folder cannot go inside itself."); } return Ok(()); }
+        if let Some(p) = parent {
+            if !self.has_layer(p) || !self.renderer.layer(p).is_group() { bail!("Layers can only go inside a folder."); }
+            if moving.contains(&p) { bail!("A folder cannot go inside itself."); }
+        }
+        // Rebuild the array: the moved blocks lifted out, then put back around the anchor.
+        let kept: Vec<crate::format::Layer> = layers.iter().filter(|l| !moving.contains(&l.id)).cloned().collect();
+        let block: Vec<crate::format::Layer> = layers.iter().filter(|l| moving.contains(&l.id)).cloned().map(|mut l| { if ids.contains(&l.id) { l.parent_id = parent; } l }).collect();
+        let anchor_index = Self::block_end(&kept, anchor, matches!(place, Place::Into(_)), self);
+        let insert_at = if after { anchor_index + 1 } else { anchor_index };
+        let mut next = kept;
+        for (i, l) in block.into_iter().enumerate() { next.insert(insert_at + i, l); }
+        if next.iter().map(|l| l.id).collect::<Vec<_>>() == layers.iter().map(|l| l.id).collect::<Vec<_>>() && next.iter().zip(&layers).all(|(a, b)| a.parent_id == b.parent_id) { return Ok(()); }
+        crate::format::validate::hierarchy(&next).map_err(|_| anyhow::anyhow!("That arrangement is not allowed."))?;
+        self.begin_edit("Reorder Layers");
+        self.renderer.replace_layers(next);
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Copies layers (from this or another document) to `place`, with new ids; masks, clipping and folders
+    /// inside the copied set come along (`Duplicate` by drag, and dragging between projects).
+    pub fn copy_layers(&mut self, source: &Document, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
+        let layers = source.renderer.layers().to_vec();
+        let mut picked: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for id in ids { if source.has_layer(*id) { picked.insert(*id); picked.extend(source.descendants(*id)); } }
+        let originals: Vec<crate::format::Layer> = layers.iter().filter(|l| picked.contains(&l.id)).cloned().collect();
+        if originals.is_empty() { return Ok(Vec::new()); }
+        let (anchor, parent, after) = match place {
+            Place::Above(a) => (a, self.renderer.layer(a).parent_id, true),
+            Place::Below(a) => (a, self.renderer.layer(a).parent_id, false),
+            Place::Into(f) => (f, Some(f), true),
+        };
+        if let Some(p) = parent { if !self.has_layer(p) || !self.renderer.layer(p).is_group() { bail!("Layers can only go inside a folder."); } }
+        let fresh: std::collections::HashMap<Uuid, Uuid> = originals.iter().map(|l| (l.id, Uuid::new_v4())).collect();
+        let budget: i64 = originals.iter().filter_map(|l| source.renderer.image_size(l.id)).map(|(w, h)| w as i64 * h as i64).sum::<i64>() + self.renderer.images().values().map(|s| s.width() as i64 * s.height() as i64).sum::<i64>();
+        if budget > 100_000_000 { bail!("Copying these layers would pass the 100-megapixel budget."); }
+        let mut records = Vec::with_capacity(originals.len());
+        let mut images = Vec::new();
+        let mut masks = Vec::new();
+        for l in &originals {
+            let mut copy = l.clone();
+            copy.id = fresh[&l.id];
+            copy.parent_id = match l.parent_id { Some(p) if fresh.contains_key(&p) => Some(fresh[&p]), _ if ids.contains(&l.id) => parent, _ => parent };
+            copy.mask_source_id = l.mask_source_id.and_then(|s| fresh.get(&s).copied());
+            if copy.image_file.is_some() { copy.image_file = Some(format!("{}.png", crate::format::upper(copy.id))); }
+            if copy.mask_file.is_some() { copy.mask_file = Some(format!("{}.mask.png", crate::format::upper(copy.id))); }
+            if source.document_id == self.document_id && ids.contains(&l.id) { copy.name = format!("{} copy", l.name); }
+            images.push(source.renderer.image(l.id).cloned());
+            masks.push(source.renderer.mask(l.id).cloned());
+            records.push(copy);
+        }
+        let anchor_index = Self::block_end(self.renderer.layers(), anchor, matches!(place, Place::Into(_)), self);
+        let insert_at = if after { anchor_index + 1 } else { anchor_index };
+        let new_ids: Vec<Uuid> = records.iter().map(|r| r.id).collect();
+        let mut next = self.renderer.layers().to_vec();
+        for (i, r) in records.iter().enumerate() { next.insert((insert_at + i).min(next.len()), r.clone()); }
+        crate::format::validate::hierarchy(&next).map_err(|_| anyhow::anyhow!("That arrangement is not allowed."))?;
+        self.begin_edit(if source.document_id == self.document_id { "Duplicate Layers" } else { "Copy Layers" });
+        for (i, r) in records.into_iter().enumerate() { self.renderer.insert_layer((insert_at + i).min(self.renderer.layers().len()), r, images[i].clone(), masks[i].clone()); }
+        let top = ids.iter().filter_map(|id| fresh.get(id)).copied().last();
+        self.select_layer(top);
+        self.selected = ids.iter().filter_map(|id| fresh.get(id)).copied().collect();
+        if let Some(t) = top { self.selected.insert(t); }
+        self.end_edit();
+        Ok(new_ids)
+    }
+
+    /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
+    pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None };
+        self.copy_layers(&snapshot, ids, place)
+    }
+
+    /// The array index of `anchor`, or, `whole`, of the last layer inside it (a folder's top).
+    fn block_end(layers: &[crate::format::Layer], anchor: Uuid, whole: bool, doc: &Document) -> usize {
+        let own = layers.iter().position(|l| l.id == anchor).unwrap_or(layers.len().saturating_sub(1));
+        if !whole { return own; }
+        let inside = doc.descendants(anchor);
+        layers.iter().enumerate().filter(|(_, l)| inside.contains(&l.id) || l.id == anchor).map(|(i, _)| i).max().unwrap_or(own)
     }
 
     /// Moves the active layer one step up (toward the top) or down among its siblings.
@@ -1102,6 +1960,7 @@ impl Document {
     /// Decodes an image file (PNG, JPEG, TIFF, GIF's first frame, WebP, BMP) with EXIF orientation applied.
     pub fn decode_image(path: &std::path::Path) -> Result<(ImageSurface, usize, usize)> {
         use image::ImageDecoder;
+        if crate::heic::is_heic(path) { return crate::heic::decode(path); }
         let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
         // The header's size, before any pixel buffer exists.
         let (dw, dh) = decoder.dimensions();
@@ -1127,9 +1986,40 @@ impl Document {
         Ok(document)
     }
 
+    /// Image bytes (PNG, JPEG and the rest) rather than a file: what a drop from another app carries.
+    pub fn decode_image_bytes(bytes: &[u8]) -> Result<(ImageSurface, usize, usize)> {
+        use image::ImageDecoder;
+        let decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
+        let (dw, dh) = decoder.dimensions();
+        if dw == 0 || dh == 0 || dw > 30_000 || dh > 30_000 || dw as u64 * dh as u64 > 100_000_000 { bail!("This image is {dw} x {dh}; sides run to 30,000 pixels and the whole to 100 megapixels."); }
+        let decoded = image::DynamicImage::from_decoder(decoder)?;
+        let rgba = decoded.to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        Ok((crate::png_io::from_straight_rgba(rgba.as_raw(), w, h)?, w, h))
+    }
+
+    pub fn open_image_bytes(bytes: &[u8]) -> Result<Document> {
+        let (surface, w, h) = Self::decode_image_bytes(bytes)?;
+        let mut document = Document::blank(w as i32, h as i32, 72.0)?;
+        let id = document.active.ok_or_else(|| anyhow::anyhow!("blank document has a layer"))?;
+        document.renderer.set_image(id, surface);
+        document.history.mark_saved();
+        Ok(document)
+    }
+
+    pub fn import_image_bytes(&mut self, bytes: &[u8], name: &str) -> Result<Uuid> {
+        let (surface, w, h) = Self::decode_image_bytes(bytes)?;
+        self.import_surface(surface, w, h, name.to_string())
+    }
+
     pub fn import_image(&mut self, path: &std::path::Path) -> Result<Uuid> {
         let (surface, w, h) = Self::decode_image(path)?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Image".into());
+        self.import_surface(surface, w, h, name)
+    }
+
+    /// Decoded pixels as a new layer centered on the canvas at their own size.
+    fn import_surface(&mut self, surface: ImageSurface, w: usize, h: usize, name: String) -> Result<Uuid> {
         let (index, parent) = self.insertion();
         let mut record = self.blank_record(name, parent);
         record.transform.origin = crate::format::Point(((self.width() as f64 - w as f64) / 2.0).round(), ((self.height() as f64 - h as f64) / 2.0).round());
@@ -1267,4 +2157,53 @@ impl Document {
 fn rand_seed() -> u32 {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     (t as u64 ^ (t >> 64) as u64) as u32 ^ 0x5851_f42d
+}
+
+/// A mask as an opaque gray ARGB image, so pixel filters can run on it.
+fn gray_from_a8(mask: &ImageSurface) -> Result<ImageSurface> {
+    let (w, h) = (mask.width(), mask.height());
+    let (wu, hu) = (w as usize, h as usize);
+    let out = new_argb(w, h)?;
+    let rows = with_bytes(mask, |d, stride| (0..hu).flat_map(|y| d[y * stride..y * stride + wu].to_vec()).collect::<Vec<u8>>())?;
+    crate::raster::with_bytes_raw_mut(&out, |d, stride| { for y in 0..hu { for x in 0..wu { let v = rows[y * wu + x]; let o = y * stride + x * 4; d[o] = v; d[o + 1] = v; d[o + 2] = v; d[o + 3] = 255; } } })?;
+    Ok(out)
+}
+
+/// Opaque gray ARGB back to an A8 mask (the blue channel).
+fn a8_from_gray(gray: &ImageSurface) -> Result<ImageSurface> {
+    let (w, h) = (gray.width(), gray.height());
+    let (wu, hu) = (w as usize, h as usize);
+    let stride = cairo::Format::A8.stride_for_width(w as u32)? as usize;
+    let mut data = vec![0u8; stride * hu];
+    with_bytes(gray, |d, s| { for y in 0..hu { for x in 0..wu { data[y * stride + x] = d[y * s + x * 4]; } } })?;
+    crate::raster::a8_from_data(w, h, data, stride as i32)
+}
+
+/// The shape filling its box, anti-aliased where it curves (`shapeImage`).
+fn shape_image(ellipse: bool, w: i32, h: i32, color: [f64; 3], radius: f64) -> Result<ImageSurface> {
+    let out = new_argb(w, h)?;
+    let cr = Context::new(&out)?;
+    cr.set_source_rgb(color[0], color[1], color[2]);
+    let (fw, fh) = (w as f64, h as f64);
+    if ellipse {
+        cr.save()?;
+        cr.translate(fw / 2.0, fh / 2.0);
+        cr.scale(fw / 2.0, fh / 2.0);
+        cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+        cr.restore()?;
+    } else {
+        let r = radius.max(0.0).min(fw / 2.0).min(fh / 2.0);
+        if r > 0.0 {
+            use std::f64::consts::PI;
+            cr.new_sub_path();
+            cr.arc(fw - r, r, r, -PI / 2.0, 0.0);
+            cr.arc(fw - r, fh - r, r, 0.0, PI / 2.0);
+            cr.arc(r, fh - r, r, PI / 2.0, PI);
+            cr.arc(r, r, r, PI, 3.0 * PI / 2.0);
+            cr.close_path();
+        } else { cr.rectangle(0.0, 0.0, fw, fh); }
+    }
+    cr.fill()?;
+    drop(cr);
+    Ok(out)
 }

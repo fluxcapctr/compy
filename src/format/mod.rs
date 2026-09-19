@@ -2,7 +2,7 @@
 //! `reference/docs/project-format.md` specifies versions 1 through 6; `ProjectStore.swift` in the reference
 //! app adds version 7 (adjustment layers, mask placement, shape layers) and is the source of every rule here.
 
-mod validate;
+pub mod validate;
 pub use validate::{live_mask_graph, upper};
 
 use crate::png_io::{Decoded, decode};

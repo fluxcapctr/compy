@@ -2,6 +2,7 @@
 //! and a menu of edits that run on the current tab's document.
 
 mod canvas;
+pub mod color_wheel;
 mod dialogs;
 mod filter_dialog;
 mod icons;
@@ -54,6 +55,26 @@ pub struct Doc {
     pub lock_ratio: bool,
     pub auto_select: bool,
     pub mask_paint_white: bool,
+    /// The background color: fills with Ctrl+Backspace and the far end of gradients.
+    pub background: [f64; 3],
+    /// A free distortion in progress: the layer's corners on the document.
+    pub distort: Option<crate::distort::Corners>,
+    /// Gradient tool: radial rather than linear, foreground to transparent rather than to background, reversed, opacity.
+    pub gradient_radial: bool,
+    pub gradient_to_transparent: bool,
+    pub gradient_reversed: bool,
+    pub gradient_opacity: f64,
+    /// A gradient being dragged: its two ends on the document.
+    pub gradient_line: Option<((f64, f64), (f64, f64))>,
+    /// Shape tool: ellipse rather than rectangle, the corner radius, and the shape being dragged (x, y, w, h).
+    pub shape_ellipse: bool,
+    pub shape_radius: f64,
+    pub shape_draft: Option<(f64, f64, f64, f64)>,
+    /// Crop tool: the frame (x, y, w, h) and the ratio choice (0 free, 1 original, 2 square, 3 4:3, 4 16:9).
+    pub crop: Option<(f64, f64, f64, f64)>,
+    pub crop_ratio: u32,
+    /// Eyedropper reads every visible layer rather than the active one.
+    pub eyedropper_all_layers: bool,
     /// The Blur tool's mode: 0 Liquify, 1 Blur, 2 Smudge, as the Mac orders them.
     pub blur_mode: u32,
     /// Guides drawn while a move is snapped: an x and a y across the whole canvas.
@@ -96,7 +117,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }
     }
 }
 
@@ -119,12 +140,12 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
 
-pub const IMAGE_EXTENSIONS: [&str; 9] = ["png", "jpg", "jpeg", "tif", "tiff", "gif", "webp", "bmp", "jpe"];
+pub const IMAGE_EXTENSIONS: [&str; 12] = ["png", "jpg", "jpeg", "tif", "tiff", "gif", "webp", "bmp", "jpe", "heic", "heif", "hif"];
 
 pub fn is_image(path: &Path) -> bool {
     path.is_file() && path.extension().is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
@@ -150,6 +171,10 @@ pub struct Script {
     pub layer: Option<String>,
     pub stroke: Vec<(f64, f64)>,
     pub ellipse: bool,
+    /// Opens the brush color picker before the screenshot.
+    pub pick_color: bool,
+    /// A window size to ask for (tiling compositors may override it).
+    pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
     pub adjustment: Option<String>,
 }
@@ -160,15 +185,17 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         let state = build_window(app);
         for path in &paths { state.open_path(path); }
         state.window.present();
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() {
+        if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
                 state.with_current(|p| {
-                    if let Some(name) = &script.layer { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.renderer.layers().iter().find(|l| l.name == *name).map(|l| l.id) { d.document.active = Some(id); } }
+                    if let Some(name) = &script.layer { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.renderer.layers().iter().find(|l| l.name == *name).map(|l| l.id) { d.document.select_layer(Some(id)); } }
                     if let Some(zoom) = script.zoom { p.canvas.zoom_to(zoom); }
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
+                    if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
                     if let Some(size) = script.brush_size { p.canvas.doc().borrow_mut().brush.diameter = size; p.canvas.sync_brush_options(); }
                     if let Some(mode) = script.blur_mode { p.canvas.doc().borrow_mut().blur_mode = mode; }
@@ -208,7 +235,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
 fn build_window(app: &gtk::Application) -> Rc<App> {
     // Tool buttons are smaller than GTK's default minimum.
     let css = gtk::CssProvider::new();
-    css.load_from_string("button.tool { min-width: 0; min-height: 0; padding: 4px; }");
+    css.load_from_string("button.tool { min-width: 0; min-height: 0; padding: 4px; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
 
     let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
@@ -265,7 +292,20 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 44] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 57] = [
+        ("crop-apply", &[], |s| s.with_current(|p| p.canvas.apply_crop())),
+        ("crop-cancel", &[], |s| s.with_current(|p| p.canvas.cancel_crop())),
+        ("nudge-pixels-left", &["<Control>Left"], |s| s.edit(|d| d.nudge_pixels(-1.0, 0.0))),
+        ("nudge-pixels-right", &["<Control>Right"], |s| s.edit(|d| d.nudge_pixels(1.0, 0.0))),
+        ("nudge-pixels-up", &["<Control>Up"], |s| s.edit(|d| d.nudge_pixels(0.0, -1.0))),
+        ("nudge-pixels-down", &["<Control>Down"], |s| s.edit(|d| d.nudge_pixels(0.0, 1.0))),
+        ("merge", &["<Control>e"], |s| s.edit(|d| d.merge_layers())),
+        ("invert", &["<Control>i"], |s| s.edit(|d| d.invert())),
+        ("flip-canvas-horizontal", &[], |s| s.edit(|d| d.flip_canvas(true))),
+        ("flip-canvas-vertical", &[], |s| s.edit(|d| d.flip_canvas(false))),
+        ("fill-foreground", &["<Alt>BackSpace", "<Alt>Delete"], |s| s.with_doc(|doc| { let color = if doc.document.mask_target() { if doc.mask_paint_white { [1.0; 3] } else { [0.0; 3] } } else { doc.brush.color }; doc.document.fill(color) })),
+        ("fill-background", &["<Control>BackSpace", "<Control>Delete"], |s| s.with_doc(|doc| { let color = if doc.document.mask_target() { if doc.mask_paint_white { [0.0; 3] } else { [1.0; 3] } } else { doc.background }; doc.document.fill(color) })),
+        ("clear", &[], |s| s.with_doc(|doc| { let white = !doc.mask_paint_white; doc.document.clear_selection(white) })),
         ("open", &["<Control>o"], |s| { let state = s.clone(); dialogs::open_file(s.window.upcast_ref(), move |path| state.open_path(&path)); }),
         ("open-project", &["<Control><Shift>o"], |s| s.choose_and_open()),
         ("export-psd", &[], |s| s.export_psd()),
@@ -325,7 +365,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
             let Some(name) = parameter.and_then(|v| v.get::<String>()) else { return };
             let kind = match name.as_str() {
                 "noise" => Kind::AddNoise, "grain" => Kind::Grain, "lens" => Kind::LensCorrection,
-                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, _ => return,
+                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground, _ => return,
             };
             state.open_filter(kind);
         });
@@ -345,8 +385,18 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     // Files dropped on the window open as projects or import as layers.
     {
         let target = gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
+        target.set_types(&[gio::File::static_type(), gdk::Texture::static_type()]);
         let state = state.clone();
         target.connect_drop(move |_, value, _, _| {
+            // Pixels dragged out of another app (a browser, a screenshot tool) come as a texture.
+            if let Ok(texture) = value.get::<gdk::Texture>() {
+                let bytes = texture.save_to_png_bytes();
+                if state.notebook.current_page().is_some() { state.edit(|d| d.import_image_bytes(&bytes, "Dropped Image").map(|_| ())); }
+                else {
+                    match Document::open_image_bytes(&bytes) { Ok(document) => state.add_page(Doc::from(document, "Dropped Image")), Err(e) => state.alert("Could not open the dropped image", &format!("{e:#}")) }
+                }
+                return true;
+            }
             let Ok(file) = value.get::<gio::File>() else { return false };
             let Some(path) = file.path() else { return false };
             // Images import as a layer when a document is open, and open as their own document otherwise.
@@ -401,6 +451,9 @@ fn menu() -> gio::Menu {
     edit.append(Some("Undo"), Some("win.undo"));
     edit.append(Some("Redo"), Some("win.redo"));
     edit.append(Some("Copy Merged"), Some("win.copy-merged"));
+    edit.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
+    edit.append(Some("Fill with Background"), Some("win.fill-background"));
+    edit.append(Some("Clear"), Some("win.clear"));
     menu.append_submenu(Some("Edit"), &edit);
     let select = gio::Menu::new();
     select.append(Some("All"), Some("win.select-all"));
@@ -432,6 +485,7 @@ fn menu() -> gio::Menu {
     layer.append(Some("Create / Release Clipping Mask"), Some("win.toggle-clipping"));
     layer.append(Some("Flip Horizontal"), Some("win.flip-horizontal"));
     layer.append(Some("Flip Vertical"), Some("win.flip-vertical"));
+    layer.append(Some("Merge Down / Group"), Some("win.merge"));
     menu.append_submenu(Some("Layer"), &layer);
     let image = gio::Menu::new();
     image.append(Some("Canvas Size…"), Some("win.canvas-size"));
@@ -442,8 +496,12 @@ fn menu() -> gio::Menu {
     image.append(Some("Levels…"), Some("win.filter::levels"));
     image.append(Some("Gradient Map…"), Some("win.filter::gradient"));
     image.append(Some("Grain…"), Some("win.filter::grain"));
+    image.append(Some("Invert"), Some("win.invert"));
+    image.append(Some("Flip Canvas Horizontal"), Some("win.flip-canvas-horizontal"));
+    image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
+    filter.append(Some("Remove Background…"), Some("win.filter::background"));
     filter.append(Some("Gaussian Blur…"), Some("win.filter::gaussian"));
     filter.append(Some("Motion Blur…"), Some("win.filter::motion"));
     filter.append(Some("Add Noise…"), Some("win.filter::noise"));
@@ -474,7 +532,12 @@ impl App {
             .shrink_end_child(false).resize_end_child(false).shrink_start_child(false).build();
         paned.set_start_child(Some(&canvas.widget));
         paned.set_end_child(Some(&panel.widget));
-        paned.set_position(1280 - layers::WIDTH);
+        {
+            // The panel keeps its width; the canvas takes whatever the window has, at any size (Hyprland
+            // hands out a whole tile, often far wider than 1280).
+            let p = paned.clone();
+            paned.connect_map(move |_| { let p = p.clone(); glib::idle_add_local_once(move || { let w = p.width(); if w > 0 { p.set_position(w - layers::WIDTH); } }); });
+        }
 
         let tab = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         tab.append(&gtk::Label::new(Some(&title)));
@@ -529,6 +592,17 @@ impl App {
         let child = self.notebook.nth_page(Some(index));
         let pages = self.pages.borrow();
         if let Some(page) = pages.iter().find(|p| Some(&p.root) == child.as_ref()) { f(page); }
+    }
+
+    /// Like `edit`, with the whole view state (tool settings, palette) in reach.
+    fn with_doc(self: &Rc<Self>, f: impl FnOnce(&mut Doc) -> Result<()>) {
+        let mut failure = None;
+        self.with_current(|p| {
+            let result = f(&mut p.canvas.doc().borrow_mut());
+            p.refresh();
+            if let Err(error) = result { failure = Some(format!("{error:#}")); }
+        });
+        if let Some(detail) = failure { self.alert("Could not do that", &detail); }
     }
 
     /// Runs an edit on the current document, reporting a failure in an alert.
@@ -711,5 +785,25 @@ fn snapshot_window(window: &gtk::Window, target: &Path) -> Result<()> {
     let renderer = window.renderer().context("no renderer")?;
     let texture = renderer.render_texture(&node, None);
     texture.save_to_png(target)?;
+    // Open popovers draw on their own surfaces, so each one goes to a file of its own (`-popover`).
+    let mut popovers = Vec::new();
+    collect_popovers(window.upcast_ref(), &mut popovers);
+    if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("popovers open: {}", popovers.len()); }
+    for (i, popover) in popovers.iter().enumerate() {
+        // The user's child sits inside the popover's own contents widget; snapshot the direct children.
+        let snapshot = gtk::Snapshot::new();
+        let mut child = popover.first_child();
+        while let Some(widget) = child { popover.snapshot_child(&widget, &snapshot); child = widget.next_sibling(); }
+        let Some(node) = snapshot.to_node() else { continue };
+        let texture = renderer.render_texture(&node, None);
+        let stem = target.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        texture.save_to_png(target.with_file_name(format!("{stem}-popover{}.png", if i == 0 { String::new() } else { i.to_string() })))?;
+    }
     Ok(())
+}
+
+fn collect_popovers(widget: &gtk::Widget, out: &mut Vec<gtk::Popover>) {
+    if let Some(popover) = widget.downcast_ref::<gtk::Popover>() { if popover.is_visible() { out.push(popover.clone()); } }
+    let mut child = widget.first_child();
+    while let Some(c) = child { collect_popovers(&c, out); child = c.next_sibling(); }
 }
