@@ -243,3 +243,90 @@ only read files, skip that.
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_5.md. No em dashes in your output.
+
+# Round 6 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 5 are fixed (see REVIEW_RESULTS.md
+through REVIEW_RESULTS_5.md); this round covers the code written since, commits c5d5b17 through 730037a.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, sixth pass.
+
+Context: a Linux rebuild of a macOS image editor, now named Compy, with an in-app assistant (also called
+Compy) that drives the document through Claude Code. The Swift source in reference/ is the spec
+(read-only); the C pixel core in csrc/ is compiled unchanged (do not edit it). Read CLAUDE.md and
+README.md first. REVIEW_RESULTS.md through REVIEW_RESULTS_5.md hold the earlier findings, all fixed; do
+not re-report them, but do check that the round 5 fixes hold (they are the first area below).
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there. A partial report that says where it ended is worth more than an unfinished one.
+
+Safety: do not run the app with COMPOSITOR_GPU set to anything. The GPU presentation path has hung the
+graphics card on this machine. Review src/gpu and src/render/gpu_plan.rs by reading only. Do not start
+the app with --assistant while a real one is open (it would take over the agent socket). Do not send
+anything to fal.ai; tests that need the network are ignored.
+
+Cover only what is new since round 5 (git log c5d5b17^..730037a). Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (157 tests should pass;
+the ignored ones need the network, a downloaded model or a GPU) and report anything that fails. If you
+can only read files, skip that.
+
+1. The round 5 fixes, as fixes: check each item in REVIEW_RESULTS_5.md against the current code.
+2. The agent protocol in src/agent.rs: the Unix socket line protocol (a request with no newline, a
+   response for a different id, a second client while one waits, the socket file left behind by a
+   crashed app and a new app starting), call() timeouts, run_mcp() (malformed JSON-RPC, notifications
+   without an id, tools/call with missing arguments, image results, a tool that returns a job id and the
+   _poll loop never finishing), parse_color, and the tool catalog schemas against what
+   App::agent_tool actually reads from args.
+3. Tool implementations in src/ui/agent.rs App::agent_tool: every tool with no document open, with a
+   deleted or hidden active layer, with a mask target, with an open edit (a free transform or a type
+   edit in progress), with args of the wrong type; undoability (one history step per call, nested
+   edits closed on error, abort_edit on bail), and refresh after each. select_layer_pixels,
+   feather_selection, place_layer and reorder_layer with out-of-range values, canvas_size and image_size
+   with huge values, text_layer and set_text with an empty string, layer_style with unknown keys,
+   export and save to unwritable paths, open with a missing file, zoom with nonsense.
+4. Long jobs: the JOBS and NEXT_JOB thread locals, a job polled after the app dropped it, results
+   landing on a different document than the one the job started on (the user switched tabs), a job
+   finishing after its document closed, agent_land_fill (the fit-inside math for a picture with an
+   odd aspect ratio, a place of zero size, images that are not PNG, mode layer with no images),
+   genfill_inputs used for the agent, copy_layer_pixels on an empty layer, cost estimates.
+5. Fal model families in src/genfill.rs: resolve_model, nearest_aspect, agent_body (transparent with a
+   non-GPT model, an edit with count above 4, a resolution tier for a 64 px request), agent_models()
+   with a malformed config file, png_size on a truncated file, Fal::run parsing a response with images
+   as data URIs or with an error object, the queue poll loop on a job that fails, cancellation.
+6. The Assistant panel: new, dock, undock, redock, reveal, toggle (the popout closed by the window
+   manager, redock while popped out, the notebook page switch with no document, a second Ctrl+K while
+   popped out); send_now (the claude child process left running when the app quits, the watchdog
+   firing after a reply arrived, stderr filling the pipe and blocking, the session id reset on a
+   resume failure, the queue drained out of order, busy never cleared on a spawn error); handle_line
+   with partial lines, non-JSON lines and result lines without text; context() with a huge document
+   state; the transcript growing without bound; the mcp.json and skill files written at startup
+   (races between two apps, a read-only config dir).
+7. Voice: watch_voice polling the voxtype state file (the file missing, the daemon not installed,
+   recording that never ends, the 900 ms auto-send racing a manual send, dictation while the entry
+   has focus in the popout, the mic button when voxtype is absent), and Page Down handling.
+8. Autosave (src/autosave.rs and the timer in src/ui/mod.rs): the 120 s timer while a job is running,
+   a write racing a save to the same path, recovery entries for a document that was saved and closed
+   cleanly, discard-recovered on a missing file, the .title file out of step with the .comp, the
+   packed bytes captured while an edit is open, disk full.
+9. The Pen tool (src/path.rs and pen_* in src/ui/canvas.rs): a path of one point stroked, filled or
+   selected; closing with fewer than three points; handles dragged onto their anchor; Delete on an
+   empty path; fill_path and stroke_path on a mask target; select_path with feather; the overlay after
+   undo; the --path script flag parser with malformed input.
+10. The menu bar, the layers background menu (parented to the panel: does it survive a layout change,
+    what happens with a selection right-click on the same spot), Ctrl+S feedback, Return in fields
+    parking handles, the brush popover tracking (track_popover and close_popover with a popover that
+    was already destroyed), the dialog fixes from 5d95212 (Curves drag claims, Color Balance borrow,
+    Levels channel dropdown), and the start page recovery and recent-files sections (a recent file
+    that no longer exists, a title with markup characters, thumbnails for huge files).
+11. The GPU code by reading only: src/gpu/mod.rs, shader.wgsl, present.rs, src/render/gpu_plan.rs,
+    and the gate in src/ui/canvas.rs that keeps it off unless COMPOSITOR_GPU is set. Confirm nothing
+    runs on the GPU by default, and note anything in the parked code that would be wrong if it were
+    turned on (buffer lifetime, drop order, the LINEAR export image).
+12. Anything in tests/features_g.rs, tests/autosave.rs, tests/gpu.rs or the unit tests in
+    src/agent.rs and src/genfill.rs that asserts the wrong value or passes for the wrong reason.
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_6.md. No em dashes in your output.
