@@ -42,6 +42,10 @@ pub struct Canvas {
     picture: gtk::Picture,
     /// A gradient, shape or crop drag: what it started on and where (document pixels).
     tool_drag: Cell<Option<ToolDrag>>,
+    /// A guide being dragged: vertical (an x) or not, and its index.
+    guide_drag: Cell<Option<(bool, usize)>>,
+    options_scroller: gtk::ScrolledWindow,
+    status: gtk::Box,
     /// The last composited frame, kept while nothing it shows has changed.
     cache: RefCell<Option<FrameCache>>,
     /// A marquee or lasso being drawn.
@@ -72,6 +76,9 @@ pub struct Draft {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind { Rectangle, Ellipse, Freehand, Polygonal }
+
+/// The rulers' thickness in view points.
+const RULER: f64 = 18.0;
 
 /// What a Gradient, Shape or Crop drag is doing, from `start` (document pixels).
 #[derive(Clone, Copy, PartialEq)]
@@ -123,7 +130,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -315,8 +322,13 @@ impl Canvas {
         click.set_button(1);
         {
             let this = self.clone();
-            click.connect_pressed(move |g, _, x, y| {
+            click.connect_pressed(move |g, n, x, y| {
                 if this.space_held.get() { return; }
+                if n == 2 && this.doc.borrow().rulers && (x < RULER || y < RULER) {
+                    // The single press already made and placed the guide; the second click leaves it there.
+                    this.finish_guide_drag();
+                    return;
+                }
                 let tool = this.doc.borrow().tool;
                 let state = g.current_event_state();
                 match tool {
@@ -389,6 +401,8 @@ impl Canvas {
                         this.begin_stroke((x, y), state.contains(gdk::ModifierType::SHIFT_MASK));
                         return;
                     }
+                    if button == 1 && this.begin_guide_from_ruler((x, y)) { this.stroke_start.set((x, y)); return; }
+                    if button == 1 && tool == Tool::Move { if let Some(g) = this.guide_at((x, y)) { this.guide_drag.set(Some(g)); this.stroke_start.set((x, y)); return; } }
                     if button == 1 && tool == Tool::Move { if this.begin_transform((x, y), state) { this.stroke_start.set((x, y)); return; } }
                     if button == 1 && matches!(tool, Tool::Gradient | Tool::Shape | Tool::Crop) {
                         this.stroke_start.set((x, y));
@@ -427,6 +441,11 @@ impl Canvas {
                         this.update_tool_drag((sx + dx, sy + dy), state);
                         return;
                     }
+                    if this.guide_drag.get().is_some() {
+                        let (sx, sy) = this.stroke_start.get();
+                        this.update_guide_drag((sx + dx, sy + dy));
+                        return;
+                    }
                     if !this.dragging.get() { return; }
                     let (lx, ly) = last.get();
                     this.doc.borrow_mut().viewport.translate(dx - lx, dy - ly);
@@ -439,6 +458,7 @@ impl Canvas {
                 if this.transform_drag.borrow().is_some() { this.finish_transform(); }
                 if this.outline_move.get().is_some() { this.finish_outline_move(); }
                 if this.tool_drag.get().is_some() { this.finish_tool_drag(); }
+                if this.guide_drag.get().is_some() { this.finish_guide_drag(); }
                 else if this.draft.borrow().as_ref().is_some_and(|d| d.kind != DraftKind::Polygonal) { this.finish_draft(); }
                 this.dragging.set(false);
                 this.update_cursor();
@@ -469,6 +489,8 @@ impl Canvas {
                 Tool::Hand => "grab", Tool::Zoom => "zoom-in", Tool::Wand => "crosshair", Tool::Marquee | Tool::Lasso => "crosshair",
                 Tool::Crop | Tool::Gradient | Tool::Shape | Tool::Eyedropper => "crosshair",
                 t if t.is_brush() => "none",
+                Tool::Move if self.guide_at(self.pointer.get()).is_some_and(|(v, _)| v) => "ew-resize",
+                Tool::Move if self.guide_at(self.pointer.get()).is_some() => "ns-resize",
                 Tool::Move => match self.geometry(&d).and_then(|g| g.hit(self.pointer.get())) {
                     Some(DragMode::Rotate) => "alias",
                     Some(DragMode::Resize(i)) => ["nwse-resize", "ns-resize", "nesw-resize", "ew-resize", "nwse-resize", "ns-resize", "nesw-resize", "ew-resize"][i],
@@ -867,6 +889,68 @@ impl Canvas {
 
     pub fn cancel_crop(&self) { self.doc.borrow_mut().crop = None; self.area.queue_draw(); }
 
+    /// Preview mode hides everything but the picture.
+    pub fn set_preview(&self, on: bool) {
+        self.rail.widget.set_visible(!on);
+        self.options_scroller.set_visible(!on);
+        self.status.set_visible(!on);
+        if let Some(sep) = self.rail.widget.next_sibling() { sep.set_visible(!on); }
+    }
+
+    // Guides
+
+    /// A guide within reach of a view point: vertical (an x) or not, its index, for dragging with the Move tool.
+    fn guide_at(&self, view: (f64, f64)) -> Option<(bool, usize)> {
+        let d = self.doc.borrow();
+        if !d.document.show_guides { return None; }
+        let size = d.size();
+        let near = |a: f64, b: f64| (a - b).abs() <= 5.0;
+        if let Some(i) = d.document.guides_v.iter().position(|x| near(d.viewport.view_point((*x, 0.0), size).0, view.0)) { return Some((true, i)); }
+        if let Some(i) = d.document.guides_h.iter().position(|y| near(d.viewport.view_point((0.0, *y), size).1, view.1)) { return Some((false, i)); }
+        None
+    }
+
+    /// A press on a ruler makes a guide there and starts dragging it (a vertical guide off the top ruler's x,
+    /// a horizontal one off the left ruler's y).
+    fn begin_guide_from_ruler(&self, view: (f64, f64)) -> bool {
+        let mut d = self.doc.borrow_mut();
+        if !d.rulers { return false; }
+        let on_top = view.1 < RULER && view.0 >= RULER;
+        let on_left = view.0 < RULER && view.1 >= RULER;
+        if !on_top && !on_left { return false; }
+        let size = d.size();
+        let p = d.viewport.document_point(view, size);
+        d.document.show_guides = true;
+        let entry = if on_top { d.document.guides_v.push(p.0.round()); (true, d.document.guides_v.len() - 1) } else { d.document.guides_h.push(p.1.round()); (false, d.document.guides_h.len() - 1) };
+        self.guide_drag.set(Some(entry));
+        drop(d);
+        self.area.queue_draw();
+        true
+    }
+
+    fn update_guide_drag(&self, view: (f64, f64)) {
+        let Some((vertical, index)) = self.guide_drag.get() else { return };
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let p = d.viewport.document_point(view, size);
+        if vertical { if let Some(g) = d.document.guides_v.get_mut(index) { *g = p.0.round(); } }
+        else if let Some(g) = d.document.guides_h.get_mut(index) { *g = p.1.round(); }
+        drop(d);
+        self.area.queue_draw();
+    }
+
+    /// A guide let go off the canvas is removed, as Photoshop does.
+    fn finish_guide_drag(&self) {
+        let Some((vertical, index)) = self.guide_drag.take() else { return };
+        let mut d = self.doc.borrow_mut();
+        let (w, h) = (d.document.width() as f64, d.document.height() as f64);
+        if vertical { if d.document.guides_v.get(index).is_some_and(|x| *x < 0.0 || *x > w) { d.document.guides_v.remove(index); } }
+        else if d.document.guides_h.get(index).is_some_and(|y| *y < 0.0 || *y > h) { d.document.guides_h.remove(index); }
+        drop(d);
+        self.area.queue_draw();
+        self.update_cursor();
+    }
+
     // Marquee and lasso
 
     fn begin_draft(&self, view: (f64, f64), state: gdk::ModifierType) {
@@ -1190,7 +1274,7 @@ pub fn zoom_text(zoom: f64) -> String {
 }
 
 fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) -> Result<()> {
-    let (sr, sg, sb) = super::theme::surround();
+    let (sr, sg, sb) = if doc.preview { (0.0, 0.0, 0.0) } else { super::theme::surround() };
     cr.set_source_rgb(sr, sg, sb);
     cr.paint()?;
     let size = doc.size();
@@ -1292,10 +1376,19 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
     let (rx, ry, rw, rh) = vp.document_rect(size);
     let Some((vx, vy, vw, vh)) = intersect((rx, ry, rw, rh), (0.0, 0.0, width, height)) else { return Ok(()) };
     let ppp = vp.points_per_pixel();
+    if doc.preview { return Ok(()); }
 
+    // Guides: cyan lines across the canvas, as Photoshop draws them.
+    if doc.document.show_guides && !doc.preview && !(doc.document.guides_v.is_empty() && doc.document.guides_h.is_empty()) {
+        cr.set_source_rgb(0.0, 0.85, 1.0);
+        cr.set_line_width(1.0);
+        for x in &doc.document.guides_v { let (vx, _) = vp.view_point((*x, 0.0), size); cr.move_to(vx.round() + 0.5, 0.0); cr.line_to(vx.round() + 0.5, height); }
+        for y in &doc.document.guides_h { let (_, vy) = vp.view_point((0.0, *y), size); cr.move_to(0.0, vy.round() + 0.5); cr.line_to(width, vy.round() + 0.5); }
+        cr.stroke()?;
+    }
     // Rulers along the top and left edges, in document pixels, with the pointer's position marked.
-    if doc.rulers {
-        let thickness = 18.0;
+    if doc.rulers && !doc.preview {
+        let thickness = RULER;
         let (p_bg, p_fg, p_line) = { let pal = super::theme::current(); match pal {
             Some(p) => (hex_rgb(&p.dark_background), hex_rgb(&p.foreground), hex_rgb(&p.muted)),
             None => ((0.16, 0.16, 0.16), (0.85, 0.85, 0.85), (0.45, 0.45, 0.45)),

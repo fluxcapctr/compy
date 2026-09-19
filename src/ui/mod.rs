@@ -85,6 +85,8 @@ pub struct Doc {
     pub needs_redraw: bool,
     /// Rulers along the top and left of the canvas in document pixels (Ctrl+R), as Photoshop's.
     pub rulers: bool,
+    /// Preview mode (Ctrl+F): the picture alone on black, every panel hidden.
+    pub preview: bool,
 }
 
 impl Doc {
@@ -111,6 +113,8 @@ impl Page {
 
 struct App {
     window: gtk::ApplicationWindow,
+    header: gtk::HeaderBar,
+    preview: Cell<bool>,
     stack: gtk::Stack,
     notebook: gtk::Notebook,
     pages: RefCell<Vec<Page>>,
@@ -121,7 +125,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }
     }
 }
 
@@ -144,7 +148,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -186,6 +190,9 @@ pub struct Script {
     pub genfill: bool,
     /// Opens the brush popover at the canvas center for a screenshot.
     pub brush_popover: bool,
+    pub preview: bool,
+    /// Guides to place: vertical xs and horizontal ys.
+    pub guides: (Vec<f64>, Vec<f64>),
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -199,7 +206,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -209,6 +216,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
                     if script.rulers { p.canvas.doc().borrow_mut().rulers = true; p.canvas.area.queue_draw(); }
+                    if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
                     if script.brush_popover { let (w, h) = (p.canvas.area.width() as f64, p.canvas.area.height() as f64); p.canvas.brush_popover(w / 2.0, h / 2.0); }
@@ -220,6 +228,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                 });
                 if let Some(kind) = script.filter { state.open_filter(kind); }
                 if script.genfill { state.open_genfill(false); }
+                if script.preview { state.toggle_preview(); }
                 if let Some(kind) = script.adjustment.clone() { state.edit(|d| { d.add_adjustment(&kind); Ok(()) }); state.edit_adjustment(); }
             });
         }
@@ -271,7 +280,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     stack.add_named(&notebook, Some("tabs"));
     window.set_child(Some(&stack));
 
-    let state = Rc::new(App { window: window.clone(), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
+    let state = Rc::new(App { window: window.clone(), header: header.clone(), preview: Cell::new(false), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
     // Follow the Omarchy theme; every canvas rebuilds its frame when the palette changes.
     {
         let weak = Rc::downgrade(&state);
@@ -310,7 +319,11 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 64] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 68] = [
+        ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
+        ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
+        ("new-guide", &[], |s| s.new_guide()),
+        ("clear-guides", &[], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v.clear(); d.document.guides_h.clear(); } p.canvas.area.queue_draw(); })),
         ("copy", &["<Control>c"], |s| s.copy_layer()),
         ("paste", &["<Control>v"], |s| s.paste()),
         ("generative-fill", &["<Control><Shift>g"], |s| s.open_genfill(false)),
@@ -529,6 +542,13 @@ fn menu() -> gio::Menu {
     image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
     image.append(Some("Generative Expand…"), Some("win.generative-expand"));
     image.append(Some("Rulers"), Some("win.toggle-rulers"));
+    let view = gio::Menu::new();
+    view.append(Some("Preview (picture only)"), Some("win.toggle-preview"));
+    view.append(Some("Rulers"), Some("win.toggle-rulers"));
+    view.append(Some("Show Guides"), Some("win.toggle-guides"));
+    view.append(Some("New Guide…"), Some("win.new-guide"));
+    view.append(Some("Clear Guides"), Some("win.clear-guides"));
+    menu.append_submenu(Some("View"), &view);
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
     filter.append(Some("Remove Background…"), Some("win.filter::background"));
@@ -650,6 +670,29 @@ impl App {
         });
         self.update_tab_titles();
         if let Some(detail) = failure { self.alert("Could not apply", &detail); }
+    }
+
+    /// Ctrl+F: the picture alone on black, full screen; again brings everything back.
+    fn toggle_preview(self: &Rc<Self>) {
+        let on = !self.preview.get();
+        self.preview.set(on);
+        self.header.set_visible(!on);
+        self.notebook.set_show_tabs(!on);
+        for page in self.pages.borrow().iter() {
+            page.canvas.set_preview(on);
+            if let Some(paned) = page.root.downcast_ref::<gtk::Paned>() { if let Some(end) = paned.end_child() { end.set_visible(!on); } }
+            page.canvas.doc().borrow_mut().preview = on;
+        }
+        if on { self.window.fullscreen(); } else { self.window.unfullscreen(); }
+        // Fit once the new layout has settled.
+        let state = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || state.with_current(|p| { p.canvas.drop_cache(); p.canvas.fit(); }));
+    }
+
+    /// View > New Guide: a guide at a typed position.
+    fn new_guide(self: &Rc<Self>) {
+        let state = self.clone();
+        dialogs::new_guide(self.window.upcast_ref(), move |vertical, position| state.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); if vertical { d.document.guides_v.push(position); } else { d.document.guides_h.push(position); } d.document.show_guides = true; } p.canvas.area.queue_draw(); }));
     }
 
     /// The Generative Fill panel over the current selection.

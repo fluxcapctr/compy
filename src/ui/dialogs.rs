@@ -223,4 +223,14 @@ pub fn open_file(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'stat
     dialog.open(Some(parent), gio::Cancellable::NONE, move |result| { if let Ok(file) = result { if let Some(path) = file.path() { done(path); } } });
 }
 
+/// View > New Guide: vertical or horizontal, at a document position.
+pub fn new_guide(parent: &gtk::Window, done: impl Fn(bool, f64) + 'static) {
+    let (window, grid, ok) = dialog(parent, "New Guide");
+    grid.attach(&gtk::Label::builder().label("Orientation").xalign(0.0).build(), 0, 0, 1, 1);
+    let orientation = gtk::DropDown::from_strings(&["Vertical", "Horizontal"]);
+    grid.attach(&orientation, 1, 0, 1, 1);
+    let position = spin(&grid, 1, "Position (px)", -100000.0, 100000.0, 1.0, 0.0, 0);
+    ok.connect_clicked(move |_| { done(orientation.selected() == 0, position.value()); window.close(); });
+}
+
 pub fn is_project(path: &Path) -> bool { path.is_dir() && path.join("manifest.json").exists() }

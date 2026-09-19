@@ -179,8 +179,14 @@ dialog, selects the new margin, and opens the same panel on it. The key goes on 
 fal model taking `image_url`, `mask_url` and `prompt` works). Only that window of pixels leaves the machine;
 each generation is billed by fal.
 
-**Rulers.** Ctrl+R (or Image > Rulers) shows rulers along the top and left of the canvas in document
-pixels, their steps following the zoom, with the pointer's position marked on each.
+**Rulers, guides and preview.** Ctrl+R (or View > Rulers) shows rulers along the top and left of the canvas
+in document pixels, their steps following the zoom, with the pointer's position marked on each. Press or
+double-click on a ruler to pull a guide out of it (a vertical guide from the top ruler, a horizontal one
+from the left); the Move tool drags guides, dropping one off the canvas removes it, moves snap to them,
+Ctrl+; hides and shows them, and View > New Guide places one by number. Ctrl+F is preview mode: the picture
+alone on black, full screen, every panel hidden; Ctrl+F again brings them back. In the layers panel,
+Ctrl-click a row to load its pixels as the selection, Shift-click to select a range of layers, Ctrl+Shift-click
+to add or remove one.
 
 Not built: the GPU brush (the software path meets the phase 4 budget), a Curves editor (curve points load,
 save and render, but there is no widget to edit them), and Cmd+T-style floating transforms of a selection

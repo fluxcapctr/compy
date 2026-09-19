@@ -33,6 +33,10 @@ pub struct Document {
     /// The background removal model's mask for the image it was made from (by surface pointer), so a slider
     /// only redoes the refining.
     matte_cache: Option<(usize, Vec<f32>)>,
+    /// Vertical guides (x) and horizontal guides (y) in document pixels, and whether they show. Not saved.
+    pub guides_v: Vec<f64>,
+    pub guides_h: Vec<f64>,
+    pub show_guides: bool,
 }
 
 /// Selected pixels lifted off their layer while they are dragged (`PixelMove`): everything in the layer's own
@@ -93,7 +97,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -1512,6 +1516,7 @@ impl Document {
     pub fn snap_targets(&self, excluding: &[Uuid]) -> (Vec<f64>, Vec<f64>) {
         let (w, h) = (self.width() as f64, self.height() as f64);
         let (mut xs, mut ys) = (vec![0.0, (w / 2.0).round(), w], vec![0.0, (h / 2.0).round(), h]);
+        if self.show_guides { xs.extend(self.guides_v.iter().copied()); ys.extend(self.guides_h.iter().copied()); }
         for id in crate::format::visible_layers(self.renderer.layers()) {
             if excluding.contains(&id) || !self.renderer.has_image(id) { continue; }
             let (x0, y0, x1, y1) = self.renderer.layer(id).transform.bounds();
@@ -2054,7 +2059,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true };
         self.copy_layers(&snapshot, ids, place)
     }
 

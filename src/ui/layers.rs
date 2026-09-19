@@ -342,7 +342,15 @@ impl Inner {
                     // Ctrl adds to or removes from the selection, Shift extends it to this row.
                     if state.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK) {
                         g.set_state(gtk::EventSequenceState::Claimed);
-                        { let mut d = this.doc.borrow_mut(); if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) { d.document.select_layer_range(id); } else { d.document.toggle_layer_selected(id); } }
+                        let (ctrl, shift) = (state.contains(gtk::gdk::ModifierType::CONTROL_MASK), state.contains(gtk::gdk::ModifierType::SHIFT_MASK));
+                        {
+                            let mut d = this.doc.borrow_mut();
+                            // Ctrl-click: the layer's pixels become the selection (ants around what is drawn on it);
+                            // Shift-click extends the layer selection; Ctrl+Shift-click toggles a layer in it.
+                            if ctrl && shift { d.document.toggle_layer_selected(id); }
+                            else if shift { d.document.select_layer_range(id); }
+                            else { d.document.select_layer(Some(id)); let _ = d.document.select_layer_pixels(id, crate::selection::Mode::Replace); }
+                        }
                         this.canvas.queue_draw();
                         this.rebuild();
                         if let Some(f) = this.on_select.borrow().as_ref() { f(); }

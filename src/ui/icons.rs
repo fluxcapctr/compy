@@ -50,12 +50,15 @@ fn arrow(cr: &cairo::Context, x: f64, y: f64, angle: f64, len: f64) {
 fn draw(tool: Tool, cr: &cairo::Context) {
     match tool {
         Tool::Move => {
-            // Four arrows out from the middle, as the Move tool's cross.
-            for a in [0.0, PI / 2.0, PI, 3.0 * PI / 2.0] { arrow(cr, 10.0 + 8.0 * a.cos(), 10.0 + 8.0 * a.sin(), a, 4.2); cr.fill().ok(); }
-            cr.set_line_width(1.8);
-            cr.move_to(3.5, 10.0); cr.line_to(16.5, 10.0);
-            cr.move_to(10.0, 3.5); cr.line_to(10.0, 16.5);
+            // Photoshop's pointer: a filled arrow, with a small move cross beside it.
+            cr.move_to(3.0, 2.0); cr.line_to(3.0, 14.0); cr.line_to(6.2, 11.2); cr.line_to(8.6, 16.0); cr.line_to(10.6, 15.0); cr.line_to(8.2, 10.4); cr.line_to(12.4, 10.4); cr.close_path();
+            cr.fill().ok();
+            let (cx, cy) = (15.0, 15.0);
+            cr.set_line_width(1.2);
+            cr.move_to(cx - 3.8, cy); cr.line_to(cx + 3.8, cy);
+            cr.move_to(cx, cy - 3.8); cr.line_to(cx, cy + 3.8);
             cr.stroke().ok();
+            for a in [0.0, PI / 2.0, PI, 3.0 * PI / 2.0] { arrow(cr, cx + 4.6 * a.cos(), cy + 4.6 * a.sin(), a, 2.0); cr.fill().ok(); }
         }
         Tool::Marquee => {
             cr.set_line_width(1.6);
