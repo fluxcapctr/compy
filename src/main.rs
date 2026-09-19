@@ -29,6 +29,7 @@ fn main() {
                     "--tool" => script.tool = text().and_then(|t| ui::Tool::ALL.into_iter().find(|tool| format!("{tool:?}").to_lowercase() == *t)),
                     "--ellipse" => script.ellipse = true,
                     "--pick-color" => script.pick_color = true,
+                    "--pick-brush" => script.pick_brush = true,
                     "--window" => script.window = text().and_then(|v| { let (w, h) = v.split_once('x')?; Some((w.parse().ok()?, h.parse().ok()?)) }),
                     "--blur-mode" => script.blur_mode = text().and_then(|m| m.parse().ok()),
                     "--layer" => script.layer = text(),

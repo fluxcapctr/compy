@@ -20,7 +20,7 @@ fn flat(d: &mut Document) -> Vec<[u8; 4]> {
     }).collect()).unwrap()
 }
 
-fn brush(diameter: f64, hardness: f64, opacity: f64) -> BrushSettings { BrushSettings { diameter, hardness, color: [1.0, 0.0, 0.0], opacity } }
+fn brush(diameter: f64, hardness: f64, opacity: f64) -> BrushSettings { BrushSettings { diameter, hardness, color: [1.0, 0.0, 0.0], opacity, ..Default::default() } }
 
 fn stroke(d: &mut Document, points: &[(f64, f64)], settings: &BrushSettings, kind: StrokeKind) {
     d.begin_stroke(points[0], settings, kind).unwrap();
@@ -180,4 +180,40 @@ fn the_live_preview_matches_the_commit() {
     let differing = during.iter().zip(&after).filter(|(a, b)| !close(**a, **b, 2)).count();
     // The provisional straight tail becomes a curve on release, so a few percent of pixels may move.
     assert!(differing <= 64 * 64 / 12, "preview and commit differ in {differing} pixels");
+}
+
+/// A sampled tip paints its own shape, spaced by the preset, and a squashed round tip paints an ellipse.
+#[test]
+fn shaped_tips_paint_their_shape() {
+    use compositor::brush::{BrushSettings, shaped_tip};
+    // A 4 x 1 bar preset at diameter 8 lands as an 8 x 2 mark.
+    let bar = std::rc::Rc::new(compositor::abr::Preset { name: "bar".into(), width: 4, height: 1, pixels: vec![255; 4], spacing: 25.0 });
+    let settings = BrushSettings { diameter: 8.0, preset: Some(bar), ..Default::default() };
+    let (size, pixels) = shaped_tip(8.0, &settings);
+    assert!(size >= 8, "{size}");
+    let rows_with_paint = (0..size).filter(|y| (0..size).any(|x| pixels[y * size + x] > 128)).count();
+    let cols_with_paint = (0..size).filter(|x| (0..size).any(|y| pixels[y * size + x] > 128)).count();
+    assert!(rows_with_paint <= 3 && cols_with_paint >= 7, "rows {rows_with_paint} cols {cols_with_paint}");
+    // Turned 90 degrees it stands up.
+    let turned = BrushSettings { angle: 90.0, ..settings.clone() };
+    let (size, pixels) = shaped_tip(8.0, &turned);
+    let rows_with_paint = (0..size).filter(|y| (0..size).any(|x| pixels[y * size + x] > 128)).count();
+    assert!(rows_with_paint >= 7, "{rows_with_paint}");
+    // A round tip at 25 percent roundness is a sliver.
+    let squashed = BrushSettings { diameter: 20.0, roundness: 0.25, ..Default::default() };
+    let (size, pixels) = shaped_tip(20.0, &squashed);
+    let rows_with_paint = (0..size).filter(|y| (0..size).any(|x| pixels[y * size + x] > 128)).count();
+    assert!(rows_with_paint >= 4 && rows_with_paint <= 7, "{rows_with_paint}");
+    // Spacing spreads dabs: a stroke at 100 percent spacing leaves gaps a dense one does not.
+    let mut f = Fixture::new("spacing", 64, 16);
+    let id = f.add(Spec { size: (64.0, 16.0), pixels: Some(solid(64, 16, CLEAR)), ..Default::default() });
+    let mut d = Document::new(f.load().unwrap()).unwrap();
+    d.active = Some(id);
+    let sparse = BrushSettings { diameter: 6.0, spacing: Some(2.0), ..Default::default() };
+    d.begin_stroke((4.0, 8.0), &sparse, StrokeKind::Paint).unwrap();
+    d.continue_stroke((60.0, 8.0)).unwrap();
+    d.finish_stroke().unwrap();
+    let image = d.renderer.image(id).unwrap();
+    let painted = compositor::raster::with_bytes(image, |b, stride| (0..64).filter(|x| b[8 * stride + x * 4 + 3] > 0).count()).unwrap();
+    assert!(painted < 40, "sparse dabs leave gaps: {painted} of 64 columns painted");
 }

@@ -136,6 +136,13 @@ Shape (U): rectangles with rounded corners and ellipses in the foreground color 
 crisp when scaled (Shift+U swaps the kind). The palette at the bottom of the rail holds the foreground and
 background colors; X swaps them, D resets them.
 
+**Brushes.** The tip button at the left of the brush options opens the presets: the app's Hard Round and
+Soft Round tips and every sampled tip loaded from Photoshop brush files with Load Brushes (`.abr`, versions
+1, 2 and 6; computed round brushes and the dynamics in the file are not read). Loaded files are remembered
+in `~/.config/compositor/brushes.list`. Spacing (percent of the size, 0 for the automatic dense spacing),
+Angle and Roundness shape any tip, sampled or round, as Photoshop's Brush Tip Shape does; the cursor shows
+the shaped outline.
+
 **Remove Background.** Filter > Remove Background finds the subject with a segmentation model (ISNet,
 through ONNX Runtime) and lays down a layer mask that hides the rest, with the Mac app's refinements:
 Refine Edges (a guided filter that pulls the mask onto the image's own edges), Contrast and Shift Edge. The
@@ -148,7 +155,10 @@ Not built: the GPU brush (the software path meets the phase 4 budget), a Curves 
 save and render, but there is no widget to edit them), and Cmd+T-style floating transforms of a selection
 (pixels inside a selection move and duplicate, but do not scale or rotate on their own).
 
-The tool icons are drawn as line glyphs in the style of the Mac app's SF Symbols, in the theme's text color.
+The tool icons are solid glyphs in the style of Photoshop CC's rail, drawn in the theme's text color; the
+rail, the overlapping foreground and background squares, and the layers panel (tab header, blend and
+opacity on one row, eye toggles, disclosure triangles, a glyph footer) follow that layout too, with the
+colors still coming from the Omarchy theme.
 
 **Omarchy theme.** On Omarchy the app's chrome (window, header, tabs, tool rail, options bar, layers panel,
 fields, popovers, the canvas surround and the transform handles) takes its colors from the active theme's
@@ -210,6 +220,8 @@ src/viewport the canvas view math (fit, zoom around a point, pan), a port of Can
 src/ui/      the GTK4 app: window and tabs, canvas widget, layers panel
 src/ui/theme Omarchy palette to GTK CSS, watched for live theme switches
 src/ui/color_wheel the brush color picker: hue ring, saturation/value square, hex, recents
+src/abr       Photoshop brush files: the sampled tips and their spacing
+src/ui/brushes the brush presets and their picker
 src/distort   the perspective warp behind free distort
 src/heic      HEIC and HEIF decoding through libheif
 src/matte     Remove Background: the model run, the guided-filter refinement, the model download

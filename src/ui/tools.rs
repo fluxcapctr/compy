@@ -44,13 +44,13 @@ pub struct ToolRail {
 impl ToolRail {
     /// `changed` runs after the document's tool has been set.
     pub fn new(doc: DocRef, changed: Rc<dyn Fn()>) -> Rc<ToolRail> {
-        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(3).width_request(45)
-            .margin_top(8).margin_start(8).margin_end(8).css_classes(["tool-rail"]).build();
+        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(1).width_request(34)
+            .margin_top(6).margin_start(3).margin_end(3).css_classes(["tool-rail"]).build();
         let mut buttons = Vec::new();
         let current = doc.borrow().tool;
         let mut group: Option<gtk::ToggleButton> = None;
         for tool in Tool::ALL {
-            let button = gtk::ToggleButton::builder().tooltip_text(tool.help()).width_request(29).height_request(29).active(tool == current).css_classes(["tool"]).build();
+            let button = gtk::ToggleButton::builder().tooltip_text(tool.help()).width_request(28).height_request(26).active(tool == current).css_classes(["tool"]).build();
             button.set_child(Some(&super::icons::icon(tool)));
             if let Some(first) = &group { button.set_group(Some(first)); } else { group = Some(button.clone()); }
             let (doc, changed) = (doc.clone(), changed.clone());
@@ -68,10 +68,20 @@ impl ToolRail {
         let background = { let doc = doc.clone(); super::color_wheel::ColorButton::new(bg, Rc::new(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.background = c; } })) };
         foreground.widget.set_tooltip_text(Some("Foreground color (X swaps with the background, D resets to black and white)"));
         background.widget.set_tooltip_text(Some("Background color"));
-        let palette = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).margin_top(10).build();
-        palette.append(&foreground.widget);
-        palette.append(&background.widget);
-        widget.append(&palette);
+        // The squares overlap as Photoshop's do, with the swap and default marks beside them.
+        foreground.set_compact();
+        background.set_compact();
+        let fixed = gtk::Fixed::builder().width_request(30).height_request(30).margin_top(8).halign(gtk::Align::Center).build();
+        fixed.put(&background.widget, 9.0, 9.0);
+        fixed.put(&foreground.widget, 0.0, 0.0);
+        let marks = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).halign(gtk::Align::Center).spacing(2).margin_top(4).build();
+        for (glyph, action, tip) in [("default-colors", "win.default-colors", "Default colors: black over white (D)"), ("swap", "win.swap-colors", "Swap the foreground and background colors (X)")] {
+            let b = gtk::Button::builder().has_frame(false).action_name(action).tooltip_text(tip).css_classes(["tool", "mark"]).build();
+            b.set_child(Some(&super::icons::glyph(glyph, 13)));
+            marks.append(&b);
+        }
+        widget.append(&marks);
+        widget.append(&fixed);
         Rc::new(ToolRail { widget, buttons, foreground, background })
     }
 
@@ -92,6 +102,10 @@ pub struct OptionsBar {
     move_fields: Vec<gtk::SpinButton>,
     mask_paint: gtk::DropDown,
     color: Rc<super::color_wheel::ColorButton>,
+    picker: Rc<super::brushes::BrushPicker>,
+    spacing: gtk::SpinButton,
+    angle: gtk::SpinButton,
+    roundness: gtk::SpinButton,
     syncing: std::cell::Cell<bool>,
 }
 
@@ -111,7 +125,8 @@ fn mode_buttons(doc: &DocRef) -> gtk::Box {
 
 impl OptionsBar {
     pub fn new(doc: DocRef) -> OptionsBar {
-        let stack = gtk::Stack::builder().vhomogeneous(false).css_classes(["options"]).build();
+        // Sized to the page showing, so a wide page (the brush controls) never forces the window wider.
+        let stack = gtk::Stack::builder().vhomogeneous(false).hhomogeneous(false).css_classes(["options"]).build();
         let hint = gtk::Label::builder().xalign(0.0).margin_start(12).margin_top(8).margin_bottom(8).css_classes(["dim-label"]).build();
         stack.add_named(&hint, Some("hint"));
 
@@ -178,9 +193,14 @@ impl OptionsBar {
         wand.append(&contiguous);
         stack.add_named(&wand, Some("wand"));
 
-        // Brush tools share size, hardness and opacity; each adds its own controls after them.
+        // Brush tools share the tip, size, hardness, spacing, angle, roundness and opacity; each adds its own
+        // controls after them.
         let brushes = row();
         let settings = doc.borrow().brush.clone();
+        let (hardness_cell, size_cell): (Rc<std::cell::RefCell<Option<gtk::SpinButton>>>, ()) = (Rc::new(std::cell::RefCell::new(None)), ());
+        let _ = size_cell;
+        let picker = { let (doc, cell) = (doc.clone(), hardness_cell.clone()); super::brushes::BrushPicker::new(doc.clone(), Rc::new(move || { if let Some(h) = cell.borrow().as_ref() { let v = doc.borrow().brush.hardness; h.set_value((v * 100.0).round()); } })) };
+        brushes.append(&picker.widget);
         brushes.append(&gtk::Label::new(Some("Size")));
         let size = gtk::SpinButton::with_range(1.0, 2000.0, 1.0);
         size.set_value(settings.diameter);
@@ -192,7 +212,26 @@ impl OptionsBar {
         hardness.set_value(settings.hardness * 100.0);
         hardness.set_tooltip_text(Some("Percent of the radius painted at full strength (Shift+[ and Shift+] step it)"));
         { let doc = doc.clone(); hardness.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.hardness = s.value() / 100.0; } }); }
+        *hardness_cell.borrow_mut() = Some(hardness.clone());
         brushes.append(&hardness);
+        brushes.append(&gtk::Label::new(Some("Spacing")));
+        let spacing = gtk::SpinButton::with_range(0.0, 1000.0, 1.0);
+        spacing.set_value(settings.spacing.map_or(0.0, |s| (s * 100.0).round()));
+        spacing.set_tooltip_text(Some("Dab spacing as a percent of the size; 0 is automatic (dense, for a solid mark)"));
+        { let doc = doc.clone(); spacing.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.spacing = if s.value() <= 0.0 { None } else { Some(s.value() / 100.0) }; } }); }
+        brushes.append(&spacing);
+        brushes.append(&gtk::Label::new(Some("Angle")));
+        let angle = gtk::SpinButton::with_range(-180.0, 180.0, 1.0);
+        angle.set_value(settings.angle);
+        angle.set_tooltip_text(Some("The tip's rotation in degrees"));
+        { let doc = doc.clone(); angle.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.angle = s.value(); } }); }
+        brushes.append(&angle);
+        brushes.append(&gtk::Label::new(Some("Roundness")));
+        let roundness = gtk::SpinButton::with_range(5.0, 100.0, 1.0);
+        roundness.set_value((settings.roundness * 100.0).round());
+        roundness.set_tooltip_text(Some("Percent: 100 is the tip as it is, less squashes it across its angle"));
+        { let doc = doc.clone(); roundness.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.roundness = s.value() / 100.0; } }); }
+        brushes.append(&roundness);
         brushes.append(&gtk::Label::new(Some("Opacity")));
         let opacity = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
         opacity.set_value(settings.opacity * 100.0);
@@ -287,7 +326,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -363,7 +402,13 @@ impl OptionsBar {
         self.size.set_value(settings.diameter);
         self.hardness.set_value((settings.hardness * 100.0).round());
         self.opacity.set_value((settings.opacity * 100.0).round());
+        self.spacing.set_value(settings.spacing.map_or(0.0, |s| (s * 100.0).round()));
+        self.angle.set_value(settings.angle);
+        self.roundness.set_value((settings.roundness * 100.0).round());
+        self.picker.sync();
     }
+
+    pub fn show_brush_picker(&self) { self.picker.popup(); }
 }
 
 fn row() -> gtk::Box {

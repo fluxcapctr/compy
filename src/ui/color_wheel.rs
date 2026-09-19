@@ -73,6 +73,9 @@ impl ColorButton {
     }
 
     pub fn set_color(&self, rgb: [f64; 3]) { self.color.set(rgb); self.swatch.queue_draw(); }
+
+    /// A square swatch for the rail's overlapping palette.
+    pub fn set_compact(&self) { self.swatch.set_content_width(20); self.swatch.set_content_height(20); self.widget.add_css_class("swatch"); }
     pub fn color(&self) -> [f64; 3] { self.color.get() }
 }
 

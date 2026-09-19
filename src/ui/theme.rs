@@ -103,8 +103,9 @@ pub fn css(p: &Palette) -> String {
         @define-color card_bg_color {lbg};
         window, .background {{ background-color: {bg}; color: {fg}; }}
         headerbar {{ background-color: {dbg}; color: {fg}; box-shadow: none; border-bottom: 1px solid {ddbg}; }}
-        headerbar button, .options button, .layers-footer button {{ background-color: {lbg}; color: {fg}; border: 1px solid {ddbg}; box-shadow: none; text-shadow: none; }}
-        headerbar button:hover, .options button:hover, .layers-footer button:hover {{ background-color: {sel}; }}
+        headerbar button, .options button {{ background-color: {lbg}; color: {fg}; border: 1px solid {ddbg}; box-shadow: none; text-shadow: none; }}
+        headerbar button:hover, .options button:hover {{ background-color: {sel}; }}
+        .layers-footer button, .layers-panel row button {{ background-color: transparent; background-image: none; border: none; box-shadow: none; }}
         button.suggested-action {{ background-color: {accent}; color: {on_accent}; border-color: {accent}; }}
         notebook > header {{ background-color: {dbg}; border-color: {ddbg}; }}
         notebook > header tab {{ color: {dfg}; }}
@@ -113,7 +114,10 @@ pub fn css(p: &Palette) -> String {
         .tool-rail {{ background-color: {dbg}; border-right: 1px solid {ddbg}; }}
         button.tool {{ background-color: transparent; color: {fg}; border: none; box-shadow: none; }}
         button.tool:hover {{ background-color: {sel}; }}
-        button.tool:checked {{ background-color: {accent}; color: {on_accent}; }}
+        button.tool:checked {{ background-color: {lbg}; color: {bfg}; box-shadow: inset 0 0 0 1px {muted}; }}
+        .panel-tabs {{ background-color: {ddbg}; }}
+        .panel-tab {{ color: {dfg}; }}
+        .panel-tab.current {{ background-color: {bg}; color: {bfg}; }}
         .options {{ background-color: {bg}; border-bottom: 1px solid {ddbg}; }}
         .layers-panel {{ background-color: {bg}; border-left: 1px solid {ddbg}; }}
         .layers-panel .heading {{ color: {bfg}; }}

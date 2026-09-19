@@ -878,7 +878,7 @@ impl Document {
         let pixels = with_bytes(&warp.surface, |data, stride| { let mut out = vec![0u8; w * h * 4]; for y in 0..h { out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&data[y * stride..y * stride + w * 4]); } out })?;
         let sample = std::rc::Rc::new(crate::brush::Sample { pixels, width: w, height: h });
         // A hard tip a little wider than the brush covers everything the stroke moved.
-        let settings = crate::brush::BrushSettings { diameter: (warp.diameter + 4.0).min(2000.0), hardness: 1.0, color: [0.0; 3], opacity: 1.0 };
+        let settings = crate::brush::BrushSettings { diameter: (warp.diameter + 4.0).min(2000.0), hardness: 1.0, color: [0.0; 3], opacity: 1.0, ..Default::default() };
         let layer = self.renderer.layer(id).clone();
         let size = self.renderer.image_size(id).unwrap_or((1, 1));
         let canvas = (self.width() as f64, self.height() as f64);

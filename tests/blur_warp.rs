@@ -63,7 +63,7 @@ fn smudge_drags_color_and_liquify_pushes_pixels() {
     let id = f.add(Spec { name: "Halves", size: (24.0, 24.0), pixels: Some(halves(24, 24, 12, RED, BLUE)), ..Spec::default() });
     let mut d = doc(&f);
     d.active = Some(id);
-    let settings = BrushSettings { diameter: 6.0, hardness: 0.5, color: [0.0; 3], opacity: 0.9 };
+    let settings = BrushSettings { diameter: 6.0, hardness: 0.5, color: [0.0; 3], opacity: 0.9, ..Default::default() };
     d.begin_warp((6.0, 12.0), &settings, WarpMode::Smudge).unwrap();
     for x in 7..=18 { d.continue_stroke((x as f64, 12.0)).unwrap(); }
     let during = flat(&mut d);
@@ -77,7 +77,7 @@ fn smudge_drags_color_and_liquify_pushes_pixels() {
     d.undo();
     assert_pixel(&flat(&mut d), 24, 15, 12, BLUE, 0);
 
-    let settings = BrushSettings { diameter: 8.0, hardness: 0.0, color: [0.0; 3], opacity: 1.0 };
+    let settings = BrushSettings { diameter: 8.0, hardness: 0.0, color: [0.0; 3], opacity: 1.0, ..Default::default() };
     d.begin_warp((11.0, 12.0), &settings, WarpMode::Liquify).unwrap();
     for x in 12..=16 { d.continue_stroke((x as f64, 12.0)).unwrap(); }
     d.finish_stroke().unwrap();

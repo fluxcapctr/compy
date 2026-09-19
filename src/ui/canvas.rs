@@ -102,7 +102,9 @@ impl Canvas {
         status.append(&message);
         let options = OptionsBar::new(doc.clone());
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        column.append(&options.widget);
+        // The bar scrolls sideways (no visible bar) rather than widening the window past the panel.
+        let options_scroller = gtk::ScrolledWindow::builder().child(&options.widget).hscrollbar_policy(gtk::PolicyType::External).vscrollbar_policy(gtk::PolicyType::Never).propagate_natural_height(true).build();
+        column.append(&options_scroller);
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&area);
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -1339,7 +1341,16 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         if px > -1.0e8 {
             let d = doc.brush.diameter * ppp;
             cr.new_path();
-            cr.arc(px, py, d / 2.0, 0.0, std::f64::consts::TAU);
+            if doc.brush.shaped() {
+                // The tip's box, squashed and turned as the tip is.
+                let (bw, bh) = doc.brush.preset.as_ref().map_or((1.0, 1.0), |p| { let m = p.width.max(p.height) as f64; (p.width as f64 / m, p.height as f64 / m) });
+                cr.save()?;
+                cr.translate(px, py);
+                cr.rotate(doc.brush.angle.to_radians());
+                cr.scale(d / 2.0 * bw, d / 2.0 * bh * doc.brush.roundness.clamp(0.05, 1.0));
+                cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+                cr.restore()?;
+            } else { cr.arc(px, py, d / 2.0, 0.0, std::f64::consts::TAU); }
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.set_line_width(2.5);
             cr.stroke_preserve()?;

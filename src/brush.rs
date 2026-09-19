@@ -30,10 +30,23 @@ pub struct BrushSettings {
     pub color: [f64; 3],
     /// Caps the whole stroke, as in Photoshop: overlapping dabs never exceed it.
     pub opacity: f64,
+    /// Dab spacing as a fraction of the diameter; None picks the dense spacing that makes round tips read as
+    /// one continuous mark (Photoshop's default of 25 percent shows as a string of dabs for a hard tip).
+    pub spacing: Option<f64>,
+    /// The tip's rotation in degrees and its roundness (1 round, 0.05 a sliver), as Photoshop's Brush Tip Shape.
+    pub angle: f64,
+    pub roundness: f64,
+    /// A sampled tip from a Photoshop brush file, scaled to the diameter, in place of the round tip.
+    pub preset: Option<std::rc::Rc<crate::abr::Preset>>,
 }
 
 impl Default for BrushSettings {
-    fn default() -> Self { BrushSettings { diameter: 40.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0 } }
+    fn default() -> Self { BrushSettings { diameter: 40.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0, spacing: None, angle: 0.0, roundness: 1.0, preset: None } }
+}
+
+impl BrushSettings {
+    /// A tip other than the plain round one: a preset, a squashed or turned round tip.
+    pub fn shaped(&self) -> bool { self.preset.is_some() || self.roundness < 0.999 || self.angle % 360.0 != 0.0 }
 }
 
 /// A document-size image a stroke copies from, premultiplied 4 bytes per pixel.
@@ -80,6 +93,35 @@ pub fn falloff(u: f64) -> f64 {
 
 /// The widest tip kept in memory, as `BrushStroke.gridTipLimit`.
 pub const GRID_TIP_LIMIT: f64 = 3000.0;
+
+/// The tip for `settings` at `grid_diameter`: a sampled preset, or the round tip, either one squashed by
+/// the roundness and turned by the angle when they are not the defaults.
+pub fn shaped_tip(grid_diameter: f64, settings: &BrushSettings) -> (usize, Vec<u8>) {
+    if !settings.shaped() { return tip(grid_diameter, settings.hardness); }
+    let (bw, bh, base) = match &settings.preset {
+        Some(p) => (p.width, p.height, p.pixels.clone()),
+        None => { let (s, px) = tip(grid_diameter.max(4.0), settings.hardness); (s, s, px) }
+    };
+    // The longest side lands on the diameter; the box holds it at any angle.
+    let scale = grid_diameter / bw.max(bh) as f64;
+    let (sw, sh) = (bw as f64 * scale, bh as f64 * scale * settings.roundness.clamp(0.05, 1.0));
+    let size = (sw.hypot(sh).ceil() as usize).max(1);
+    let source = match crate::raster::a8_from_data(bw as i32, bh as i32, { let stride = cairo::Format::A8.stride_for_width(bw as u32).unwrap_or(bw as i32) as usize; let mut d = vec![0u8; stride * bh]; for y in 0..bh { d[y * stride..y * stride + bw].copy_from_slice(&base[y * bw..(y + 1) * bw]); } d }, cairo::Format::A8.stride_for_width(bw as u32).unwrap_or(bw as i32)) {
+        Ok(s) => s, Err(_) => return tip(grid_diameter, settings.hardness),
+    };
+    let Ok(out) = crate::raster::a8_filled(size as i32, size as i32, 0) else { return tip(grid_diameter, settings.hardness) };
+    if let Ok(cr) = cairo::Context::new(&out) {
+        cr.translate(size as f64 / 2.0, size as f64 / 2.0);
+        cr.rotate(settings.angle.to_radians());
+        cr.scale(sw / bw as f64, sh / bh as f64);
+        cr.translate(-(bw as f64) / 2.0, -(bh as f64) / 2.0);
+        let _ = cr.set_source_surface(&source, 0.0, 0.0);
+        cr.source().set_filter(if scale < 1.0 { cairo::Filter::Good } else { cairo::Filter::Bilinear });
+        let _ = cr.paint();
+    }
+    let pixels = crate::raster::with_bytes(&out, |d, stride| (0..size).flat_map(|y| d[y * stride..y * stride + size].to_vec()).collect::<Vec<u8>>()).unwrap_or_else(|_| vec![0; size * size]);
+    (size, pixels)
+}
 
 /// The tip as gray coverage in grid pixels, its box `size` wide.
 pub fn tip(grid_diameter: f64, hardness: f64) -> (usize, Vec<u8>) {
@@ -189,8 +231,11 @@ impl Stroke {
         if !grid_diameter.is_finite() || grid_diameter > GRID_TIP_LIMIT {
             bail!("The brush would be {} pixels wide on this layer's own pixels; the limit is {}. Use a smaller brush, or resample the layer with Image Size.", grid_diameter.round(), GRID_TIP_LIMIT);
         }
-        let (tip_size, tip) = tip(grid_diameter, settings.hardness);
-        let spacing = (settings.diameter * if settings.hardness >= 1.0 { 0.015 } else { 0.025 }).max(0.25);
+        let (tip_size, tip) = shaped_tip(grid_diameter, settings);
+        let spacing = match settings.spacing {
+            Some(fraction) => (settings.diameter * fraction.clamp(0.01, 10.0)).max(0.25),
+            None => (settings.diameter * if settings.hardness >= 1.0 && !settings.shaped() { 0.015 } else { 0.025 }).max(0.25),
+        };
         Ok(Stroke {
             settings: settings.clone(), kind, width, height, source, has_image, to_document, from_document, transform: expanded, canvas, preview,
             selection, tip_size, tip, spacing, tiles: HashMap::new(), columns: width.div_ceil(TILE),
@@ -341,7 +386,7 @@ impl Stroke {
         let (gx0, gy0) = (bx.max(0) as usize, by.max(0) as usize);
         let (gx1, gy1) = (((bx + size as i64).max(0) as usize).min(self.width), ((by + size as i64).max(0) as usize).min(self.height));
         if gx1 <= gx0 || gy1 <= gy0 { return; }
-        let hard = self.settings.hardness >= 1.0;
+        let hard = self.settings.hardness >= 1.0 && !self.settings.shaped();
         for ty in gy0 / TILE..=(gy1 - 1) / TILE {
             for tx in gx0 / TILE..=(gx1 - 1) / TILE {
                 let key = ty * self.columns + tx;

@@ -1,6 +1,7 @@
 //! The GTK4 application: a window of project tabs, each a canvas with its tool rail beside a layers panel,
 //! and a menu of edits that run on the current tab's document.
 
+pub mod brushes;
 mod canvas;
 pub mod color_wheel;
 mod dialogs;
@@ -173,6 +174,8 @@ pub struct Script {
     pub ellipse: bool,
     /// Opens the brush color picker before the screenshot.
     pub pick_color: bool,
+    /// Opens the brush preset picker before the screenshot.
+    pub pick_brush: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -186,7 +189,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -196,6 +199,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some((x, y)) = script.wand { p.canvas.wand_at(x, y); }
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
+                    if script.pick_brush { p.canvas.options.show_brush_picker(); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
                     if let Some(size) = script.brush_size { p.canvas.doc().borrow_mut().brush.diameter = size; p.canvas.sync_brush_options(); }
                     if let Some(mode) = script.blur_mode { p.canvas.doc().borrow_mut().blur_mode = mode; }
@@ -235,7 +239,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
 fn build_window(app: &gtk::Application) -> Rc<App> {
     // Tool buttons are smaller than GTK's default minimum.
     let css = gtk::CssProvider::new();
-    css.load_from_string("button.tool { min-width: 0; min-height: 0; padding: 4px; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
+    css.load_from_string("button.tool, .layers-panel row button, .layers-footer button, .layers-panel menubutton > button { background-image: none; background-color: transparent; border: none; box-shadow: none; outline: none; } button.tool:hover, .layers-panel row button:hover, .layers-footer button:hover { background-color: alpha(currentColor, 0.12); } button.tool { min-width: 0; min-height: 0; padding: 3px; border-radius: 3px; } button.tool.mark { padding: 1px; } button.swatch { min-width: 0; min-height: 0; padding: 0; border-radius: 0; border: 1px solid alpha(currentColor, 0.5); } .panel-tab { padding: 5px 12px; } .panel-tab.current { background-color: alpha(@window_bg_color, 1); border-bottom: 2px solid @accent_bg_color; } .layers-footer button { min-width: 0; min-height: 0; padding: 3px 5px; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
 
     let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
@@ -292,7 +296,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 57] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 59] = [
+        ("swap-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('x'); })),
+        ("default-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('d'); })),
         ("crop-apply", &[], |s| s.with_current(|p| p.canvas.apply_crop())),
         ("crop-cancel", &[], |s| s.with_current(|p| p.canvas.cancel_crop())),
         ("nudge-pixels-left", &["<Control>Left"], |s| s.edit(|d| d.nudge_pixels(-1.0, 0.0))),
@@ -535,8 +541,13 @@ impl App {
         {
             // The panel keeps its width; the canvas takes whatever the window has, at any size (Hyprland
             // hands out a whole tile, often far wider than 1280).
-            let p = paned.clone();
-            paned.connect_map(move |_| { let p = p.clone(); glib::idle_add_local_once(move || { let w = p.width(); if w > 0 { p.set_position(w - layers::WIDTH); } }); });
+            let (p, panel_widget) = (paned.clone(), panel.widget.clone());
+            paned.connect_map(move |_| { let (p, panel_widget) = (p.clone(), panel_widget.clone()); glib::idle_add_local_once(move || {
+                let w = p.width();
+                // The panel's own minimum (its widest control) wins over the nominal width.
+                let need = panel_widget.measure(gtk::Orientation::Horizontal, -1).0.max(layers::WIDTH);
+                if w > 0 { p.set_position(w - need); }
+            }); });
         }
 
         let tab = gtk::Box::new(gtk::Orientation::Horizontal, 6);

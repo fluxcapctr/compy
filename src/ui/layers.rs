@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use uuid::Uuid;
 
-pub const WIDTH: i32 = 252;
-const ROW_HEIGHT: i32 = 52;
-const THUMBNAIL: i32 = 36;
-const MASK_THUMBNAIL: i32 = 30;
-const DISCLOSURE: i32 = 28;
+pub const WIDTH: i32 = 264;
+const ROW_HEIGHT: i32 = 44;
+const THUMBNAIL: i32 = 34;
+const MASK_THUMBNAIL: i32 = 26;
+const DISCLOSURE: i32 = 20;
 
 // The layers being dragged, from whichever panel they started in, so a drop on another project's panel can
 // copy them across. GTK carries only a marker string.
@@ -32,7 +32,7 @@ struct Inner {
     canvas: gtk::DrawingArea,
     list: gtk::ListBox,
     blend: gtk::DropDown,
-    opacity: gtk::Scale,
+    opacity: gtk::Entry,
     percent: gtk::Label,
     count: gtk::Label,
     /// Layer ids by row index, as the list shows them.
@@ -47,26 +47,25 @@ impl LayersPanel {
     pub fn new(doc: DocRef, canvas: gtk::DrawingArea) -> Rc<LayersPanel> {
         let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).width_request(WIDTH).css_classes(["layers-panel"]).build();
 
-        let header = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).margin_start(18).margin_end(18).margin_top(14).margin_bottom(14).build();
-        header.append(&gtk::Label::builder().label("Layers").css_classes(["heading"]).hexpand(true).xalign(0.0).build());
-        let count = gtk::Label::builder().css_classes(["dim-label", "numeric"]).build();
+        // A tab strip like Photoshop's panel header, with the layer count where a second tab would sit.
+        let header = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).css_classes(["panel-tabs"]).build();
+        header.append(&gtk::Label::builder().label("Layers").css_classes(["panel-tab", "current"]).xalign(0.0).build());
+        let count = gtk::Label::builder().css_classes(["panel-tab", "dim-label", "numeric"]).build();
         header.append(&count);
         widget.append(&header);
-        widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let controls = gtk::Grid::builder().row_spacing(6).column_spacing(8).margin_start(12).margin_end(12).margin_top(10).margin_bottom(10).build();
+        // Blend mode and opacity on one row.
+        let controls = gtk::Grid::builder().column_spacing(6).margin_start(8).margin_end(8).margin_top(6).margin_bottom(6).build();
         let names: Vec<&str> = BlendMode::ALL.iter().map(|m| m.name()).collect();
         let blend = gtk::DropDown::from_strings(&names);
         blend.set_hexpand(true);
-        let opacity = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
-        opacity.set_draw_value(false);
-        opacity.set_hexpand(true);
-        let percent = gtk::Label::builder().label("100%").width_chars(5).xalign(1.0).css_classes(["numeric"]).build();
-        controls.attach(&gtk::Label::builder().label("Blend").xalign(0.0).css_classes(["caption"]).build(), 0, 0, 1, 1);
-        controls.attach(&blend, 1, 0, 2, 1);
-        controls.attach(&gtk::Label::builder().label("Opacity").xalign(0.0).css_classes(["caption"]).build(), 0, 1, 1, 1);
-        controls.attach(&opacity, 1, 1, 1, 1);
-        controls.attach(&percent, 2, 1, 1, 1);
+        // A typed field, as Photoshop's: Return or leaving it applies, the wheel steps it.
+        let opacity = gtk::Entry::builder().width_chars(3).max_length(3).xalign(1.0).input_purpose(gtk::InputPurpose::Digits).tooltip_text("Opacity, percent (type a value, or scroll over it)").build();
+        let percent = gtk::Label::builder().label("%").css_classes(["dim-label"]).build();
+        controls.attach(&blend, 0, 0, 1, 1);
+        controls.attach(&gtk::Label::builder().label("Opacity:").css_classes(["caption", "dim-label"]).build(), 1, 0, 1, 1);
+        controls.attach(&opacity, 2, 0, 1, 1);
+        controls.attach(&percent, 3, 0, 1, 1);
         widget.append(&controls);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
@@ -75,15 +74,24 @@ impl LayersPanel {
         widget.append(&scroller);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         // The footer: new layer, folder, mask, adjustment, and delete, as the Mac's panel has.
-        let footer = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).margin_start(8).margin_end(8).margin_top(4).margin_bottom(4).css_classes(["layers-footer"]).build();
-        for (icon, action, tip) in [("list-add-symbolic", "win.new-layer", "New blank layer (Ctrl+Shift+N)"), ("folder-new-symbolic", "win.new-folder", "New folder (Ctrl+G)"), ("image-x-generic-symbolic", "win.mask-reveal", "Add mask (from the selection, if any)")] {
-            footer.append(&gtk::Button::builder().icon_name(icon).has_frame(false).action_name(action).tooltip_text(tip).build());
+        // The footer, right-aligned as Photoshop's: link, mask, adjustment, folder, new layer, trash.
+        let footer = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(0).margin_start(6).margin_end(6).margin_top(2).margin_bottom(2).css_classes(["layers-footer"]).build();
+        footer.append(&gtk::Box::builder().hexpand(true).build());
+        for (glyph, action, tip) in [("link", "win.toggle-clipping", "Clip to the layer below (Alt+G)"), ("mask", "win.mask-reveal", "Add a layer mask (from the selection, if any)")] {
+            let b = gtk::Button::builder().has_frame(false).action_name(action).tooltip_text(tip).build();
+            b.set_child(Some(&super::icons::glyph(glyph, 16)));
+            footer.append(&b);
         }
         let adjustments = gio::Menu::new();
         for kind in ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain"] { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
-        footer.append(&gtk::MenuButton::builder().icon_name("color-select-symbolic").has_frame(false).menu_model(&adjustments).tooltip_text("New adjustment layer").build());
-        footer.append(&gtk::Box::builder().hexpand(true).build());
-        footer.append(&gtk::Button::builder().icon_name("user-trash-symbolic").has_frame(false).action_name("win.delete-layer").tooltip_text("Delete the selected layer").build());
+        let adjust = gtk::MenuButton::builder().has_frame(false).menu_model(&adjustments).tooltip_text("New adjustment layer").build();
+        adjust.set_child(Some(&super::icons::glyph("adjustment", 16)));
+        footer.append(&adjust);
+        for (glyph, action, tip) in [("new-folder", "win.new-folder", "New folder (Ctrl+G)"), ("new-layer", "win.new-layer", "New blank layer (Ctrl+Shift+N)"), ("trash", "win.delete-layer", "Delete the selected layers")] {
+            let b = gtk::Button::builder().has_frame(false).action_name(action).tooltip_text(tip).build();
+            b.set_child(Some(&super::icons::glyph(glyph, 16)));
+            footer.append(&b);
+        }
         widget.append(&footer);
 
         let inner = Rc::new(Inner { doc, canvas, list, blend, opacity, percent, count, rows: RefCell::new(Vec::new()), details: RefCell::new(HashMap::new()), syncing: Cell::new(false), on_select: RefCell::new(None) });
@@ -118,18 +126,31 @@ impl Inner {
             this.refresh_detail(id);
             this.canvas.queue_draw();
         });
-        let this = self.clone();
-        self.opacity.connect_value_changed(move |scale| {
+        let apply = { let this = self.clone(); Rc::new(move |entry: &gtk::Entry| {
             if this.syncing.get() { return; }
-            let value = scale.value();
-            this.percent.set_label(&format!("{value:.0}%"));
+            let Ok(value) = entry.text().trim().trim_end_matches('%').parse::<f64>() else { this.sync_controls(); return };
+            let value = value.clamp(0.0, 100.0);
             let mut d = this.doc.borrow_mut();
             let Some(id) = d.document.active else { return };
             d.document.set_opacity(id, value / 100.0);
             drop(d);
+            this.sync_controls();
             this.refresh_detail(id);
             this.canvas.queue_draw();
-        });
+        }) };
+        { let apply = apply.clone(); self.opacity.connect_activate(move |e| apply(e)); }
+        { let (apply, entry) = (apply.clone(), self.opacity.clone()); let focus = gtk::EventControllerFocus::new(); focus.connect_leave(move |_| apply(&entry)); self.opacity.add_controller(focus); }
+        {
+            let (apply, entry) = (apply.clone(), self.opacity.clone());
+            let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            scroll.connect_scroll(move |_, _, dy| {
+                let current = entry.text().trim().parse::<f64>().unwrap_or(100.0);
+                entry.set_text(&format!("{}", (current - dy.signum()).clamp(0.0, 100.0)));
+                apply(&entry);
+                gtk::glib::Propagation::Stop
+            });
+            self.opacity.add_controller(scroll);
+        }
     }
 
     /// Rebuilds every row from the document. Rows inside collapsed folders are left out.
@@ -146,7 +167,7 @@ impl Inner {
                 let collapsed = d.collapsed.contains(&id);
                 if group && collapsed { hidden_below = Some(depth); }
                 let thumbnail = if group || layer.adjustment.is_some() { None } else { d.document.renderer.thumbnail(id, THUMBNAIL).ok().flatten() };
-                let kind = if group { "folder-symbolic" } else if layer.adjustment.is_some() { "color-select-symbolic" } else { "image-x-generic-symbolic" };
+                let kind = if group { "folder" } else if layer.adjustment.is_some() { "adjustment" } else { "new-layer" };
                 let mask = d.document.renderer.mask_thumbnail(id, MASK_THUMBNAIL).ok().flatten();
                 let mask_target = d.document.mask_target() && d.document.active == Some(id);
                 infos.push(RowInfo { id, depth, visible, own_visible: layer.is_visible, group, collapsed, name: layer.name.clone(), detail: detail_text(&d.document.renderer, id), thumbnail, kind, mask, mask_enabled: layer.mask_enabled(), mask_target, clipped: layer.mask_source_id.is_some() });
@@ -161,15 +182,17 @@ impl Inner {
         for (index, info) in infos.into_iter().enumerate() {
             if Some(info.id) == selected { select_index = Some(index); }
             ids.push(info.id);
-            let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).height_request(ROW_HEIGHT).margin_start(4).margin_end(8).build();
-            row.append(&gtk::Box::builder().width_request((info.depth * 14 + if info.clipped { 14 } else { 0 }) as i32).build());
+            let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(4).height_request(ROW_HEIGHT).margin_start(2).margin_end(4).build();
+            row.append(&gtk::Box::builder().width_request((info.depth * 12 + if info.clipped { 12 } else { 0 }) as i32).build());
 
-            let eye = gtk::CheckButton::builder().active(info.own_visible).tooltip_text("Show or hide this layer").valign(gtk::Align::Center).build();
+            // The eye: shown when the layer is visible, an empty well when hidden.
+            let eye = gtk::Button::builder().has_frame(false).tooltip_text("Show or hide this layer").valign(gtk::Align::Center).width_request(24).height_request(24).css_classes(["eye"]).build();
+            if info.own_visible { eye.set_child(Some(&super::icons::glyph("eye", 16))); } else { eye.set_child(Some(&gtk::Box::builder().width_request(16).height_request(16).build())); }
             {
                 let this = self.clone();
-                let id = info.id;
-                eye.connect_toggled(move |button| {
-                    this.doc.borrow_mut().document.set_visible(id, button.is_active());
+                let (id, visible) = (info.id, info.own_visible);
+                eye.connect_clicked(move |_| {
+                    this.doc.borrow_mut().document.set_visible(id, !visible);
                     this.canvas.queue_draw();
                     this.rebuild();
                 });
@@ -177,8 +200,8 @@ impl Inner {
             row.append(&eye);
 
             if info.group {
-                let disclosure = gtk::Button::builder().icon_name(if info.collapsed { "pan-end-symbolic" } else { "pan-down-symbolic" })
-                    .has_frame(false).valign(gtk::Align::Center).width_request(DISCLOSURE).height_request(DISCLOSURE).css_classes(["flat", "circular"]).build();
+                let disclosure = gtk::Button::builder().has_frame(false).valign(gtk::Align::Center).width_request(DISCLOSURE).height_request(DISCLOSURE).css_classes(["flat"]).build();
+                disclosure.set_child(Some(&super::icons::glyph(if info.collapsed { "triangle-right" } else { "triangle-down" }, 12)));
                 let this = self.clone();
                 let id = info.id;
                 disclosure.connect_clicked(move |_| {
@@ -223,7 +246,8 @@ impl Inner {
                     slot.append(&area);
                 }
                 None => {
-                    let icon = gtk::Image::builder().icon_name(info.kind).pixel_size(20).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["dim-label"]).build();
+                    let icon = super::icons::glyph(info.kind, 20);
+                    icon.add_css_class("dim-label");
                     slot.append(&icon);
                 }
             }
@@ -404,12 +428,11 @@ impl Inner {
         if let Some(layer) = &layer {
             let mode = BlendMode::ALL.iter().position(|m| *m == layer.blend_mode()).unwrap_or(0) as u32;
             self.blend.set_selected(mode);
-            self.opacity.set_value((layer.opacity() * 100.0).round());
-            self.percent.set_label(&format!("{:.0}%", (layer.opacity() * 100.0).round()));
+            self.opacity.set_text(&format!("{}", (layer.opacity() * 100.0).round()));
         } else {
             self.blend.set_selected(0);
-            self.opacity.set_value(100.0);
-            self.percent.set_label("100%");
+            self.opacity.set_text("100");
+            self.percent.set_label("%");
         }
         self.syncing.set(false);
     }

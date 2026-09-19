@@ -134,7 +134,7 @@ fn painting_a_mask_hides_pixels_under_the_stroke() {
     let mut d = doc(&f);
     d.active = Some(id);
     d.add_mask(true).unwrap();
-    let settings = BrushSettings { diameter: 4.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0 };
+    let settings = BrushSettings { diameter: 4.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0, ..Default::default() };
     d.begin_mask_stroke((4.0, 4.0), &settings, false).unwrap();
     let during = flat(&mut d);
     assert_eq!(during[4 * 8 + 4], CLEAR, "the live preview hides under the tip");
