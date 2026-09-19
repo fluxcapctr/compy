@@ -184,7 +184,9 @@ bounds) and Compy can call `snapshot` to see the canvas with the selection outli
 means what is selected. It has a design skill (`assets/compy-design.md`) for layout, type, color and
 finish. It acts through the compy tools, each an undoable step you watch happen: select, layers,
 placement, fills, filters, adjustment layers, type, shapes, layer styles, canvas and image size, export,
-save, open, undo, and Generative Fill and Expand on fal.ai (with the cost stated first). Voice: with
+save, open, undo, and on fal.ai (with the cost stated first) Generative Fill and Expand, instruction
+edits of the active layer or its selected part ("give her a moustache", landing as a new layer over the
+original), a picture from a prompt, a four-times upscale, and relighting in a named style. Voice: with
 voxtype dictation running (Omarchy's Page Down), starting to talk opens Compy and the words go into its
 entry; when they stop, the message sends itself; the microphone button toggles the same. The same tools
 serve two other surfaces: `compositor mcp` is a Model Context Protocol server for Claude Code in the

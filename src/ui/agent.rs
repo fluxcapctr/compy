@@ -157,7 +157,12 @@ impl App {
             return match outcome {
                 None => bail!("no such job"),
                 Some((_, None)) => Ok(json!({"job": job})),
-                Some((_, Some(result))) => { JOBS.with(|jobs| jobs.borrow_mut().remove(&job)); result.map_err(|e| anyhow::anyhow!("{e}")) }
+                Some((_, Some(result))) => {
+                    JOBS.with(|jobs| jobs.borrow_mut().remove(&job));
+                    // The finished generation lands on the document here, on the GTK thread.
+                    let value = result.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if value.get("images").is_some() { self.agent_land_fill(&value) } else { Ok(value) }
+                }
             };
         }
         match tool {
@@ -330,6 +335,43 @@ impl App {
                         refresh = false;
                         json!({"job": job})
                     }
+                    "generative_edit" | "generate_image" | "upscale" | "relight" => {
+                        let Some(key) = crate::genfill::key() else { bail!("No fal.ai key is set. File > Generative Fill lets the user enter one.") };
+                        let (w, h) = (dd.width() as f64, dd.height() as f64);
+                        // What goes to fal, and where the result lands.
+                        let (model, body, place, name, cost): (String, Value, (f64, f64, f64, f64), String, f64) = match tool {
+                            "generate_image" => {
+                                let (gw, gh) = (num(args, "width").unwrap_or(w).clamp(64.0, 4096.0), num(args, "height").unwrap_or(h).clamp(64.0, 4096.0));
+                                ("fal-ai/flux/dev".into(), json!({"prompt": text(args, "prompt").unwrap_or_default(), "image_size": {"width": gw as i64, "height": gh as i64}, "num_images": 1, "output_format": "png"}), ((w - gw) / 2.0, (h - gh) / 2.0, gw, gh), "Generated".into(), 0.03 * gw * gh / 1_000_000.0)
+                            }
+                            _ => {
+                                let Some((png, rect)) = dd.copy_layer_pixels()? else { bail!("The active layer has no pixels there.") };
+                                let layer_name = dd.active.map(|id| dd.renderer.layer(id).name.clone()).unwrap_or_default();
+                                let uri = crate::genfill::data_uri(&png);
+                                let place = (rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64);
+                                match tool {
+                                    "generative_edit" => { let count = num(args, "count").unwrap_or(1.0).clamp(1.0, 4.0) as i64; ("fal-ai/flux-pro/kontext".into(), json!({"prompt": text(args, "prompt").unwrap_or_default(), "image_url": uri, "num_images": count, "output_format": "png"}), place, format!("{layer_name} edited"), 0.04 * count as f64) }
+                                    "upscale" => ("fal-ai/aura-sr".into(), json!({"image_url": uri, "upscaling_factor": 4}), place, format!("{layer_name} upscaled"), 0.02),
+                                    _ => ("fal-ai/image-apps-v2/relighting".into(), json!({"image_url": uri, "lighting_style": text(args, "style").unwrap_or_else(|| "studio".into())}), place, format!("{layer_name} relit"), 0.05),
+                                }
+                            }
+                        };
+                        let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
+                        let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
+                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone() }));
+                        {
+                            let status = status.clone();
+                            std::thread::spawn(move || {
+                                let backend = crate::genfill::Fal { key };
+                                let progress = |t: &str| { if let Ok(mut s) = status.lock() { s.0 = t.to_string(); } };
+                                let outcome = backend.run(&model, body, &progress, &|| false).map_err(|e| format!("{e:#}"));
+                                let value = outcome.map(|images| json!({"mode": "layer", "place": {"x": place.0, "y": place.1, "width": place.2, "height": place.3}, "name": name, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": cost}));
+                                if let Ok(mut s) = status.lock() { s.1 = Some(value); }
+                            });
+                        }
+                        refresh = false;
+                        json!({"job": job})
+                    }
                     other => bail!("unknown tool {other}"),
                 })
             })();
@@ -346,6 +388,21 @@ impl App {
     /// only as a count, since the user picks variations in the panel.
     fn agent_land_fill(self: &Rc<Self>, v: &Value) -> Result<Value> {
         let images = v.get("images").and_then(Value::as_array).cloned().unwrap_or_default();
+        if v.get("mode").and_then(Value::as_str) == Some("layer") {
+            // A generated, edited, upscaled or relit picture: a new layer where its source was.
+            let Some(first) = images.first().and_then(Value::as_str) else { bail!("no image came back") };
+            let png = crate::genfill::base64_decode(first)?;
+            let p = v.get("place").cloned().unwrap_or(json!({}));
+            let name = v.get("name").and_then(Value::as_str).unwrap_or("Generated").to_string();
+            let mut result = Ok(Value::Null);
+            self.with_current(|page| {
+                let mut d = page.canvas.doc().borrow_mut();
+                result = d.document.add_image_layer(&png, &name, (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0)), (p["width"].as_f64().unwrap_or(100.0), p["height"].as_f64().unwrap_or(100.0))).map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
+                drop(d);
+                page.refresh();
+            });
+            return result;
+        }
         let window = v.get("window").ok_or_else(|| anyhow::anyhow!("no window"))?;
         let rect = (window["x"].as_i64().unwrap_or(0) as i32, window["y"].as_i64().unwrap_or(0) as i32, window["width"].as_i64().unwrap_or(0) as i32, window["height"].as_i64().unwrap_or(0) as i32);
         let Some(first) = images.first().and_then(Value::as_str) else { bail!("no image came back") };
@@ -531,7 +588,8 @@ impl Assistant {
         let mut state = json!(null);
         self.app.with_current(|p| state = state_of(&p.canvas.doc().borrow()));
         format!(concat!(
-            "You are Compy, the assistant inside Compy, a layer-based image editor. Use the compy MCP tools to look and act; every tool works on the document ",
+            "You are Compy, the assistant inside Compy, a layer-based image editor. The compy MCP tools are the only tools you have: no shell, no files, no web. ",
+            "If a request needs something they cannot do, say so in a sentence instead of trying another way. Use the tools to look and act; every tool works on the document ",
             "that is open in front of the user, as an undoable step they watch happen. When the user says 'this' or 'the thing I selected', they mean ",
             "the current selection (its bounds are in the state; call snapshot to see the canvas, the selection is outlined in red). Prefer native tools ",
             "(select, layers, adjustments, styles, type) over generation; generative tools cost money, so state the estimated cost before running one ",

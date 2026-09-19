@@ -2686,6 +2686,22 @@ impl Document {
         Ok(document)
     }
 
+    /// A new layer from image bytes placed at `origin` with `size` (document pixels), above the active one.
+    pub fn add_image_layer(&mut self, bytes: &[u8], name: &str, origin: (f64, f64), size: (f64, f64)) -> Result<Uuid> {
+        let (surface, _, _) = Self::decode_image_bytes(bytes)?;
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(name.to_string(), parent);
+        record.transform.origin = crate::format::Point(origin.0, origin.1);
+        record.transform.size = crate::format::Size(size.0.max(1.0), size.1.max(1.0));
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        let id = record.id;
+        self.begin_edit(name);
+        self.renderer.insert_layer(index, record, Some(surface), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
     pub fn import_image_bytes(&mut self, bytes: &[u8], name: &str) -> Result<Uuid> {
         let (surface, w, h) = Self::decode_image_bytes(bytes)?;
         self.import_surface(surface, w, h, name.to_string())

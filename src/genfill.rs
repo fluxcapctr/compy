@@ -148,9 +148,15 @@ impl Backend for Fal {
 
 impl Fal {
     fn generate_once(&self, request: &Request, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Vec<Vec<u8>>> {
-        let submit_url = format!("https://queue.fal.run/{}", request.model.id);
-        progress("Sending the selection to fal…");
-        let body = body(request).to_string();
+        self.run(&request.model.id, body(request), progress, cancelled)
+    }
+
+    /// Any fal model through the queue: submit `body`, wait, fetch, and download every image in the
+    /// result (`images[]`, or a single `image`).
+    pub fn run(&self, model_id: &str, body: serde_json::Value, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Vec<Vec<u8>>> {
+        let submit_url = format!("https://queue.fal.run/{model_id}");
+        progress("Sending to fal…");
+        let body = body.to_string();
         let mut response = ureq::post(&submit_url).header("Authorization", &format!("Key {}", self.key)).header("Content-Type", "application/json").send(body.as_bytes()).map_err(describe)?;
         let submitted: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string().context("reading fal's reply")?).context("fal's reply is not JSON")?;
         let status_url = submitted.get("status_url").and_then(|v| v.as_str()).context("fal gave no status URL")?.to_string();
@@ -176,7 +182,11 @@ impl Fal {
         let mut result = ureq::get(&response_url).header("Authorization", &format!("Key {}", self.key)).call().map_err(describe)?;
         let value: serde_json::Value = serde_json::from_str(&result.body_mut().with_config().limit(64 << 20).read_to_string().context("reading the result")?).context("the result is not JSON")?;
         if let Some(error) = value.get("error").or(value.get("detail")) { bail!("fal: {error}"); }
-        let images = value.get("images").and_then(|v| v.as_array()).context("fal returned no images")?;
+        let images: Vec<serde_json::Value> = match (value.get("images").and_then(|v| v.as_array()), value.get("image")) {
+            (Some(list), _) => list.clone(),
+            (None, Some(one)) => vec![one.clone()],
+            _ => bail!("fal returned no images"),
+        };
         let mut out = Vec::new();
         for (i, image) in images.iter().enumerate() {
             let url = image.get("url").and_then(|v| v.as_str()).context("an image has no URL")?;
