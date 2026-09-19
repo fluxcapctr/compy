@@ -20,7 +20,20 @@ before you say a job is done.
 
 - Two typefaces at most: one for the headline, one for everything else. Weights within a family before a
   third face.
+- Pair by contrast of structure, not of mood: a serif headline with a sans body, or a wide display face
+  with a narrow text face. Two faces that are almost alike look like a mistake.
+- Pick a face for what it says as much as how it reads: geometric sans for modern and technical, humanist
+  sans for warm and plain, serif for established and editorial, slab for sturdy and retail, script only
+  for a short line and only when the brief asks for it.
+- Build sizes on a scale. Pick a ratio from 1.25 to 1.5 and step every size from the body size: body,
+  then body x ratio, then that x ratio, and so on. Use only sizes from the scale.
 - Sizes should differ clearly: a headline at least twice the body size. Small steps look like errors.
+- Running text (more than two lines) wants 45 to 75 characters per line. Shorter reads choppy, longer
+  loses the eye at the line break; set the block's width from the size, not the other way round.
+- Legibility on a photo: a face with a large x-height and open letters holds up small; thin hairlines
+  and light weights vanish against texture.
+- At small sizes, loosen tracking a touch; at poster sizes, tighten it. Big type set at text spacing
+  looks loose.
 - Uppercase headlines get tracking of 3 to 8 percent of the size; sentence case gets none or slightly negative.
 - Leading of 1.1 to 1.25 for headlines, 1.4 to 1.6 for body. Never stretch or squash type.
 - Left align by default. Center only short lines, and then center the whole block. Never mix alignments
