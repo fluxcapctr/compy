@@ -498,10 +498,8 @@ impl Assistant {
                 }
             }
             Some("result") => {
-                let cost = v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
-                let turns = v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
-                let _ = turns;
-                self.status.set_label(&format!("Done. About ${cost:.2} of Claude usage this turn."));
+                // On a Claude subscription nothing is billed per turn, so no figure is shown.
+                self.status.set_label("Done.");
             }
             _ => {}
         }
