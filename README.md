@@ -151,6 +151,12 @@ tracking on panel tabs and dialog titles, and a light filled primary button. Col
 active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
 `theme::look_css` and can be reverted as one commit.
 
+**Free Transform.** Ctrl+T (Edit > Free Transform, or right-click a selection) lifts the selected pixels
+onto a floating layer that the Move tool's handles move, scale (Shift keeps the ratio, Alt from the center)
+and rotate; Return lands them back on their layer and leaves them selected, Escape puts everything back.
+The whole thing is one undo step. Without a selection, Ctrl+T switches to the Move tool, whose handles
+already transform the active layer or the selected layers as a group.
+
 **Snapping and the grid.** View > Snap (Ctrl+Shift+;) makes guides, as you drag them off a ruler or with
 the Move tool, settle on the canvas edges and center, every visible layer's edges and center, and the grid;
 switch it off to place them freely. View > Show Grid (Ctrl+') draws a grid every 100 px with four

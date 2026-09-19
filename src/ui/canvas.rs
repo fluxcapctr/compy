@@ -307,6 +307,7 @@ impl Canvas {
                 let menu = gio::Menu::new();
                 if inside {
                     menu.append(Some("Generative Fill…"), Some("win.generative-fill"));
+                    menu.append(Some("Free Transform"), Some("win.free-transform"));
                     menu.append(Some("Layer via Copy"), Some("win.duplicate-layer"));
                     menu.append(Some("Layer via Cut"), Some("win.layer-via-cut"));
                     menu.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
@@ -626,6 +627,14 @@ impl Canvas {
             let mut d = self.doc.borrow_mut();
             if tool == Tool::Move { d.document.nudge(dx, dy); } else if tool.is_selection() { let _ = d.document.move_selection(dx, dy); } else { return false; }
             drop(d);
+            if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+            self.sync_inspector();
+            self.area.queue_draw();
+            return true;
+        }
+        if self.doc.borrow().document.floating.is_some() && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Escape) {
+            let result = { let mut d = self.doc.borrow_mut(); if key == gdk::Key::Escape { d.document.cancel_free_transform(); Ok(()) } else { d.document.commit_free_transform() } };
+            if let Err(error) = result { self.notify(&format!("{error:#}")); } else { self.notify(if key == gdk::Key::Escape { "Free Transform cancelled." } else { "Free Transform applied." }); }
             if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
             self.sync_inspector();
             self.area.queue_draw();

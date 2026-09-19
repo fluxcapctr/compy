@@ -186,9 +186,10 @@ pub fn look_css(font: &str) -> String {
         spinbutton button, notebook > header tab button, menubutton > button.flat {{ min-height: 0; }}
         button.suggested-action {{ border: 1px solid transparent; }}
         button.suggested-action label {{ font-weight: 600; }}
-        entry, spinbutton, dropdown > button {{ min-height: 22px; padding: 0 6px; }}
+        entry, spinbutton, dropdown > button {{ min-height: 24px; padding: 0 6px; font-size: 11.5px; }}
+        .options label {{ font-size: 11.5px; }}
         spinbutton {{ padding: 0; }}
-        spinbutton text {{ padding: 0 6px; border: none; background: none; box-shadow: none; }}
+        spinbutton text {{ padding: 1px 6px; min-height: 22px; border: none; background: none; box-shadow: none; }}
         spinbutton button {{ padding: 0 5px; min-width: 16px; border: none; border-left: 1px solid alpha(currentColor, 0.15); background-image: none; }}
         scale {{ min-height: 16px; }}
         scale trough {{ min-height: 2px; }}

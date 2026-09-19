@@ -102,3 +102,40 @@ fn guides_snap_to_centers_layers_and_the_grid_unless_snap_is_off() {
     let (xs, _) = d.snap_targets(&[]);
     assert!(xs.contains(&125.0), "moves snap to the grid too");
 }
+
+#[test]
+fn free_transform_floats_the_selection_and_lands_it_as_one_step() {
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 10.0, 10.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.select_box(0.0, 0.0, 10.0, 10.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    let (float, source) = d.floating.unwrap();
+    assert_eq!(source, id);
+    assert_eq!(d.renderer.layer(float).name, "Floating Selection");
+    assert!(d.selection.is_none(), "the selection rides on the floating layer");
+    let mut t = d.renderer.layer(float).transform;
+    t.origin = compositor::format::Point(30.0, 30.0);
+    d.set_transform(float, t, "Transform Layer");
+    d.commit_free_transform().unwrap();
+    assert!(d.floating.is_none());
+    assert_eq!(d.renderer.layers().len(), 2, "merged back into the source");
+    assert_eq!(alpha_at(&mut d, 5, 5), 0, "the pixels left their old place");
+    assert_eq!(alpha_at(&mut d, 35, 35), 255, "and landed where the handles put them");
+    assert_eq!(d.selection.as_ref().and_then(|s| s.bounds), Some((30, 30, 40, 40)), "the moved pixels stay selected");
+    assert_eq!(d.undo_name(), Some("Free Transform"));
+    d.undo();
+    assert_eq!(alpha_at(&mut d, 5, 5), 255, "one undo puts it all back");
+    // Escape cancels without a trace.
+    d.select_box(0.0, 0.0, 10.0, 10.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    let float = d.floating.unwrap().0;
+    let mut t = d.renderer.layer(float).transform;
+    t.origin = compositor::format::Point(30.0, 30.0);
+    d.set_transform(float, t, "Transform Layer");
+    d.cancel_free_transform();
+    assert!(d.floating.is_none() && d.renderer.layers().len() == 2);
+    assert_eq!(alpha_at(&mut d, 5, 5), 255);
+    assert_eq!(alpha_at(&mut d, 35, 35), 0);
+    d.deselect();
+    assert!(d.begin_free_transform().is_err(), "needs a selection");
+}

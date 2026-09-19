@@ -41,6 +41,8 @@ pub struct Document {
     pub snap: bool,
     /// The selection before the last Deselect, for Reselect (Ctrl+Shift+D).
     pub last_selection: Option<Selection>,
+    /// Free Transform in progress: the floating layer holding the selected pixels, and the layer they came from.
+    pub floating: Option<(Uuid, Uuid)>,
     /// View > Show Grid: (spacing of the major lines, subdivisions per spacing), or None when hidden.
     pub grid: Option<(f64, u32)>,
 }
@@ -103,7 +105,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -655,6 +657,39 @@ impl Document {
         self.select_layer(Some(id));
         self.end_edit();
         Ok(id)
+    }
+
+    // MARK: Free Transform
+
+    /// Free Transform (Ctrl+T) of a selection: the selected pixels lift off the active layer onto a floating
+    /// layer that the Move tool's handles scale, rotate and move. One undo step from here to the commit.
+    pub fn begin_free_transform(&mut self) -> Result<()> {
+        if self.floating.is_some() { return Ok(()); }
+        if !self.selection.as_ref().is_some_and(|s| !s.is_empty()) { bail!("Make a selection first; without one, the Move tool's handles transform the whole layer."); }
+        let Some((source, _)) = self.active_image() else { bail!("Select an image layer first.") };
+        self.begin_edit("Free Transform");
+        let id = match self.layer_via(true) { Ok(id) => id, Err(e) => { self.abort_edit(); return Err(e); } };
+        self.renderer.set_layer_name(id, "Floating Selection".into());
+        self.selection = None;
+        self.floating = Some((id, source));
+        Ok(())
+    }
+
+    /// Return: the floating pixels land on the layer they came from, and the step closes.
+    pub fn commit_free_transform(&mut self) -> Result<()> {
+        let Some((id, source)) = self.floating.take() else { return Ok(()) };
+        if !self.has_layer(id) || !self.has_layer(source) { self.end_edit(); return Ok(()); }
+        self.select_layer(Some(id));
+        let result = self.merge_layers();
+        if result.is_ok() { if let Some(merged) = self.active { let _ = self.select_layer_pixels(merged, Mode::Replace); } }
+        self.end_edit();
+        result
+    }
+
+    /// Escape: everything goes back to how it was before Ctrl+T.
+    pub fn cancel_free_transform(&mut self) {
+        if self.floating.take().is_none() { return; }
+        self.abort_edit();
     }
 
     /// Every visible layer composited into one, on a new layer above the active one (Stamp Visible,
@@ -2313,7 +2348,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None };
         self.copy_layers(&snapshot, ids, place)
     }
 

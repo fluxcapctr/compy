@@ -344,7 +344,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 87] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 88] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -408,6 +408,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("new-folder", &["<Control>g"], |s| s.edit(|d| { d.add_folder(); Ok(()) })),
         // Ctrl+J with a selection is Layer via Copy, as in Photoshop; without one it duplicates the layer.
         ("duplicate-layer", &["<Control>j"], |s| s.edit(|d| { if d.selection.as_ref().is_some_and(|sel| !sel.is_empty()) { d.layer_via(false).map(|_| ()) } else { d.duplicate_layer(); Ok(()) } })),
+        ("free-transform", &["<Control>t"], |s| s.free_transform()),
         ("layer-via-cut", &["<Control><Shift>j"], |s| s.edit(|d| d.layer_via(true).map(|_| ()))),
         ("merge-visible", &["<Control><Shift>e"], |s| s.edit(|d| d.merge_visible().map(|_| ()))),
         ("stamp-visible", &["<Control><Alt><Shift>e"], |s| s.edit(|d| d.stamp_visible().map(|_| ()))),
@@ -555,6 +556,7 @@ fn menu() -> gio::Menu {
     let edit = gio::Menu::new();
     edit.append(Some("Undo"), Some("win.undo"));
     edit.append(Some("Redo"), Some("win.redo"));
+    edit.append(Some("Free Transform"), Some("win.free-transform"));
     edit.append(Some("Copy"), Some("win.copy"));
     edit.append(Some("Paste as New Layer"), Some("win.paste"));
     edit.append(Some("Copy Merged"), Some("win.copy-merged"));
@@ -670,6 +672,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Edit", "Arrows, Shift+Arrows", "Nudge the layer or selection by 1 or 10 px"),
     ("Edit", "Ctrl+Arrows", "Move the selected pixels"),
     ("Edit", "Ctrl+Shift+G", "Generative Fill"),
+    ("Edit", "Ctrl+T", "Free Transform the selection (Return commits, Escape cancels); without one, the Move handles"),
     ("Select", "Ctrl+A, Ctrl+D, Ctrl+Shift+D", "All, Deselect, Reselect"),
     ("Select", "Ctrl+Shift+I", "Inverse"),
     ("Select", "Ctrl+Alt+A", "All layers"),
@@ -810,6 +813,23 @@ impl App {
 
     /// Ctrl+F: the picture alone on black, full screen; again brings everything back.
     /// Tab: the tool rail, options and layers panel come and go; the picture stays where it is.
+    /// Ctrl+T: with a selection, floats it for the Move tool's handles; without one, the handles already on
+    /// the active layer are the transform.
+    fn free_transform(self: &Rc<Self>) {
+        self.with_current(|p| {
+            let has_selection = p.canvas.doc().borrow().document.selection.as_ref().is_some_and(|s| !s.is_empty());
+            let result = if has_selection { p.canvas.doc().borrow_mut().document.begin_free_transform() } else { Ok(()) };
+            match result {
+                Ok(()) => {
+                    p.canvas.set_tool(Tool::Move);
+                    p.refresh();
+                    p.canvas.notify(if has_selection { "Free Transform: drag the handles to move, scale or rotate; Return commits, Escape cancels." } else { "Drag the handles to move, scale or rotate the layer (Shift keeps the ratio, Alt scales from the center)." });
+                }
+                Err(error) => p.canvas.notify(&format!("{error:#}")),
+            }
+        });
+    }
+
     fn toggle_panels(self: &Rc<Self>) {
         let on = !self.panels_hidden.get();
         self.panels_hidden.set(on);
