@@ -187,3 +187,59 @@ only read files, skip that.
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_4.md. No em dashes in your output.
+
+# Round 5 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 4 are fixed (see REVIEW_RESULTS.md
+through REVIEW_RESULTS_4.md); this round covers the code written since, commits 272d01e through ac49b7f.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, fifth pass.
+
+Context: a Linux rebuild of a macOS image editor. The Swift source in reference/ is the spec (read-only);
+the C pixel core in csrc/ is compiled unchanged (do not edit it). Read CLAUDE.md and README.md first.
+REVIEW_RESULTS.md through REVIEW_RESULTS_4.md hold the earlier findings, all fixed; do not re-report
+them, but do check that the round 4 fixes hold (they are the first area below).
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there. A partial report that says where it ended is worth more than an unfinished one.
+
+Cover only what is new since round 4 (git log 272d01e^..ac49b7f). Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (147 tests should pass; two are
+ignored because they need the network or a downloaded model) and report anything that fails. If you can
+only read files, skip that.
+
+1. The round 4 fixes, as fixes: Document::merge_floating (the grown grid, rotated and flipped sources,
+   masks on the source, a float dragged entirely off the canvas, a source with effects or a clipping
+   mask, the 100 megapixel fallback), commit_free_transform and cancel_free_transform, is_modified with
+   a float or an open edit, save landing the float, Document::merge_visible reparenting, the effects
+   compositing change in Renderer::draw_own (interior effects Atop inside a group, blend modes and
+   opacity on styled layers, the direct path), Effects::render's three buffers, the Layer Style
+   dialog's begin_layer_style and end_layer_style (the window closed while the layer is gone, a second
+   dialog opened on the same layer, undo while it is open).
+2. Curves: the editor in src/ui/filter_dialog.rs build_curves (point hit testing near the ends, a point
+   dragged past its neighbours, 32 points, the readout, channel switching mid-drag, Remove on an end
+   point, the histogram reused from Levels) and Kind::Curves in filters and Document::apply_filter;
+   the Curves adjustment layer now opening this editor (current_adjustment, open_adjustment).
+3. Color Balance: ColorBalance::shift and apply (values at 0 and 255, preserve luminosity pushing a
+   channel out of range, fully transparent pixels, premultiplied round trips), normalized, is_identity.
+4. Auto Tone, Auto Contrast and Auto Color (Levels::auto_tone, auto_color, auto_contrast, endpoints)
+   on empty, single-value and clipped histograms; Document::auto_levels on a mask target.
+5. Fade: Document::last_filter (set only when the grid is unchanged, invalidated when the layer changes,
+   the pointer comparison against the current image, undo after a filter then Fade, Fade after a
+   filter on a mask, memory held by the two surfaces), Kind::Fade in filtered and apply_filter, the
+   dialog page.
+6. On-canvas typing after the round 4 changes: raster_point through document_to_layer, the caret and
+   frame through pixel_to_document, sync_inspector clearing a stale editor, Return with the Move tool
+   now parking the handles (does it steal Return from anything else), handles_parked reset paths.
+7. The start page in src/ui/mod.rs (start_page, parse_preset, the new-preset action with a malformed
+   string, presets at 300 ppi creating large canvases, the custom fields, focus and keyboard use with
+   no document open, the window key controller when no page exists).
+8. The toggle-handles action and Doc::show_handles, F1, the layer row CSS, and anything in
+   tests/features_g.rs (the new tests) or the unit tests in src/effects.rs that asserts the wrong value
+   or passes for the wrong reason.
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_5.md. No em dashes in your output.
