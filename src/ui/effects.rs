@@ -43,8 +43,8 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
             let (state, apply, pages, list, item) = (state.clone(), apply.clone(), pages.clone(), list.clone(), item.clone());
             check.connect_toggled(move |c| { set_enabled(&mut state.borrow_mut(), key, c.is_active()); list.select_row(Some(&item)); pages.set_visible_child_name(key); apply(); });
         }
+        pages.add_named(&page(key, &state, &apply, &check), Some(key));
         checks.push((key, check));
-        pages.add_named(&page(key, &state, &apply), Some(key));
     }
     { let pages = pages.clone(); list.connect_row_selected(move |_, row| { if let Some(r) = row { pages.set_visible_child_name(names[r.index().max(0) as usize].0); } }); }
     let first = original_page(&original).unwrap_or("dropShadow");
@@ -137,20 +137,21 @@ impl Grid {
     }
 }
 
-/// One effect's settings. Each control edits the state and applies it; an effect gets its defaults when its
-/// page is built before it exists, so the controls have values to show.
-fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply) -> gtk::Grid {
+/// One effect's settings. An effect that does not exist yet gets its defaults switched off, so the
+/// controls have values to show without drawing anything; editing a control switches the effect on.
+fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply, check: &gtk::CheckButton) -> gtk::Grid {
     let mut g = Grid::new();
     macro_rules! edit {
         ($field:ident, $default:expr, |$e:ident, $v:ident| $body:expr) => {{
-            let (state, apply) = (state.clone(), apply.clone());
-            move |$v| { { let mut s = state.borrow_mut(); let $e = s.$field.get_or_insert_with($default); $body; } apply(); }
+            let (state, apply, check) = (state.clone(), apply.clone(), check.clone());
+            move |$v| { { let mut s = state.borrow_mut(); let $e = s.$field.get_or_insert_with($default); $body; $e.enabled = true; } check.set_active(true); apply(); }
         }};
     }
+    macro_rules! off { ($default:expr) => { || { let mut d = $default; d.enabled = false; d } }; }
     match key {
         "dropShadow" | "innerShadow" => {
             let inner = key == "innerShadow";
-            let current = { let mut s = state.borrow_mut(); if inner { s.inner_shadow.get_or_insert_with(Shadow::inner_default).clone() } else { s.drop_shadow.get_or_insert_with(Shadow::drop_default).clone() } };
+            let current = { let mut s = state.borrow_mut(); if inner { s.inner_shadow.get_or_insert_with(off!(Shadow::inner_default())).clone() } else { s.drop_shadow.get_or_insert_with(off!(Shadow::drop_default())).clone() } };
             if inner {
                 g.color("Color", current.color, edit!(inner_shadow, Shadow::inner_default, |e, v| e.color = v));
                 g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(inner_shadow, Shadow::inner_default, |e, v| e.opacity = v / 100.0));
@@ -167,7 +168,7 @@ fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply) -> gtk::
         }
         "outerGlow" | "innerGlow" => {
             let inner = key == "innerGlow";
-            let current = { let mut s = state.borrow_mut(); if inner { s.inner_glow.get_or_insert_with(Glow::inner_default).clone() } else { s.outer_glow.get_or_insert_with(Glow::outer_default).clone() } };
+            let current = { let mut s = state.borrow_mut(); if inner { s.inner_glow.get_or_insert_with(off!(Glow::inner_default())).clone() } else { s.outer_glow.get_or_insert_with(off!(Glow::outer_default())).clone() } };
             if inner {
                 g.color("Color", current.color, edit!(inner_glow, Glow::inner_default, |e, v| e.color = v));
                 g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(inner_glow, Glow::inner_default, |e, v| e.opacity = v / 100.0));
@@ -179,7 +180,7 @@ fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply) -> gtk::
             }
         }
         "bevel" => {
-            let current = state.borrow_mut().bevel.get_or_insert_with(Bevel::default).clone();
+            let current = state.borrow_mut().bevel.get_or_insert_with(off!(Bevel::default())).clone();
             g.choice("Style", &["Inner Bevel", "Outer Bevel", "Emboss"], current.style, edit!(bevel, Bevel::default, |e, v| e.style = v));
             g.spin("Depth %", (1.0, 1000.0, 1.0), 0, current.depth, edit!(bevel, Bevel::default, |e, v| e.depth = v));
             g.spin("Size px", (0.0, 250.0, 1.0), 0, current.size, edit!(bevel, Bevel::default, |e, v| e.size = v));
@@ -189,14 +190,14 @@ fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply) -> gtk::
             g.spin("Shadow %", (0.0, 100.0, 1.0), 0, current.shadow_opacity * 100.0, edit!(bevel, Bevel::default, |e, v| e.shadow_opacity = v / 100.0));
         }
         "stroke" => {
-            let current = state.borrow_mut().stroke.get_or_insert_with(Stroke::default).clone();
+            let current = state.borrow_mut().stroke.get_or_insert_with(off!(Stroke::default())).clone();
             g.spin("Size px", (1.0, 250.0, 1.0), 0, current.size, edit!(stroke, Stroke::default, |e, v| e.size = v));
             g.choice("Position", &["Outside", "Inside", "Center"], current.position, edit!(stroke, Stroke::default, |e, v| e.position = v));
             g.color("Color", current.color, edit!(stroke, Stroke::default, |e, v| e.color = v));
             g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(stroke, Stroke::default, |e, v| e.opacity = v / 100.0));
         }
         _ => {
-            let current = state.borrow_mut().color_overlay.get_or_insert_with(Overlay::default).clone();
+            let current = state.borrow_mut().color_overlay.get_or_insert_with(off!(Overlay::default())).clone();
             g.color("Color", current.color, edit!(color_overlay, Overlay::default, |e, v| e.color = v));
             g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(color_overlay, Overlay::default, |e, v| e.opacity = v / 100.0));
         }

@@ -306,6 +306,43 @@ impl Inner {
             if multi.contains(&info.id) && Some(info.id) != selected { list_row.add_css_class("multi"); }
             self.connect_drag(&list_row, info.id, info.group);
             {
+                // Right-click: the layer's commands, on this layer (kept when it is one of several selected).
+                let (this, id, group, visible) = (self.clone(), info.id, info.group, info.own_visible);
+                let context = gtk::GestureClick::new();
+                context.set_button(3);
+                context.connect_pressed(move |g, _, x, y| {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    let is_text = {
+                        let mut d = this.doc.borrow_mut();
+                        if !d.document.selected.contains(&id) || d.document.active != Some(id) && d.document.selected.len() <= 1 { d.document.select_layer(Some(id)); }
+                        d.document.text_style(id).is_some()
+                    };
+                    this.rebuild();
+                    let menu = gtk::gio::Menu::new();
+                    if is_text { menu.append(Some("Edit Text…"), Some("win.edit-text")); }
+                    if !group { menu.append(Some("Layer Style…"), Some("win.layer-style")); menu.append(Some("Clear Layer Style"), Some("win.clear-layer-style")); }
+                    menu.append(Some("Rename"), Some("win.rename-layer"));
+                    menu.append(Some("Duplicate Layer"), Some("win.duplicate-layer"));
+                    menu.append(Some("Delete Layer"), Some("win.delete-layer"));
+                    menu.append(Some(if visible { "Hide Layer" } else { "Show Layer" }), Some("win.toggle-layer-visibility"));
+                    let more = gtk::gio::Menu::new();
+                    more.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
+                    more.append(Some("Add Layer Mask"), Some("win.mask-reveal"));
+                    more.append(Some("Clip to Layer Below"), Some("win.toggle-clipping"));
+                    more.append(Some("Merge Down / Group"), Some("win.merge"));
+                    more.append(Some("Merge Visible"), Some("win.merge-visible"));
+                    more.append(Some("Bring to Front"), Some("win.layer-top"));
+                    more.append(Some("Send to Back"), Some("win.layer-bottom"));
+                    menu.append_section(None, &more);
+                    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+                    popover.set_parent(g.widget().as_ref().expect("gesture widget"));
+                    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                    popover.connect_closed(move |p| { let p = p.clone(); gtk::glib::idle_add_local_once(move || p.unparent()); });
+                    popover.popup();
+                });
+                list_row.add_controller(context);
+            }
+            {
                 // Double-click on the name edits it in place.
                 let (this, id, text, name_label) = (self.clone(), info.id, text.clone(), name.clone());
                 let click = gtk::GestureClick::new();

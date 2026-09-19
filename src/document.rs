@@ -37,6 +37,12 @@ pub struct Document {
     pub guides_v: Vec<f64>,
     pub guides_h: Vec<f64>,
     pub show_guides: bool,
+    /// View > Snap: guides and moves settle on canvas edges and centers, layer edges and centers, and the grid.
+    pub snap: bool,
+    /// The selection before the last Deselect, for Reselect (Ctrl+Shift+D).
+    pub last_selection: Option<Selection>,
+    /// View > Show Grid: (spacing of the major lines, subdivisions per spacing), or None when hidden.
+    pub grid: Option<(f64, u32)>,
 }
 
 /// Selected pixels lifted off their layer while they are dragged (`PixelMove`): everything in the layer's own
@@ -97,7 +103,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -202,7 +208,27 @@ impl Document {
         Ok(())
     }
 
-    pub fn deselect(&mut self) { self.set_selection(None, "Deselect"); }
+    pub fn deselect(&mut self) { if let Some(s) = self.selection.clone().filter(|s| !s.is_empty()) { self.last_selection = Some(s); } self.set_selection(None, "Deselect"); }
+
+    /// Brings back the selection the last Deselect dropped (Ctrl+Shift+D).
+    pub fn reselect(&mut self) {
+        let Some(s) = self.last_selection.clone() else { return };
+        if s.width() != self.width() || s.height() != self.height() { return; }
+        self.set_selection(Some(s), "Reselect");
+    }
+
+    /// Softens the selection's edge by `radius` pixels (Select > Feather, Shift+F6).
+    pub fn feather_selection(&mut self, radius: f64) -> Result<()> {
+        let Some(selection) = self.selection.clone() else { bail!("Make a selection first.") };
+        if selection.is_empty() { bail!("Make a selection first."); }
+        if !(0.1..=1000.0).contains(&radius) { bail!("Feather runs from 0.1 to 1000 pixels."); }
+        let (w, h) = (selection.width() as usize, selection.height() as usize);
+        let mut packed = crate::raster::with_bytes(&selection.mask, |data, stride| (0..h).flat_map(|y| data[y * stride..y * stride + w].iter().copied()).collect::<Vec<u8>>())?;
+        crate::blur::gaussian(&mut packed, w, h, 1, radius / 2.0);
+        let feathered = Selection::from_packed(&packed, w as i32, h as i32)?;
+        self.set_selection(Some(feathered), "Feather");
+        Ok(())
+    }
 
     pub fn invert_selection(&mut self) -> Result<()> {
         let Some(current) = &self.selection else { return Ok(()) };
@@ -582,6 +608,12 @@ impl Document {
     /// The active layer's pixels inside the selection (or all of them), as PNG bytes, with their place on the
     /// document: what Copy puts on the clipboard.
     pub fn copy_layer_pixels(&mut self) -> Result<Option<(Vec<u8>, (i32, i32, i32, i32))>> {
+        match self.selected_pixels()? { Some((out, rect)) => Ok(Some((crate::png_io::png_bytes(&out)?, rect))), None => Ok(None) }
+    }
+
+    /// The active layer's pixels inside the selection (or all of them), placed on the document, as a surface
+    /// and the document rectangle it covers.
+    fn selected_pixels(&mut self) -> Result<Option<(ImageSurface, (i32, i32, i32, i32))>> {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
         let transform = self.renderer.layer(id).transform;
         let (bx0, by0, bx1, by1) = transform.bounds();
@@ -603,7 +635,111 @@ impl Document {
             } else { self.renderer.draw_layer_plain(id, &cr)?; }
         }
         let _ = image;
-        Ok(Some((crate::png_io::png_bytes(&out)?, (x0, y0, x1 - x0, y1 - y0))))
+        Ok(Some((out, (x0, y0, x1 - x0, y1 - y0))))
+    }
+
+    /// Layer via Copy (Ctrl+J with a selection) or Layer via Cut (Ctrl+Shift+J): the selected pixels of the
+    /// active layer on a new layer above it, in place; Cut clears them from the original.
+    pub fn layer_via(&mut self, cut: bool) -> Result<Uuid> {
+        let Some((surface, (x, y, w, h))) = self.selected_pixels()? else { bail!("Nothing is selected on this layer.") };
+        let Some(source) = self.active else { bail!("Select a layer first.") };
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(format!("{} copy", self.renderer.layer(source).name), parent);
+        record.transform.origin = crate::format::Point(x as f64, y as f64);
+        record.transform.size = crate::format::Size(w as f64, h as f64);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        let id = record.id;
+        self.begin_edit(if cut { "Layer Via Cut" } else { "Layer Via Copy" });
+        if cut && self.selection.is_some() { self.clear_selection(false)?; }
+        self.renderer.insert_layer(index, record, Some(surface), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// Every visible layer composited into one, on a new layer above the active one (Stamp Visible,
+    /// Ctrl+Alt+Shift+E); the layers stay.
+    pub fn stamp_visible(&mut self) -> Result<Uuid> {
+        if crate::format::visible_layers(self.renderer.layers()).is_empty() { bail!("No visible layers to stamp."); }
+        let flat = self.renderer.render_flat()?;
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(self.unique_name("Stamp"), parent);
+        record.transform.size = crate::format::Size(self.width() as f64, self.height() as f64);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        let id = record.id;
+        self.begin_edit("Stamp Visible");
+        self.renderer.insert_layer(index, record, Some(flat), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// Merge Visible (Ctrl+Shift+E): the visible layers become one layer where the topmost of them was,
+    /// named after it; hidden layers stay.
+    pub fn merge_visible(&mut self) -> Result<Uuid> {
+        let layers = self.renderer.layers().to_vec();
+        let visible: std::collections::HashSet<Uuid> = crate::format::visible_layers(&layers).into_iter().collect();
+        if visible.is_empty() { bail!("No visible layers to merge."); }
+        let flat = self.renderer.render_flat()?;
+        // Everything visible goes, along with whatever sits inside a visible folder.
+        let mut going: Vec<Uuid> = layers.iter().filter(|l| visible.contains(&l.id) || l.is_visible && l.parent_id.is_none_or(|p| visible.contains(&p))).map(|l| l.id).collect();
+        let mut i = 0;
+        while i < going.len() { let parent = going[i]; for l in &layers { if l.parent_id == Some(parent) && !going.contains(&l.id) { going.push(l.id); } } i += 1; }
+        let top = layers.iter().rposition(|l| going.contains(&l.id)).unwrap_or(0);
+        let name = layers[top].name.clone();
+        let below = layers[..top].iter().filter(|l| !going.contains(&l.id)).count();
+        let mut record = self.blank_record(name, None);
+        record.transform.size = crate::format::Size(self.width() as f64, self.height() as f64);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        let id = record.id;
+        self.begin_edit("Merge Visible");
+        for g in &going { self.renderer.remove_layer(*g); }
+        self.renderer.insert_layer(below.min(self.renderer.layers().len()), record, Some(flat), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// Bring to Front / Send to Back among the layer's siblings (Ctrl+Shift+] and Ctrl+Shift+[).
+    pub fn move_layer_to_end(&mut self, top: bool) {
+        let Some(id) = self.active else { return };
+        let layers = self.renderer.layers().to_vec();
+        let Some(index) = layers.iter().position(|l| l.id == id) else { return };
+        let parent = layers[index].parent_id;
+        let target = if top { layers.iter().rposition(|l| l.parent_id == parent) } else { layers.iter().position(|l| l.parent_id == parent) };
+        let Some(mut target) = target else { return };
+        if target == index { return; }
+        self.begin_edit(if top { "Bring to Front" } else { "Send to Back" });
+        let mut current = index;
+        while current != target {
+            let next = if top { current + 1 } else { current - 1 };
+            self.renderer.swap_layers(current, next);
+            current = next;
+            if target >= self.renderer.layers().len() { target = self.renderer.layers().len() - 1; }
+        }
+        self.end_edit();
+    }
+
+    /// Select All Layers (Ctrl+Alt+A): every top-level layer, the topmost active.
+    pub fn select_all_layers(&mut self) {
+        let ids: Vec<Uuid> = self.renderer.layers().iter().map(|l| l.id).collect();
+        let Some(top) = ids.last().copied() else { return };
+        self.select_layer(Some(top));
+        self.selected = ids.into_iter().collect();
+    }
+
+    /// Hides or shows the active layer (Ctrl+,).
+    pub fn toggle_visible(&mut self) {
+        let Some(id) = self.active else { return };
+        let visible = self.renderer.layer(id).is_visible;
+        self.set_visible(id, !visible);
+    }
+
+    /// Desaturate (Ctrl+Shift+U): Hue/Saturation with saturation at -100 on the active layer.
+    pub fn desaturate(&mut self) -> Result<()> {
+        let mut settings = crate::filters::Settings::default();
+        settings.hue_saturation.adjustments = vec![("Master".into(), [0.0, -100.0, 0.0])];
+        self.apply_filter(crate::filters::Kind::HueSaturation, &settings)
     }
 
     /// The color at a document pixel as the canvas shows it (every visible layer) or on the active layer's
@@ -1586,8 +1722,45 @@ impl Document {
     /// What a moving layer snaps to: the canvas edges and center, and every other visible layer's bounds and
     /// center, in whole pixels.
     pub fn snap_targets(&self, excluding: &[Uuid]) -> (Vec<f64>, Vec<f64>) {
+        let (mut xs, mut ys) = self.guide_snap_targets();
+        if self.show_guides { xs.extend(self.guides_v.iter().copied()); ys.extend(self.guides_h.iter().copied()); }
+        let _ = excluding;
+        (xs, ys)
+    }
+
+    /// The grid's lines across the canvas (every subdivision), when the grid shows.
+    pub fn grid_lines(&self) -> (Vec<f64>, Vec<f64>) {
+        let Some((size, subdivisions)) = self.grid else { return (Vec::new(), Vec::new()) };
+        let step = (size / subdivisions.max(1) as f64).max(1.0);
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let lines = |extent: f64| { let mut v = Vec::new(); let mut p = 0.0; while p <= extent + 0.5 { v.push(p.round()); p += step; } v };
+        (lines(w), lines(h))
+    }
+
+    /// What a dragged guide settles on: the canvas edges and center, every visible layer's edges and
+    /// center, and the grid when it shows. Guides never snap to other guides.
+    pub fn guide_snap_targets(&self) -> (Vec<f64>, Vec<f64>) {
         let (w, h) = (self.width() as f64, self.height() as f64);
         let (mut xs, mut ys) = (vec![0.0, (w / 2.0).round(), w], vec![0.0, (h / 2.0).round(), h]);
+        let (gx, gy) = self.grid_lines();
+        xs.extend(gx);
+        ys.extend(gy);
+        for id in crate::format::visible_layers(self.renderer.layers()) {
+            if !self.renderer.has_image(id) { continue; }
+            let (x0, y0, x1, y1) = self.renderer.layer(id).transform.bounds();
+            xs.extend([x0.round(), ((x0 + x1) / 2.0).round(), x1.round()]);
+            ys.extend([y0.round(), ((y0 + y1) / 2.0).round(), y1.round()]);
+        }
+        (xs, ys)
+    }
+
+    /// Snap targets without the layers being moved.
+    fn snap_targets_excluding(&self, excluding: &[Uuid]) -> (Vec<f64>, Vec<f64>) {
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let (mut xs, mut ys) = (vec![0.0, (w / 2.0).round(), w], vec![0.0, (h / 2.0).round(), h]);
+        let (gx, gy) = self.grid_lines();
+        xs.extend(gx);
+        ys.extend(gy);
         if self.show_guides { xs.extend(self.guides_v.iter().copied()); ys.extend(self.guides_h.iter().copied()); }
         for id in crate::format::visible_layers(self.renderer.layers()) {
             if excluding.contains(&id) || !self.renderer.has_image(id) { continue; }
@@ -1598,9 +1771,18 @@ impl Document {
         (xs, ys)
     }
 
+    /// A guide position settled on the nearest target within `tolerance` (document pixels), with Snap on.
+    pub fn snapped_guide(&self, vertical: bool, position: f64, tolerance: f64) -> f64 {
+        if !self.snap { return position; }
+        let (xs, ys) = self.guide_snap_targets();
+        let targets = if vertical { xs } else { ys };
+        targets.into_iter().filter(|t| (t - position).abs() <= tolerance).min_by(|a, b| (a - position).abs().partial_cmp(&(b - position).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(position)
+    }
+
     /// `draft` nudged so the layer it places lines up with a nearby edge or center, and the guides it met.
     pub fn snapped_move(&self, draft: Transform, moving: &[Uuid], tolerance: f64) -> (Transform, Option<f64>, Option<f64>) {
-        let (xs, ys) = self.snap_targets(moving);
+        if !self.snap { return (draft, None, None); }
+        let (xs, ys) = self.snap_targets_excluding(moving);
         let ((dx, dy), gx, gy) = crate::transform::snap_offset(draft.bounds(), &xs, &ys, tolerance);
         let mut snapped = draft;
         snapped.origin = crate::format::Point(draft.origin.0 + dx, draft.origin.1 + dy);
@@ -2131,7 +2313,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None };
         self.copy_layers(&snapshot, ids, place)
     }
 

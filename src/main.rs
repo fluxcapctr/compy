@@ -50,6 +50,8 @@ fn main() {
                     "--preview" => script.preview = true,
                     "--text" => script.text = text(),
                     "--effects" => script.effects = true,
+                    "--grid" => script.grid = true,
+                    "--shortcuts" => script.shortcuts = true,
                     "--layer-style" => script.layer_style = true,
                     "--guides" => { if let Some(spec) = text() { for part in spec.split(',') { if let Some(v) = part.strip_prefix('x').and_then(|v| v.parse().ok()) { script.guides.0.push(v); } else if let Some(v) = part.strip_prefix('y').and_then(|v| v.parse().ok()) { script.guides.1.push(v); } } } }
                     "--brush" => script.brush = text(),

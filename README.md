@@ -145,6 +145,24 @@ scaled with the Move tool without redrawing, and turns into plain pixels once pa
 adds a type layer from a script. The palette at the bottom of the rail holds the foreground and background
 colors; X swaps them, D resets them.
 
+**Snapping and the grid.** View > Snap (Ctrl+Shift+;) makes guides, as you drag them off a ruler or with
+the Move tool, settle on the canvas edges and center, every visible layer's edges and center, and the grid;
+switch it off to place them freely. View > Show Grid (Ctrl+') draws a grid every 100 px with four
+subdivisions, and moves snap to it too. Ctrl+H hides the selection edges and guides (Extras) while you look
+at the picture; Tab hides the panels; F is Preview.
+
+**Shortcuts and right-clicks.** Help > Keyboard Shortcuts (Ctrl+Alt+Shift+K) lists every key. Photoshop's
+are followed where the feature exists: Ctrl+J is Layer via Copy with a selection (Duplicate without),
+Ctrl+Shift+J Layer via Cut, Ctrl+Shift+E Merge Visible, Ctrl+Alt+Shift+E Stamp Visible, Ctrl+Shift+] and
+Ctrl+Shift+[ Bring to Front and Send to Back, Ctrl+, hides the layer, Ctrl+Alt+A selects all layers,
+Ctrl+Shift+D Reselect, Shift+F6 Feather, Ctrl+U Hue/Saturation, Ctrl+Shift+U Desaturate, Ctrl+Shift+X
+Liquify, Ctrl+Alt+Z steps back. Import is Ctrl+Shift+P and Export PNG is Ctrl+Alt+Shift+W so the Photoshop
+keys stay free. Right-click does what the pointer is over: a brush opens its settings; a selection offers
+Generative Fill, Layer via Copy and Cut, fills, Content-Aware Fill, Feather, Inverse and Crop; a guide can
+be deleted; anywhere else lists the layers under the pointer to pick from, then Layer Style, Duplicate,
+Delete, flips and Edit Text for type; a layer row offers rename, duplicate, delete, hide, style, mask,
+clipping, merge, front and back.
+
 **Layer effects.** Layer > Layer Style (or the fx button under the layers panel) opens a floating, draggable
 Layer Style dialog for the selected image, shape or type layer: Drop Shadow, Inner Shadow, Outer Glow, Inner
 Glow, Bevel & Emboss (inner, outer or emboss, with depth, size, angle, altitude and highlight and shadow

@@ -88,6 +88,8 @@ pub struct Doc {
     pub needs_redraw: bool,
     /// Rulers along the top and left of the canvas in document pixels (Ctrl+R), as Photoshop's.
     pub rulers: bool,
+    /// Ctrl+H: the selection edges and guides stay out of the way.
+    pub hide_extras: bool,
     /// Preview mode (Ctrl+F): the picture alone on black, every panel hidden.
     pub preview: bool,
 }
@@ -118,6 +120,7 @@ struct App {
     window: gtk::ApplicationWindow,
     header: gtk::HeaderBar,
     preview: Cell<bool>,
+    panels_hidden: Cell<bool>,
     stack: gtk::Stack,
     notebook: gtk::Notebook,
     pages: RefCell<Vec<Page>>,
@@ -128,7 +131,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, preview: false }
     }
 }
 
@@ -151,7 +154,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -201,6 +204,9 @@ pub struct Script {
     /// Puts a drop shadow, stroke and bevel on the active layer; opens the Layer Style dialog.
     pub effects: bool,
     pub layer_style: bool,
+    /// Shows the grid; opens the shortcuts window.
+    pub grid: bool,
+    pub shortcuts: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -214,7 +220,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -227,6 +233,8 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some(text) = &script.text { let mut d = p.canvas.doc().borrow_mut(); let mut style = d.text_style.clone(); style.text = text.clone(); style.size = 72.0; if let Err(e) = d.document.add_text_layer(&style, 40.0, 40.0) { eprintln!("text: {e:#}"); } drop(d); p.refresh(); }
                     if script.effects { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.active { let e = crate::effects::Effects { drop_shadow: Some(crate::effects::Shadow::drop_default()), stroke: Some(crate::effects::Stroke::default()), bevel: Some(crate::effects::Bevel::default()), ..Default::default() }; if let Err(e) = d.document.set_effects(id, Some(&e)) { eprintln!("effects: {e:#}"); } } drop(d); p.refresh(); }
                     if script.layer_style { state.open_layer_style(); }
+                    if script.grid { p.canvas.doc().borrow_mut().document.grid = Some((100.0, 4)); p.canvas.area.queue_draw(); }
+                    if script.shortcuts { state.show_shortcuts(); }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
@@ -295,7 +303,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     stack.add_named(&notebook, Some("tabs"));
     window.set_child(Some(&stack));
 
-    let state = Rc::new(App { window: window.clone(), header: header.clone(), preview: Cell::new(false), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
+    let state = Rc::new(App { window: window.clone(), header: header.clone(), preview: Cell::new(false), panels_hidden: Cell::new(false), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
     // Follow the Omarchy theme; every canvas rebuilds its frame when the palette changes.
     {
         let weak = Rc::downgrade(&state);
@@ -316,6 +324,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
                 return glib::Propagation::Stop;
             }
             if modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) { return glib::Propagation::Proceed; }
+            if key == gdk::Key::Tab && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) && state.notebook.current_page().is_some() { state.toggle_panels(); return glib::Propagation::Stop; }
+            if matches!(key, gdk::Key::f | gdk::Key::F) && !modifiers.contains(gdk::ModifierType::SHIFT_MASK) && state.notebook.current_page().is_some() { state.toggle_preview(); return glib::Propagation::Stop; }
             let mut handled = false;
             state.with_current(|p| {
                 handled = p.canvas.special_key(key, modifiers);
@@ -334,10 +344,12 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 70] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 87] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
+        ("toggle-snap", &["<Control><Shift>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.snap = !d.document.snap; } p.canvas.area.queue_draw(); })),
+        ("toggle-grid", &["<Control>apostrophe"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.grid = if d.document.grid.is_some() { None } else { Some((100.0, 4)) }; } p.canvas.area.queue_draw(); })),
         ("clear-guides", &[], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v.clear(); d.document.guides_h.clear(); } p.canvas.area.queue_draw(); })),
         ("copy", &["<Control>c"], |s| s.copy_layer()),
         ("paste", &["<Control>v"], |s| s.paste()),
@@ -369,7 +381,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("zoom-out", &["<Control>minus", "<Control>KP_Subtract"], |s| s.with_current(|p| p.canvas.zoom_by(0.5))),
         ("zoom-fit", &["<Control>0"], |s| s.with_current(|p| p.canvas.fit())),
         ("zoom-actual", &["<Control>1"], |s| s.with_current(|p| p.canvas.zoom_to(1.0))),
-        ("undo", &["<Control>z"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().document.undo(); p.refresh(); })),
+        ("undo", &["<Control>z", "<Control><Alt>z"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().document.undo(); p.refresh(); })),
         ("redo", &["<Control><Shift>z", "<Control>y"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().document.redo(); p.refresh(); })),
         ("select-all", &["<Control>a"], |s| s.edit(|d| d.select_all())),
         ("deselect", &["<Control>d"], |s| s.edit(|d| { d.deselect(); Ok(()) })),
@@ -383,18 +395,34 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("mask-delete", &[], |s| s.edit(|d| { d.delete_mask(); Ok(()) })),
         ("mask-toggle", &[], |s| s.edit(|d| { d.toggle_mask_enabled(); Ok(()) })),
         ("mask-invert", &[], |s| s.edit(|d| d.invert_mask())),
-        ("toggle-clipping", &["<Alt>g"], |s| s.edit(|d| { if let Some(id) = d.active { d.toggle_clipping(id); } Ok(()) })),
+        ("toggle-clipping", &["<Alt>g", "<Control><Alt>g"], |s| s.edit(|d| { if let Some(id) = d.active { d.toggle_clipping(id); } Ok(()) })),
         ("select-layer-pixels", &[], |s| s.edit(|d| { match d.active { Some(id) => d.select_layer_pixels(id, Mode::Replace), None => Ok(()) } })),
         ("new", &["<Control>n"], |s| { let state = s.clone(); dialogs::new_canvas(s.window.upcast_ref(), move |w, h, r| match Document::blank(w, h, r) { Ok(document) => state.add_page(Doc::from(document, "Untitled")), Err(e) => state.alert("Could not create the canvas", &format!("{e:#}")) }); }),
         ("save", &["<Control>s"], |s| s.save_current(false)),
         ("save-as", &["<Control><Shift>s"], |s| s.save_current(true)),
-        ("import", &["<Control><Shift>i"], |s| { let state = s.clone(); dialogs::open_image(s.window.upcast_ref(), move |path| state.edit(|d| d.import_image(&path).map(|_| ()))); }),
-        ("export-png", &["<Control><Shift>e"], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export PNG", &title, "png", move |path| state.edit(|d| d.export_png(&path))); }),
+        ("import", &["<Control><Shift>p"], |s| { let state = s.clone(); dialogs::open_image(s.window.upcast_ref(), move |path| state.edit(|d| d.import_image(&path).map(|_| ()))); }),
+        ("export-png", &["<Control><Alt><Shift>w"], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export PNG", &title, "png", move |path| state.edit(|d| d.export_png(&path))); }),
         ("export-jpeg", &["<Control><Alt><Shift>s"], |s| s.export_jpeg()),
         ("copy-merged", &["<Control><Shift>c"], |s| s.copy_merged()),
-        ("new-layer", &["<Control><Shift>n"], |s| s.edit(|d| { d.add_blank_layer(); Ok(()) })),
+        ("new-layer", &["<Control><Shift>n", "<Control><Alt><Shift>n"], |s| s.edit(|d| { d.add_blank_layer(); Ok(()) })),
         ("new-folder", &["<Control>g"], |s| s.edit(|d| { d.add_folder(); Ok(()) })),
-        ("duplicate-layer", &["<Control>j"], |s| s.edit(|d| { d.duplicate_layer(); Ok(()) })),
+        // Ctrl+J with a selection is Layer via Copy, as in Photoshop; without one it duplicates the layer.
+        ("duplicate-layer", &["<Control>j"], |s| s.edit(|d| { if d.selection.as_ref().is_some_and(|sel| !sel.is_empty()) { d.layer_via(false).map(|_| ()) } else { d.duplicate_layer(); Ok(()) } })),
+        ("layer-via-cut", &["<Control><Shift>j"], |s| s.edit(|d| d.layer_via(true).map(|_| ()))),
+        ("merge-visible", &["<Control><Shift>e"], |s| s.edit(|d| d.merge_visible().map(|_| ()))),
+        ("stamp-visible", &["<Control><Alt><Shift>e"], |s| s.edit(|d| d.stamp_visible().map(|_| ()))),
+        ("layer-top", &["<Control><Shift>bracketright"], |s| s.edit(|d| { d.move_layer_to_end(true); Ok(()) })),
+        ("layer-bottom", &["<Control><Shift>bracketleft"], |s| s.edit(|d| { d.move_layer_to_end(false); Ok(()) })),
+        ("select-all-layers", &["<Control><Alt>a"], |s| s.edit(|d| { d.select_all_layers(); Ok(()) })),
+        ("toggle-layer-visibility", &["<Control>comma"], |s| s.edit(|d| { d.toggle_visible(); Ok(()) })),
+        ("reselect", &["<Control><Shift>d"], |s| s.edit(|d| { d.reselect(); Ok(()) })),
+        ("feather-selection", &["<Shift>F6", "<Control><Alt>d"], |s| { let state = s.clone(); dialogs::amount(s.window.upcast_ref(), "Feather Selection", "Feather radius (px)", move |n| state.edit(|d| d.feather_selection(n as f64))); }),
+        ("desaturate", &["<Control><Shift>u"], |s| s.edit(|d| d.desaturate())),
+        ("liquify", &["<Control><Shift>x"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().blur_mode = 0; p.canvas.set_tool(Tool::Blur); })),
+        ("toggle-extras", &["<Control>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.hide_extras = !d.hide_extras; } p.canvas.area.queue_draw(); })),
+        ("toggle-panels", &[], |s| s.toggle_panels()),
+        ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
+        ("shortcuts", &["<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
         ("delete-layer", &[], |s| s.edit(|d| { d.delete_layer(); Ok(()) })),
         ("layer-up", &["<Control>bracketright"], |s| s.edit(|d| { d.move_layer(true); Ok(()) })),
         ("layer-down", &["<Control>bracketleft"], |s| s.edit(|d| { d.move_layer(false); Ok(()) })),
@@ -426,6 +454,28 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         });
         window.add_action(&action);
         app.set_accels_for_action("win.filter::levels", &["<Control>l"]);
+        app.set_accels_for_action("win.filter::hsv", &["<Control>u"]);
+    }
+    {
+        // Parameterized: a layer by id (the canvas menu lists the layers under the pointer) and a guide.
+        let action = gio::SimpleAction::new("select-layer-id", Some(glib::VariantTy::STRING));
+        let state2 = state.clone();
+        let state = state.clone();
+        action.connect_activate(move |_, parameter| {
+            let Some(id) = parameter.and_then(|v| v.get::<String>()).and_then(|t| uuid::Uuid::parse_str(&t).ok()) else { return };
+            state.edit(|d| { if d.has_layer(id) { d.select_layer(Some(id)); } Ok(()) });
+        });
+        window.add_action(&action);
+        let action = gio::SimpleAction::new("delete-guide", Some(glib::VariantTy::STRING));
+        let state = state2.clone();
+        action.connect_activate(move |_, parameter| {
+            let Some(spec) = parameter.and_then(|v| v.get::<String>()) else { return };
+            state.with_current(|p| {
+                { let mut d = p.canvas.doc().borrow_mut(); let (kind, index) = spec.split_at(1); if let Ok(i) = index.parse::<usize>() { if kind == "v" { if i < d.document.guides_v.len() { d.document.guides_v.remove(i); } } else if i < d.document.guides_h.len() { d.document.guides_h.remove(i); } } }
+                p.canvas.area.queue_draw();
+            });
+        });
+        window.add_action(&action);
     }
     {
         let action = gio::SimpleAction::new("new-adjustment", Some(glib::VariantTy::STRING));
@@ -516,7 +566,10 @@ fn menu() -> gio::Menu {
     let select = gio::Menu::new();
     select.append(Some("All"), Some("win.select-all"));
     select.append(Some("Deselect"), Some("win.deselect"));
+    select.append(Some("Reselect"), Some("win.reselect"));
     select.append(Some("Inverse"), Some("win.invert-selection"));
+    select.append(Some("All Layers"), Some("win.select-all-layers"));
+    select.append(Some("Feather…"), Some("win.feather-selection"));
     select.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
     select.append(Some("Expand…"), Some("win.expand-selection"));
     select.append(Some("Contract…"), Some("win.contract-selection"));
@@ -528,7 +581,8 @@ fn menu() -> gio::Menu {
     for kind in ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain"] { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
     layer.append_submenu(Some("New Adjustment Layer"), &adjustments);
     layer.append(Some("Edit Adjustment…"), Some("win.edit-adjustment"));
-    layer.append(Some("Duplicate Layer"), Some("win.duplicate-layer"));
+    layer.append(Some("Duplicate Layer / Layer via Copy"), Some("win.duplicate-layer"));
+    layer.append(Some("Layer via Cut"), Some("win.layer-via-cut"));
     layer.append(Some("Layer Style…"), Some("win.layer-style"));
     layer.append(Some("Clear Layer Style"), Some("win.clear-layer-style"));
     layer.append(Some("Delete Layer"), Some("win.delete-layer"));
@@ -546,12 +600,19 @@ fn menu() -> gio::Menu {
     layer.append(Some("Flip Horizontal"), Some("win.flip-horizontal"));
     layer.append(Some("Flip Vertical"), Some("win.flip-vertical"));
     layer.append(Some("Merge Down / Group"), Some("win.merge"));
+    layer.append(Some("Merge Visible"), Some("win.merge-visible"));
+    layer.append(Some("Stamp Visible"), Some("win.stamp-visible"));
+    layer.append(Some("Bring to Front"), Some("win.layer-top"));
+    layer.append(Some("Send to Back"), Some("win.layer-bottom"));
+    layer.append(Some("Hide / Show Layer"), Some("win.toggle-layer-visibility"));
+    layer.append(Some("Edit Text…"), Some("win.edit-text"));
     menu.append_submenu(Some("Layer"), &layer);
     let image = gio::Menu::new();
     image.append(Some("Canvas Size…"), Some("win.canvas-size"));
     image.append(Some("Image Size…"), Some("win.image-size"));
     image.append(Some("Crop to Selection"), Some("win.crop"));
     image.append(Some("Hue/Saturation…"), Some("win.filter::hsv"));
+    image.append(Some("Desaturate"), Some("win.desaturate"));
     image.append(Some("Exposure…"), Some("win.filter::exposure"));
     image.append(Some("Levels…"), Some("win.filter::levels"));
     image.append(Some("Gradient Map…"), Some("win.filter::gradient"));
@@ -567,6 +628,10 @@ fn menu() -> gio::Menu {
     view.append(Some("Show Guides"), Some("win.toggle-guides"));
     view.append(Some("New Guide…"), Some("win.new-guide"));
     view.append(Some("Clear Guides"), Some("win.clear-guides"));
+    view.append(Some("Snap"), Some("win.toggle-snap"));
+    view.append(Some("Show Grid"), Some("win.toggle-grid"));
+    view.append(Some("Extras (selection edges, guides)"), Some("win.toggle-extras"));
+    view.append(Some("Panels"), Some("win.toggle-panels"));
     menu.append_submenu(Some("View"), &view);
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
@@ -578,8 +643,60 @@ fn menu() -> gio::Menu {
     filter.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));
     filter.append(Some("Heal Selection"), Some("win.heal-selection"));
     menu.append_submenu(Some("Filter"), &filter);
+    let help = gio::Menu::new();
+    help.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
+    menu.append_submenu(Some("Help"), &help);
     menu
 }
+
+/// Every shortcut, for the Help window: (group, key, what it does).
+pub const SHORTCUTS: &[(&str, &str, &str)] = &[
+    ("Tools", "V M L W C I B E J S R G T U H Z", "Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Smear, Gradient, Type, Shape, Hand, Zoom"),
+    ("Tools", "Shift+M, Shift+L, Shift+U", "Swap the marquee, lasso or shape kind"),
+    ("Tools", "X, D", "Swap the colors, reset them"),
+    ("Tools", "[ ], Shift+[ ], 0 to 9", "Brush size, hardness, opacity"),
+    ("Tools", "Alt+click, Right-click", "Brush: pick a color; open the brush settings"),
+    ("Tools", "Space+drag, Ctrl+scroll", "Pan, zoom around the pointer"),
+    ("File", "Ctrl+N, Ctrl+O, Ctrl+W", "New, Open, Close"),
+    ("File", "Ctrl+S, Ctrl+Shift+S", "Save, Save As"),
+    ("File", "Ctrl+Shift+P", "Import an image as a layer"),
+    ("File", "Ctrl+Alt+Shift+W, Ctrl+Alt+Shift+S", "Export PNG, Export JPEG"),
+    ("Edit", "Ctrl+Z, Ctrl+Alt+Z", "Undo"),
+    ("Edit", "Ctrl+Shift+Z, Ctrl+Y", "Redo"),
+    ("Edit", "Ctrl+C, Ctrl+Shift+C, Ctrl+V", "Copy, Copy Merged, Paste as a new layer"),
+    ("Edit", "Alt+Backspace, Ctrl+Backspace", "Fill with the foreground, the background"),
+    ("Edit", "Shift+F5, Shift+Backspace", "Content-Aware Fill"),
+    ("Edit", "Delete", "Clear the selection, or delete the mask or layer"),
+    ("Edit", "Arrows, Shift+Arrows", "Nudge the layer or selection by 1 or 10 px"),
+    ("Edit", "Ctrl+Arrows", "Move the selected pixels"),
+    ("Edit", "Ctrl+Shift+G", "Generative Fill"),
+    ("Select", "Ctrl+A, Ctrl+D, Ctrl+Shift+D", "All, Deselect, Reselect"),
+    ("Select", "Ctrl+Shift+I", "Inverse"),
+    ("Select", "Ctrl+Alt+A", "All layers"),
+    ("Select", "Shift+F6, Ctrl+Alt+D", "Feather"),
+    ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
+    ("Select", "Shift, Alt while selecting", "Add to, subtract from the selection"),
+    ("Image", "Ctrl+L, Ctrl+U, Ctrl+I", "Levels, Hue/Saturation, Invert"),
+    ("Image", "Ctrl+Shift+U", "Desaturate"),
+    ("Image", "Ctrl+Alt+I, Ctrl+Alt+C", "Image Size, Canvas Size"),
+    ("Image", "Ctrl+Shift+X", "Liquify (the Smear tool)"),
+    ("Layer", "Ctrl+Shift+N, Ctrl+G", "New layer, new folder"),
+    ("Layer", "Ctrl+J, Ctrl+Shift+J", "Duplicate (Layer via Copy with a selection), Layer via Cut"),
+    ("Layer", "Ctrl+E, Ctrl+Shift+E, Ctrl+Alt+Shift+E", "Merge Down, Merge Visible, Stamp Visible"),
+    ("Layer", "Ctrl+], Ctrl+[", "Move the layer up, down"),
+    ("Layer", "Ctrl+Shift+], Ctrl+Shift+[", "Bring to Front, Send to Back"),
+    ("Layer", "Alt+G, Ctrl+Alt+G", "Clip to the layer below"),
+    ("Layer", "Ctrl+,", "Hide or show the layer"),
+    ("Layer", "Double-click a row", "Rename; adjustment layers open their settings"),
+    ("View", "Ctrl+0, Ctrl+1, Ctrl++, Ctrl+-", "Fit, 100%, zoom in, zoom out"),
+    ("View", "Ctrl+F, F", "Preview: the picture alone on black"),
+    ("View", "Tab", "Hide and show the panels"),
+    ("View", "Ctrl+R, Ctrl+;, Ctrl+'", "Rulers, Guides, Grid"),
+    ("View", "Ctrl+Shift+;", "Snap"),
+    ("View", "Ctrl+H", "Extras: selection edges and guides"),
+    ("View", "Double-click a ruler", "New guide there; drag guides with Move"),
+    ("Help", "Ctrl+Alt+Shift+K", "This list"),
+];
 
 impl App {
     fn open_path(self: &Rc<Self>, path: &Path) {
@@ -692,6 +809,41 @@ impl App {
     }
 
     /// Ctrl+F: the picture alone on black, full screen; again brings everything back.
+    /// Tab: the tool rail, options and layers panel come and go; the picture stays where it is.
+    fn toggle_panels(self: &Rc<Self>) {
+        let on = !self.panels_hidden.get();
+        self.panels_hidden.set(on);
+        for page in self.pages.borrow().iter() {
+            page.canvas.set_panels_hidden(on);
+            if let Some(paned) = page.root.downcast_ref::<gtk::Paned>() { if let Some(end) = paned.end_child() { end.set_visible(!on); } }
+        }
+    }
+
+    /// Help > Keyboard Shortcuts: every key, grouped, in a floating window.
+    fn show_shortcuts(self: &Rc<Self>) {
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).margin_top(10).margin_bottom(12).margin_start(14).margin_end(14).build();
+        let grid = gtk::Grid::builder().row_spacing(3).column_spacing(18).build();
+        let mut row = 0;
+        let mut group = "";
+        for &(g, keys, what) in SHORTCUTS {
+            if g != group {
+                group = g;
+                grid.attach(&gtk::Label::builder().label(g).xalign(0.0).margin_top(if row == 0 { 0 } else { 10 }).css_classes(["heading"]).build(), 0, row, 2, 1);
+                row += 1;
+            }
+            grid.attach(&gtk::Label::builder().label(keys).xalign(0.0).css_classes(["monospace"]).build(), 0, row, 1, 1);
+            grid.attach(&gtk::Label::builder().label(what).xalign(0.0).wrap(true).max_width_chars(48).css_classes(["dim-label"]).build(), 1, row, 1, 1);
+            row += 1;
+        }
+        let scroller = gtk::ScrolledWindow::builder().child(&grid).min_content_height(520).max_content_height(760).propagate_natural_height(true).propagate_natural_width(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        content.append(&scroller);
+        let window = dialogs::floating(self.window.upcast_ref(), "Keyboard Shortcuts", false, 640, &content);
+        let keys = gtk::EventControllerKey::new();
+        { let window = window.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gdk::Key::Escape { window.close(); glib::Propagation::Stop } else { glib::Propagation::Proceed } }); }
+        window.add_controller(keys);
+        window.present();
+    }
+
     fn toggle_preview(self: &Rc<Self>) {
         let on = !self.preview.get();
         self.preview.set(on);

@@ -300,16 +300,55 @@ impl Canvas {
                 if tool.is_brush() { g.set_state(gtk::EventSequenceState::Claimed); this.brush_popover(x, y); return; }
                 // Over a selection: what can be done with it, Generative Fill first.
                 let inside = { let d = this.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); d.document.selection.as_ref().is_some_and(|s| !s.is_empty() && s.contains(p.0.floor(), p.1.floor())) };
-                if !inside { return; }
                 g.set_state(gtk::EventSequenceState::Claimed);
                 let menu = gio::Menu::new();
-                menu.append(Some("Generative Fill…"), Some("win.generative-fill"));
-                menu.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
-                menu.append(Some("Fill with Background"), Some("win.fill-background"));
-                menu.append(Some("Clear"), Some("win.clear"));
-                menu.append(Some("Copy"), Some("win.copy"));
-                menu.append(Some("Crop to Selection"), Some("win.crop"));
-                menu.append(Some("Deselect"), Some("win.deselect"));
+                if inside {
+                    menu.append(Some("Generative Fill…"), Some("win.generative-fill"));
+                    menu.append(Some("Layer via Copy"), Some("win.duplicate-layer"));
+                    menu.append(Some("Layer via Cut"), Some("win.layer-via-cut"));
+                    menu.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
+                    menu.append(Some("Fill with Background"), Some("win.fill-background"));
+                    menu.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));
+                    menu.append(Some("Clear"), Some("win.clear"));
+                    menu.append(Some("Copy"), Some("win.copy"));
+                    menu.append(Some("Copy Merged"), Some("win.copy-merged"));
+                    menu.append(Some("Feather…"), Some("win.feather-selection"));
+                    menu.append(Some("Select Inverse"), Some("win.invert-selection"));
+                    menu.append(Some("Crop to Selection"), Some("win.crop"));
+                    menu.append(Some("Deselect"), Some("win.deselect"));
+                } else if let Some((vertical, index)) = this.guide_at((x, y)) {
+                    // Over a guide: the guide itself.
+                    menu.append(Some("Delete Guide"), Some(&format!("win.delete-guide::{}{index}", if vertical { "v" } else { "h" })));
+                    menu.append(Some("Clear Guides"), Some("win.clear-guides"));
+                    menu.append(Some("Snap"), Some("win.toggle-snap"));
+                    menu.append(Some("Show Grid"), Some("win.toggle-grid"));
+                } else {
+                    // Anywhere else: the layers under the pointer to pick from, then what the layer can do.
+                    let under = {
+                        let d = this.doc.borrow();
+                        let size = d.size();
+                        let p = d.viewport.document_point((x, y), size);
+                        let layers = d.document.renderer.layers();
+                        crate::format::entries_ordered(layers, true).into_iter().filter(|e| e.visible && !e.layer.is_group() && e.layer.adjustment.is_none() && e.layer.transform.contains(p)).map(|e| (e.layer.id, e.layer.name.clone())).take(8).collect::<Vec<_>>()
+                    };
+                    if !under.is_empty() {
+                        let pick = gio::Menu::new();
+                        for (id, name) in under { pick.append(Some(&name), Some(&format!("win.select-layer-id::{id}"))); }
+                        menu.append_section(Some("Layers here"), &pick);
+                    }
+                    let is_text = { let d = this.doc.borrow(); d.document.active.is_some_and(|id| d.document.text_style(id).is_some()) };
+                    let actions = gio::Menu::new();
+                    if is_text { actions.append(Some("Edit Text…"), Some("win.edit-text")); }
+                    actions.append(Some("Layer Style…"), Some("win.layer-style"));
+                    actions.append(Some("Duplicate Layer"), Some("win.duplicate-layer"));
+                    actions.append(Some("Delete Layer"), Some("win.delete-layer"));
+                    actions.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
+                    actions.append(Some("Flip Horizontal"), Some("win.flip-horizontal"));
+                    actions.append(Some("Flip Vertical"), Some("win.flip-vertical"));
+                    actions.append(Some("Select All"), Some("win.select-all"));
+                    actions.append(Some("Paste as New Layer"), Some("win.paste"));
+                    menu.append_section(None, &actions);
+                }
                 let popover = gtk::PopoverMenu::from_model(Some(&menu));
                 popover.set_parent(&this.area);
                 popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -947,6 +986,12 @@ impl Canvas {
     pub fn cancel_crop(&self) { self.doc.borrow_mut().crop = None; self.area.queue_draw(); }
 
     /// Preview mode hides everything but the picture.
+    pub fn set_panels_hidden(&self, on: bool) {
+        self.rail.widget.set_visible(!on);
+        self.options_scroller.set_visible(!on);
+        if let Some(sep) = self.rail.widget.next_sibling() { sep.set_visible(!on); }
+    }
+
     pub fn set_preview(&self, on: bool) {
         self.rail.widget.set_visible(!on);
         self.options_scroller.set_visible(!on);
@@ -978,7 +1023,8 @@ impl Canvas {
         let size = d.size();
         let p = d.viewport.document_point(view, size);
         d.document.show_guides = true;
-        let entry = if on_top { d.document.guides_v.push(p.0.round()); (true, d.document.guides_v.len() - 1) } else { d.document.guides_h.push(p.1.round()); (false, d.document.guides_h.len() - 1) };
+        let tolerance = 8.0 / d.viewport.zoom().max(1e-6);
+        let entry = if on_top { let x = d.document.snapped_guide(true, p.0.round(), tolerance); d.document.guides_v.push(x); (true, d.document.guides_v.len() - 1) } else { let y = d.document.snapped_guide(false, p.1.round(), tolerance); d.document.guides_h.push(y); (false, d.document.guides_h.len() - 1) };
         self.guide_drag.set(Some(entry));
         drop(d);
         self.area.queue_draw();
@@ -990,8 +1036,10 @@ impl Canvas {
         let mut d = self.doc.borrow_mut();
         let size = d.size();
         let p = d.viewport.document_point(view, size);
-        if vertical { if let Some(g) = d.document.guides_v.get_mut(index) { *g = p.0.round(); } }
-        else if let Some(g) = d.document.guides_h.get_mut(index) { *g = p.1.round(); }
+        let tolerance = 8.0 / d.viewport.zoom().max(1e-6);
+        let snapped = d.document.snapped_guide(vertical, if vertical { p.0.round() } else { p.1.round() }, tolerance);
+        if vertical { if let Some(g) = d.document.guides_v.get_mut(index) { *g = snapped; } }
+        else if let Some(g) = d.document.guides_h.get_mut(index) { *g = snapped; }
         drop(d);
         self.area.queue_draw();
     }
@@ -1435,8 +1483,28 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
     let ppp = vp.points_per_pixel();
     if doc.preview { return Ok(()); }
 
+    // The grid: light lines every subdivision, stronger ones at each major spacing, over the canvas only.
+    if let Some((spacing, subdivisions)) = doc.document.grid {
+        let (rx, ry, rw, rh) = vp.document_rect(size);
+        cr.save()?;
+        cr.rectangle(rx, ry, rw, rh);
+        cr.clip();
+        let step = (spacing / subdivisions.max(1) as f64).max(1.0);
+        let view_step = step * vp.zoom();
+        if view_step >= 4.0 {
+            cr.set_line_width(1.0);
+            let (gx, gy) = doc.document.grid_lines();
+            for major in [false, true] {
+                if major { cr.set_source_rgba(0.5, 0.5, 0.5, 0.55); } else { cr.set_source_rgba(0.5, 0.5, 0.5, 0.22); }
+                for (i, x) in gx.iter().enumerate() { if (i as u32 % subdivisions.max(1) == 0) == major { let (vx, _) = vp.view_point((*x, 0.0), size); cr.move_to(vx.round() + 0.5, ry); cr.line_to(vx.round() + 0.5, ry + rh); } }
+                for (i, y) in gy.iter().enumerate() { if (i as u32 % subdivisions.max(1) == 0) == major { let (_, vy) = vp.view_point((0.0, *y), size); cr.move_to(rx, vy.round() + 0.5); cr.line_to(rx + rw, vy.round() + 0.5); } }
+                cr.stroke()?;
+            }
+        }
+        cr.restore()?;
+    }
     // Guides: cyan lines across the canvas, as Photoshop draws them.
-    if doc.document.show_guides && !doc.preview && !(doc.document.guides_v.is_empty() && doc.document.guides_h.is_empty()) {
+    if doc.document.show_guides && !doc.preview && !doc.hide_extras && !(doc.document.guides_v.is_empty() && doc.document.guides_h.is_empty()) {
         cr.set_source_rgb(0.0, 0.85, 1.0);
         cr.set_line_width(1.0);
         for x in &doc.document.guides_v { let (vx, _) = vp.view_point((*x, 0.0), size); cr.move_to(vx.round() + 0.5, 0.0); cr.line_to(vx.round() + 0.5, height); }
@@ -1676,7 +1744,7 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
     }
 
     // Marching ants: the outline in white, then black dashes walking along it.
-    if let Some(selection) = &doc.document.selection {
+    if let Some(selection) = doc.document.selection.as_ref().filter(|_| !doc.hide_extras) {
         if !selection.outline.is_empty() {
             cr.save()?;
             cr.rectangle(vx, vy, vw, vh);
