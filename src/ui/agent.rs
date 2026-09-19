@@ -439,7 +439,13 @@ impl Assistant {
 
     /// Under the current document's layer list.
     pub fn dock(&self) {
-        if let Some(w) = self.window.borrow_mut().take() { self.content.unparent(); w.set_child(None::<&gtk::Widget>); w.close(); }
+        // Take the window out first and drop the borrow: closing it runs the close handler, which looks here.
+        let taken = self.window.borrow_mut().take();
+        if let Some(w) = taken {
+            // The floating window holds the content inside a WindowHandle; ask that to let go, never unparent by hand.
+            if let Some(handle) = self.content.parent().and_downcast::<gtk::WindowHandle>() { handle.set_child(None::<&gtk::Widget>); }
+            w.close();
+        }
         if let Some(parent) = self.content.parent() { if let Some(b) = parent.downcast_ref::<gtk::Box>() { b.remove(&self.content); } }
         self.app.with_current(|p| p.panel.assistant_slot.append(&self.content));
         self.popout.set_label("\u{f0d3}");
@@ -455,7 +461,7 @@ impl Assistant {
         let window = super::dialogs::floating(self.app.window.upcast_ref(), "\u{f16a3}  Compy", false, 460, &self.content);
         window.set_resizable(true);
         window.set_default_height(520);
-        { let t = self.clone(); window.connect_close_request(move |_| { if t.window.borrow().is_some() { let t2 = t.clone(); glib::idle_add_local_once(move || t2.dock()); } glib::Propagation::Proceed }); }
+        { let t = self.clone(); window.connect_close_request(move |_| { let open = t.window.borrow().is_some(); if open { let t2 = t.clone(); glib::idle_add_local_once(move || t2.dock()); } glib::Propagation::Proceed }); }
         *self.window.borrow_mut() = Some(window.clone());
         self.popout.set_label("\u{f0d2}");
         window.present();

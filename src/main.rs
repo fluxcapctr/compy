@@ -61,6 +61,7 @@ fn main() {
                     "--type-edit" => script.type_edit = true,
                     "--layers-menu" => script.layers_menu = true,
                     "--assistant" => script.assistant = true,
+                    "--assistant-popout" => { script.assistant = true; script.assistant_popout = true; }
                     "--path" => script.path = text(),
                     "--layer-style" => script.layer_style = true,
                     "--guides" => { if let Some(spec) = text() { for part in spec.split(',') { if let Some(v) = part.strip_prefix('x').and_then(|v| v.parse().ok()) { script.guides.0.push(v); } else if let Some(v) = part.strip_prefix('y').and_then(|v| v.parse().ok()) { script.guides.1.push(v); } } } }
