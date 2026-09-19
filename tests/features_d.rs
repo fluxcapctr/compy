@@ -49,13 +49,28 @@ fn drops_reorder_and_nest() {
 #[test]
 fn drops_move_a_folder_with_its_contents_and_keep_clipping() {
     let (mut d, [a, folder, b, c]) = fixture("dnd-folder");
-    d.toggle_clipping(b);
+    // A second layer inside the folder, clipped to B, so the block carries a clipping link.
+    d.select_layer(Some(b));
+    let top = d.add_blank_layer();
+    assert_eq!(d.renderer.layer(top).parent_id, Some(folder));
+    d.toggle_clipping(top);
+    assert_eq!(d.renderer.layer(top).mask_source_id, Some(b));
     let _ = c;
     d.move_layers(&[folder], Place::Below(a)).unwrap();
     let order: Vec<_> = d.renderer.layers().iter().map(|l| l.name.as_str()).collect();
     assert_eq!(order[0], "F");
     assert_eq!(d.renderer.layer(b).parent_id, Some(folder));
-    assert!(d.renderer.layer(b).mask_source_id.is_some() || d.renderer.layer(b).mask_source_id.is_none(), "clipping inside the block is untouched");
+    assert_eq!(d.renderer.layer(top).mask_source_id, Some(b), "clipping inside the block is untouched");
+    // Dragging the folder and its child together keeps the child inside.
+    d.move_layers(&[folder, b], Place::Above(a)).unwrap();
+    assert_eq!(d.renderer.layer(b).parent_id, Some(folder));
+    // Copied to another document, the link is remapped onto the copies.
+    let mut other = Document::blank(4, 4, 72.0).unwrap();
+    let target = other.active.unwrap();
+    other.copy_layers(&d, &[folder], Place::Above(target)).unwrap();
+    let new_b = other.renderer.layers().iter().find(|l| l.name == "B").unwrap().id;
+    let new_top = other.renderer.layers().iter().find(|l| l.mask_source_id.is_some()).unwrap();
+    assert_eq!(new_top.mask_source_id, Some(new_b));
 }
 
 #[test]

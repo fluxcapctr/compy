@@ -61,7 +61,7 @@ pub fn add_file_in_set(path: &Path, set: Option<&str>, remember: bool) -> anyhow
     let mut loaded = if gimp { crate::gbr::load(path)? } else { crate::abr::load(path)? };
     if let Some(set) = set { for p in loaded.iter_mut() { let mut owned = (**p).clone(); owned.set = set.to_string(); *p = Rc::new(owned); } }
     let count = loaded.len();
-    PRESETS.with(|p| { let mut p = p.borrow_mut(); p.retain(|existing| !loaded.iter().any(|n| n.name == existing.name)); p.extend(loaded); });
+    PRESETS.with(|p| { let mut p = p.borrow_mut(); p.retain(|existing| !loaded.iter().any(|n| n.name == existing.name && n.set == existing.set)); p.extend(loaded); });
     if remember {
         FILES.with(|f| { let mut f = f.borrow_mut(); if !f.iter().any(|x| x == path) { f.push(path.to_path_buf()); } });
         let text: String = FILES.with(|f| f.borrow().iter().map(|p| p.to_string_lossy().to_string() + "\n").collect());

@@ -108,6 +108,7 @@ impl Inner {
     fn connect(self: &Rc<Self>) {
         let this = self.clone();
         self.list.connect_row_selected(move |_, row| {
+            if this.syncing.get() { return; }
             let selected = row.and_then(|r| this.rows.borrow().get(r.index() as usize).copied());
             if let Ok(mut d) = this.doc.try_borrow_mut() {
                 if d.document.active != selected || d.document.selected.len() > 1 { d.document.select_layer(selected); }
@@ -175,6 +176,8 @@ impl Inner {
             (infos, d.document.active, d.document.renderer.layers().len(), d.document.selected.clone())
         };
         self.count.set_label(&total.to_string());
+        // Rows come and go here without that meaning a click: the selection signal is ignored meanwhile.
+        self.syncing.set(true);
         while let Some(child) = self.list.first_child() { self.list.remove(&child); }
         self.details.borrow_mut().clear();
         let mut ids = Vec::with_capacity(infos.len());
@@ -358,8 +361,10 @@ impl Inner {
         *self.rows.borrow_mut() = ids;
         match select_index {
             Some(index) => { if let Some(row) = self.list.row_at_index(index as i32) { self.list.select_row(Some(&row)); } }
-            None => self.sync_controls(),
+            None => {}
         }
+        self.syncing.set(false);
+        self.sync_controls();
     }
 
     fn refresh_detail(&self, id: Uuid) {

@@ -432,10 +432,10 @@ impl Document {
         if commit {
             self.renderer.set_preview(id, None);
             let mut levels = refined;
-            if let Some(existing) = self.renderer.mask(id).cloned() {
-                if self.renderer.layer(id).mask_placement.is_none() {
-                    // Both masks hide: what either one hides stays hidden.
-                    let existing = if (existing.width() as usize, existing.height() as usize) == (w, h) { existing } else { let v = with_bytes(&existing, |d, _| d[0])?; crate::raster::a8_filled(w as i32, h as i32, v)? };
+            // Both masks hide: what the old one hid, wherever it was placed, stays hidden.
+            let layer = self.renderer.layer(id).clone();
+            if self.renderer.mask(id).is_some() && layer.mask_enabled() {
+                if let Some(existing) = self.renderer.mask_on_grid(id, &layer.transform, w as i32, h as i32)? {
                     with_bytes(&existing, |d, stride| { for y in 0..h { for x in 0..w { levels[y * w + x] *= d[y * stride + x] as f32 / 255.0; } } })?;
                 }
             }
@@ -708,7 +708,8 @@ impl Document {
             for id in self.selected.clone() { picked.extend(self.descendants(id)); }
             let ordered: Vec<&crate::format::Layer> = layers.iter().filter(|l| picked.contains(&l.id)).collect();
             if !ordered.iter().any(|l| !l.is_group()) { return None; }
-            let top = ordered.iter().rev().find(|l| self.selected.contains(&l.id))?;
+            // The topmost selected layer whose folder is not itself going: the result takes its place.
+            let top = ordered.iter().rev().find(|l| self.selected.contains(&l.id) && l.parent_id.is_none_or(|p| !picked.contains(&p)))?;
             return Some((ordered.iter().map(|l| l.id).collect(), picked, top.name.clone(), top.parent_id, top.id, "Merge Layers"));
         }
         if record.is_group() {
@@ -773,6 +774,11 @@ impl Document {
         let layers = self.renderer.layers();
         let slot = self.renderer.layer_index(anchor).unwrap_or(layers.len());
         let insertion = slot - layers[..slot].iter().filter(|l| removed.contains(&l.id)).count();
+        // The arrangement the merge would leave, checked before anything changes (`LayerHierarchy.validate`).
+        let mut proposed: Vec<crate::format::Layer> = layers.iter().filter(|l| !removed.contains(&l.id)).cloned().collect();
+        for l in proposed.iter_mut() { if l.mask_source_id.is_some_and(|s| removed.contains(&s)) { l.mask_source_id = Some(merged_id); } }
+        proposed.insert(insertion.min(proposed.len()), merged.clone());
+        crate::format::validate::hierarchy(&proposed).map_err(|_| anyhow::anyhow!("These layers cannot be merged as they are arranged."))?;
         self.begin_edit(action);
         // Layers clipped to anything that was merged now clip to the result.
         let reclip: Vec<Uuid> = self.renderer.layers().iter().filter(|l| l.mask_source_id.is_some_and(|s| removed.contains(&s)) && !removed.contains(&l.id)).map(|l| l.id).collect();
@@ -909,6 +915,15 @@ impl Document {
             for y in 0..hu { pixels[y * wu * 4..(y + 1) * wu * 4].copy_from_slice(&data[y * stride..y * stride + wu * 4]); }
         })?;
         Ok(crate::brush::Sample { pixels, width: wu, height: hu })
+    }
+
+    /// A whole stroke laid down at once from known points (no provisional tails), as warps and scripts
+    /// do; it must match the same points painted live.
+    pub fn replay_stroke(&mut self, points: &[(f64, f64)], settings: &crate::brush::BrushSettings, kind: StrokeKind) -> Result<()> {
+        let Some((first, rest)) = points.split_first() else { return Ok(()) };
+        self.begin_stroke(*first, settings, kind)?;
+        if let Some(stroke) = self.stroke.as_mut() { stroke.replay(rest)?; if let Some(rect) = stroke.changed { self.renderer.preview_changed(self.active.unwrap(), rect)?; } }
+        self.finish_stroke()
     }
 
     /// Starts a stroke on the active layer at `point` (document pixels). Nothing starts on a folder, an
@@ -1235,14 +1250,47 @@ impl Document {
     pub fn preview_distort(&mut self, id: Uuid, transform: &Transform, corners: &crate::distort::Corners) -> Result<()> {
         let Some(image) = self.renderer.image(id).cloned() else { return Ok(()) };
         let (warped, placed) = crate::distort::warp(&image, transform, corners, false, Some(2048.0))?;
+        // The mask goes the way the commit will take it: warped with the pixels, carried on its own
+        // placement, or left where it is.
+        if let Some((mask, placement)) = self.distorted_mask(id, transform, corners, Some(2048.0))? {
+            let (w, h) = (mask.width(), mask.height());
+            let preview = self.renderer.begin_mask_preview(id, w, h)?;
+            let rows = with_bytes(&mask, |d, _| d.to_vec())?;
+            crate::raster::with_bytes_raw_mut(&preview, |d, _| d.copy_from_slice(&rows))?;
+            self.renderer.set_mask_preview_placement(id, Some(placement));
+            self.renderer.mask_preview_changed(id, (0, 0, w, h))?;
+        }
         self.renderer.set_preview_placed(id, warped, placed);
         Ok(())
     }
 
+    /// The layer's mask as a distortion takes it (`distortPreview`'s `warpedMask`): the mask warped over the
+    /// pixels' new bounds, or carried on its own placement; None for an unlinked mask, which stays put.
+    fn distorted_mask(&mut self, id: Uuid, transform: &Transform, corners: &crate::distort::Corners, limit: Option<f64>) -> Result<Option<(ImageSurface, Transform)>> {
+        let layer = self.renderer.layer(id).clone();
+        let Some(mask) = self.renderer.mask(id).cloned() else { return Ok(None) };
+        let linked = layer.mask_linked.unwrap_or(true);
+        if layer.mask_placement.is_none() && linked {
+            let (wm, placed) = crate::distort::warp(&mask, transform, corners, true, limit)?;
+            return Ok(Some((wm, placed)));
+        }
+        if let (true, Some(p)) = (linked, layer.mask_placement) {
+            let placement = p.following(&layer.transform, transform);
+            if let Some(carried) = crate::distort::carried(&placement, transform, corners).filter(crate::distort::is_usable) {
+                let background = self.renderer.mask_background(id)?;
+                return Ok(Some(crate::distort::warp_mask(&mask, &placement, &carried, background, limit)?));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Drops a distortion preview (the pixels and the mask) without applying it.
+    pub fn cancel_distort(&mut self, id: Uuid) { self.renderer.set_preview(id, None); self.renderer.end_mask_preview(id); }
+
     /// Apply for a distortion: the layer's pixels and mask resampled into the shape, as one undo step
     /// (`commitDistort`). `transform` is what the layer showed through while its corners were dragged.
     pub fn commit_distort(&mut self, targets: &[(Uuid, Transform, crate::distort::Corners)]) -> Result<()> {
-        for (id, _, _) in targets { self.renderer.set_preview(*id, None); }
+        for (id, _, _) in targets { self.renderer.set_preview(*id, None); self.renderer.end_mask_preview(*id); }
         let name = if targets.len() == 1 { "Distort" } else { "Distort Layers" };
         self.begin_edit(name);
         let result = (|| -> Result<()> {
@@ -1668,7 +1716,7 @@ impl Document {
         let id = record.id;
         self.begin_edit("New Layer");
         self.renderer.insert_layer(index, record, None, None);
-        self.active = Some(id);
+        self.select_layer(Some(id));
         self.mask_target = false;
         self.end_edit();
         id
@@ -1681,7 +1729,7 @@ impl Document {
         let id = record.id;
         self.begin_edit("New Folder");
         self.renderer.insert_layer(index, record, None, None);
-        self.active = Some(id);
+        self.select_layer(Some(id));
         self.end_edit();
         id
     }
@@ -1696,7 +1744,7 @@ impl Document {
         let id = record.id;
         self.begin_edit(&format!("New {kind} Adjustment"));
         self.renderer.insert_layer(index, record, None, None);
-        self.active = Some(id);
+        self.select_layer(Some(id));
         self.end_edit();
         Some(id)
     }
@@ -1773,7 +1821,7 @@ impl Document {
         let new_id = record.id;
         self.begin_edit("Duplicate Layer");
         self.renderer.insert_layer(index, record, image, mask);
-        self.active = Some(new_id);
+        self.select_layer(Some(new_id));
         self.end_edit();
         Some(new_id)
     }
@@ -1798,7 +1846,9 @@ impl Document {
         }
         // Rebuild the array: the moved blocks lifted out, then put back around the anchor.
         let kept: Vec<crate::format::Layer> = layers.iter().filter(|l| !moving.contains(&l.id)).cloned().collect();
-        let block: Vec<crate::format::Layer> = layers.iter().filter(|l| moving.contains(&l.id)).cloned().map(|mut l| { if ids.contains(&l.id) { l.parent_id = parent; } l }).collect();
+        // Only the top of each dragged block takes the new parent; what is inside keeps its nesting.
+        let roots_only: std::collections::HashSet<Uuid> = ids.iter().copied().filter(|id| { let mut p = self.renderer.layer(*id).parent_id; let mut inside = false; for _ in 0..64 { match p { Some(q) if moving.contains(&q) => { inside = true; break; } Some(q) => p = self.renderer.layer(q).parent_id, None => break } } !inside }).collect();
+        let block: Vec<crate::format::Layer> = layers.iter().filter(|l| moving.contains(&l.id)).cloned().map(|mut l| { if roots_only.contains(&l.id) { l.parent_id = parent; } l }).collect();
         let anchor_index = Self::block_end(&kept, anchor, matches!(place, Place::Into(_)), self);
         let insert_at = if after { anchor_index + 1 } else { anchor_index };
         let mut next = kept;
@@ -2028,7 +2078,7 @@ impl Document {
         let id = record.id;
         self.begin_edit("Import Image");
         self.renderer.insert_layer(index, record, Some(surface), None);
-        self.active = Some(id);
+        self.select_layer(Some(id));
         self.mask_target = false;
         self.end_edit();
         Ok(id)

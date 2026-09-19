@@ -59,6 +59,8 @@ pub fn load(path: &Path) -> Result<Vec<Rc<Preset>>> {
 pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
     let mut r = Reader { data, pos: 0 };
     let set = stem.to_string();
+    // Everything decoded from one file, in samples, counted before each tip's buffer is made.
+    let mut budget: usize = 100_000_000;
     let version = r.u16()?;
     let mut presets = Vec::new();
     match version {
@@ -85,7 +87,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                     let (top, left, bottom, right) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
                     let depth = r.i16()?;
                     let compression = r.u8()?;
-                    if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
+                    if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression, start + size, &mut budget)? {
                         if name.is_empty() { name = format!("{stem} {}", index + 1); }
                         presets.push(Rc::new(Preset { name, width: p.0, height: p.1, pixels: p.2, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 25.0 }, jitter: default_jitter(p.0, p.1), set: set.clone(), frames: Vec::new() }));
                     }
@@ -119,7 +121,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                 let depth = r.i16()?;
                 let compression = r.u8()?;
                 index += 1;
-                if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
+                if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression, start + padded, &mut budget)? {
                     presets.push(Rc::new(Preset { name: format!("{stem} {index}"), width: p.0, height: p.1, pixels: p.2, spacing: 25.0, jitter: default_jitter(p.0, p.1), set: set.clone(), frames: Vec::new() }));
                 }
                 r.pos = start + padded;
@@ -133,12 +135,19 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
 
 /// One tip's bitmap: raw, or PackBits rows behind a table of row lengths. 8-bit only; 16-bit tips are read
 /// at their high byte.
-fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth: i16, compression: u8) -> Result<Option<(usize, usize, Vec<u8>)>> {
+/// `end` is where the brush's record stops (no read passes it); `budget` is what the file may still decode.
+fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth: i16, compression: u8, end: usize, budget: &mut usize) -> Result<Option<(usize, usize, Vec<u8>)>> {
     let (w, h) = (right.checked_sub(left), bottom.checked_sub(top));
     let (Some(w), Some(h)) = (w, h) else { bail!("a brush rectangle is inverted") };
     if w <= 0 || h <= 0 || w > 16_384 || h > 16_384 || w as i64 * h as i64 > 50_000_000 { return Ok(None); }
     let (w, h) = (w as usize, h as usize);
     let bytes = match depth { 8 => 1, 16 => 2, _ => return Ok(None) };
+    if compression > 1 { bail!("a brush uses an unknown compression ({compression})"); }
+    let end = end.min(r.data.len());
+    let room = end.saturating_sub(r.pos);
+    // A raw tip needs its whole size; a packed one at least a row-length table and a byte per row.
+    if (compression == 0 && room < w * h * bytes) || (compression == 1 && room < h * 3) { bail!("a brush's pixels run past its record"); }
+    *budget = budget.checked_sub(w * h).ok_or_else(|| anyhow::anyhow!("The file's brushes exceed the 100-megapixel decoding budget."))?;
     let mut raw = vec![0u8; w * h * bytes];
     if compression == 0 {
         raw.copy_from_slice(r.bytes(w * h * bytes)?);
@@ -146,6 +155,7 @@ fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth:
         let mut lengths = Vec::with_capacity(h);
         for _ in 0..h { lengths.push(r.i16()?.max(0) as usize); }
         for (y, &len) in lengths.iter().enumerate() {
+            if r.pos + len > end { bail!("a brush's rows run past its record"); }
             let packed = r.bytes(len)?;
             let row = &mut raw[y * w * bytes..(y + 1) * w * bytes];
             let mut i = 0;
@@ -154,18 +164,22 @@ fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth:
                 let n = packed[i] as i8;
                 i += 1;
                 if n >= 0 {
-                    let count = (n as usize + 1).min(row.len() - o).min(packed.len() - i);
+                    let count = n as usize + 1;
+                    if count > row.len() - o || count > packed.len() - i { bail!("a brush row is packed wrongly"); }
                     row[o..o + count].copy_from_slice(&packed[i..i + count]);
                     i += count;
                     o += count;
                 } else if n != -128 {
-                    if i >= packed.len() { break; }
-                    let count = ((-(n as i32)) as usize + 1).min(row.len() - o);
+                    if i >= packed.len() { bail!("a brush row is packed wrongly"); }
+                    let count = (-(n as i32)) as usize + 1;
+                    if count > row.len() - o { bail!("a brush row is packed wrongly"); }
                     row[o..o + count].fill(packed[i]);
                     i += 1;
                     o += count;
                 }
             }
+            // Every row decodes to exactly its width; a short row is a damaged file, not a blank tip.
+            if o != row.len() { bail!("a brush row is short"); }
         }
     }
     let pixels: Vec<u8> = if bytes == 1 { raw } else { raw.chunks_exact(2).map(|p| p[0]).collect() };

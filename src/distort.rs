@@ -59,7 +59,14 @@ pub fn invert(m: &[f64; 9]) -> Option<[f64; 9]> {
 /// Where `placement`'s corners land when the perspective taking `transform`'s corners to `corners` is applied
 /// around it too: how a linked mask placed apart from its layer distorts with the layer (`carried`).
 pub fn carried(placement: &Transform, transform: &Transform, to: &Corners) -> Option<Corners> {
-    let to_unit = transform.unit_to_document().try_invert().ok()?;
+    // The box without its pixel flips: the corners are geometry, and flips are a matter of pixels.
+    let c = transform.center();
+    let mut box_to_document = cairo::Matrix::identity();
+    box_to_document.translate(c.0, c.1);
+    box_to_document.rotate(transform.radians());
+    box_to_document.scale(transform.size.0, transform.size.1);
+    box_to_document.translate(-0.5, -0.5);
+    let to_unit = box_to_document.try_invert().ok()?;
     let map = homography(to);
     let mut out = [(0.0, 0.0); 4];
     for (i, p) in corners(placement).iter().enumerate() { out[i] = apply(&map, to_unit.transform_point(p.0, p.1)); }

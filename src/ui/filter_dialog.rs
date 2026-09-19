@@ -24,6 +24,8 @@ pub struct FilterDialog {
     /// When editing an adjustment layer rather than filtering pixels: the layer and its settings on open.
     adjustment: Option<(uuid::Uuid, filters::Adjustment)>,
     committed: Cell<bool>,
+    /// Remove Background's download button, shown again when the model on disk fails to load.
+    model_button: RefCell<Option<gtk::Button>>,
 }
 
 impl FilterDialog {
@@ -34,7 +36,7 @@ impl FilterDialog {
         let this = Rc::new(FilterDialog {
             doc, kind, settings: RefCell::new(settings), preview: Cell::new(true), scheduled: Cell::new(false), canvas,
             status: gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build(), finished,
-            histogram: RefCell::new(histogram), channel: Cell::new(0), histogram_area: RefCell::new(None), adjustment: None, committed: Cell::new(false),
+            histogram: RefCell::new(histogram), channel: Cell::new(0), histogram_area: RefCell::new(None), adjustment: None, committed: Cell::new(false), model_button: RefCell::new(None),
         });
         Self::present(this, parent);
     }
@@ -58,7 +60,7 @@ impl FilterDialog {
         let this = Rc::new(FilterDialog {
             doc, kind, settings: RefCell::new(settings), preview: Cell::new(true), scheduled: Cell::new(false), canvas,
             status: gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build(), finished,
-            histogram: RefCell::new(None), channel: Cell::new(0), histogram_area: RefCell::new(None), adjustment: Some((id, adjustment)), committed: Cell::new(false),
+            histogram: RefCell::new(None), channel: Cell::new(0), histogram_area: RefCell::new(None), adjustment: Some((id, adjustment)), committed: Cell::new(false), model_button: RefCell::new(None),
         });
         if matches!(this.adjustment, Some((_, filters::Adjustment::Curves(_)))) { this.status.set_label("Curves has no editor yet; its points are kept as saved."); }
         Self::present(this, parent);
@@ -304,12 +306,15 @@ impl FilterDialog {
                 self.slider(&grid, 1, "Refine Edges", 0.0, 40.0, 1.0, s.matte.refine_edges, |s, v| s.matte.refine_edges = v, self);
                 self.slider(&grid, 2, "Contrast", 0.0, 100.0, 1.0, s.matte.contrast, |s, v| s.matte.contrast = v, self);
                 self.slider(&grid, 3, "Shift Edge", -10.0, 10.0, 1.0, s.matte.shift_edge, |s, v| s.matte.shift_edge = v, self);
-                if !crate::matte::model_ready() {
-                    // First use: the model is fetched on request, with progress, then the preview starts.
-                    let download = gtk::Button::builder().label(format!("Download model ({} MB)", crate::matte::MODEL_BYTES / 1_000_000)).css_classes(["suggested-action"]).build();
-                    let note = gtk::Label::builder().label("Remove Background needs a segmentation model (ISNet), fetched once from GitHub into ~/.local/share/compositor.").wrap(true).xalign(0.0).css_classes(["dim-label"]).build();
+                {
+                    // First use: the model is fetched on request, with progress, then the preview starts. The
+                    // button stays around, hidden, in case the file on disk turns out to be damaged.
+                    let ready = crate::matte::model_ready();
+                    let download = gtk::Button::builder().label(format!("Download model ({} MB)", crate::matte::MODEL_BYTES / 1_000_000)).css_classes(["suggested-action"]).visible(!ready).build();
+                    let note = gtk::Label::builder().label("Remove Background needs a segmentation model (ISNet), fetched once from GitHub into ~/.local/share/compositor.").wrap(true).xalign(0.0).css_classes(["dim-label"]).visible(!ready).build();
                     grid.attach(&note, 0, 4, 2, 1);
                     grid.attach(&download, 0, 5, 2, 1);
+                    *self.model_button.borrow_mut() = Some(download.clone());
                     let this = self.clone();
                     download.connect_clicked(move |button| {
                         button.set_sensitive(false);
@@ -392,7 +397,18 @@ impl FilterDialog {
         let settings = self.settings.borrow().clone();
         let mut d = self.doc.borrow_mut();
         let result = if self.preview.get() { d.document.preview_filter(self.kind, &settings) } else { d.document.clear_preview(); Ok(()) };
-        match result { Ok(()) => self.status.set_label(""), Err(error) => self.status.set_label(&format!("{error:#}")) }
+        match result {
+            Ok(()) => self.status.set_label(""),
+            Err(error) => {
+                let text = format!("{error:#}");
+                if text.contains("background removal model") {
+                    // The file on disk is not a usable model: drop it and offer the download again.
+                    crate::matte::discard_model();
+                    if let Some(b) = self.model_button.borrow().as_ref() { b.set_visible(true); b.set_sensitive(true); }
+                    self.status.set_label("The model on disk could not be loaded; download it again.");
+                } else { self.status.set_label(&text); }
+            }
+        }
         self.canvas.queue_draw();
     }
 

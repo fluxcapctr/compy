@@ -40,7 +40,14 @@ pub fn model_path() -> PathBuf {
     base.join("compositor/models/isnet-general-use.onnx")
 }
 
-pub fn model_ready() -> bool { std::fs::metadata(model_path()).is_ok_and(|m| m.len() > 1_000_000) }
+/// The model file is present and whole. A model named by `COMPOSITOR_MODEL` only has to be a real file.
+pub fn model_ready() -> bool {
+    let custom = std::env::var_os("COMPOSITOR_MODEL").is_some();
+    std::fs::metadata(model_path()).is_ok_and(|m| if custom { m.len() > 1_000_000 } else { m.len() == MODEL_BYTES })
+}
+
+/// Drops a model that failed to load, so the dialog can fetch it again.
+pub fn discard_model() { let _ = std::fs::remove_file(model_path()); }
 
 /// Fetches the model to `model_path`, reporting (bytes so far, total) as it goes; the file appears whole or
 /// not at all.
@@ -62,7 +69,7 @@ pub fn download_model(mut progress: impl FnMut(u64, u64)) -> Result<()> {
         progress(done, total);
     }
     drop(file);
-    if done < 1_000_000 { let _ = std::fs::remove_file(&staging); bail!("the download ended early ({done} bytes)"); }
+    if done < 1_000_000 || (total > 0 && done != total) { let _ = std::fs::remove_file(&staging); bail!("the download ended early ({done} of {total} bytes)"); }
     std::fs::rename(&staging, &target)?;
     Ok(())
 }

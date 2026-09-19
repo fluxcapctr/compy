@@ -46,6 +46,8 @@ pub struct Renderer {
     preview_transforms: HashMap<Uuid, Transform>,
     /// Mask pixels shown in place of a layer's own while a stroke paints its mask.
     mask_previews: HashMap<Uuid, ImageSurface>,
+    /// Where a mask preview sits when not where the mask itself does (a distortion in progress).
+    mask_preview_placements: HashMap<Uuid, Transform>,
     /// Halved copies by (layer, source, level).
     halved: HashMap<(Uuid, Source, usize), ImageSurface>,
     /// Masks moved apart from their layers, resampled into the layer's own pixel grid, by (layer, preview).
@@ -148,6 +150,7 @@ impl Renderer {
             previews: HashMap::new(),
             preview_transforms: HashMap::new(),
             mask_previews: HashMap::new(),
+            mask_preview_placements: HashMap::new(),
             halved: HashMap::new(),
             placed: HashMap::new(),
             thumbnails: HashMap::new(),
@@ -370,8 +373,15 @@ impl Renderer {
 
     pub fn mask_preview(&self, id: Uuid) -> Option<ImageSurface> { self.mask_previews.get(&id).cloned() }
 
+    /// A mask preview shown at `placement` rather than where the layer's mask is.
+    pub fn set_mask_preview_placement(&mut self, id: Uuid, placement: Option<Transform>) { self.touch();
+        match placement { Some(p) => { self.mask_preview_placements.insert(id, p); } None => { self.mask_preview_placements.remove(&id); } }
+        self.placed.retain(|(l, _), _| *l != id);
+    }
+
     pub fn end_mask_preview(&mut self, id: Uuid) { self.touch();
         self.mask_previews.remove(&id);
+        self.mask_preview_placements.remove(&id);
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::MaskPreview));
         self.placed.retain(|(l, _), _| *l != id);
     }
@@ -865,7 +875,7 @@ impl Renderer {
     /// elsewhere (moved apart from the layer, or the grid is a stroke's larger one). Nil while disabled or absent.
     fn mask_for(&mut self, layer: &Layer, grid: &Transform, width: i32, height: i32, preview: bool) -> Result<Option<MaskSource>> {
         if !layer.mask_enabled() || !self.masks.contains_key(&layer.id) { return Ok(None); }
-        let placement = layer.mask_placement.unwrap_or(layer.transform);
+        let placement = if self.mask_previews.contains_key(&layer.id) { self.mask_preview_placements.get(&layer.id).copied().or(layer.mask_placement).unwrap_or(layer.transform) } else { layer.mask_placement.unwrap_or(layer.transform) };
         if placement.same_placement(grid) || width <= 0 || height <= 0 { return Ok(Some(MaskSource::Own)); }
         if let Some(existing) = self.placed.get(&(layer.id, preview)) { return Ok(Some(MaskSource::Placed(existing.clone()))); }
         let placed = self.place_mask(layer.id, &placement, grid, width, height)?;

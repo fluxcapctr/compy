@@ -323,9 +323,9 @@ impl Stroke {
             let backup = self.tiles.get(&key).map(|t| t.coverage.clone());
             self.tail_backup.insert(key, backup);
         }
-        let saved = (self.previous, self.distance_to_next);
+        let saved = (self.previous, self.distance_to_next, self.dabs);
         self.walk(end, changed);
-        (self.previous, self.distance_to_next) = saved;
+        (self.previous, self.distance_to_next, self.dabs) = saved;
     }
 
     fn remove_tail(&mut self) -> HashSet<usize> {
