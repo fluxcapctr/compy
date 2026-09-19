@@ -48,6 +48,8 @@ pub struct Canvas {
     status: gtk::Box,
     /// The last composited frame, kept while nothing it shows has changed.
     cache: RefCell<Option<FrameCache>>,
+    /// The popover open over the canvas (brush settings or a context menu), closed by the next press.
+    popover: RefCell<Option<gtk::Popover>>,
     /// A marquee or lasso being drawn.
     draft: RefCell<Option<Draft>>,
     /// Dragging a selection outline: its offset so far (document pixels).
@@ -130,7 +132,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -296,6 +298,7 @@ impl Canvas {
         {
             let this = self.clone();
             context.connect_pressed(move |g, _, x, y| {
+                this.close_popover();
                 let tool = this.doc.borrow().tool;
                 if tool.is_brush() { g.set_state(gtk::EventSequenceState::Claimed); this.brush_popover(x, y); return; }
                 // Over a selection: what can be done with it, Generative Fill first.
@@ -352,7 +355,7 @@ impl Canvas {
                 let popover = gtk::PopoverMenu::from_model(Some(&menu));
                 popover.set_parent(&this.area);
                 popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                popover.connect_closed(move |p| { let p = p.clone(); glib::idle_add_local_once(move || p.unparent()); });
+                this.track_popover(popover.upcast_ref());
                 popover.popup();
             });
         }
@@ -362,6 +365,7 @@ impl Canvas {
         {
             let this = self.clone();
             click.connect_pressed(move |g, n, x, y| {
+                this.close_popover();
                 if this.space_held.get() { return; }
                 if n == 2 && this.doc.borrow().rulers && (x < RULER || y < RULER) {
                     // The single press already made and placed the guide; the second click leaves it there.
@@ -1273,8 +1277,20 @@ impl Canvas {
         }
         content.append(&grid);
         popover.set_child(Some(&content));
-        popover.connect_closed(move |p| { let p = p.clone(); glib::idle_add_local_once(move || p.unparent()); });
+        self.track_popover(&popover);
         popover.popup();
+    }
+
+    /// Remembers the popover open over the canvas so the next press on the canvas closes it, whether or not
+    /// the popover's own outside-click grab saw that press; it unparents itself once closed.
+    fn track_popover(&self, popover: &gtk::Popover) {
+        self.close_popover();
+        *self.popover.borrow_mut() = Some(popover.clone());
+        popover.connect_closed(move |p| { let p = p.clone(); glib::idle_add_local_once(move || p.unparent()); });
+    }
+
+    pub fn close_popover(&self) {
+        if let Some(p) = self.popover.borrow_mut().take() { if p.is_visible() { p.popdown(); } }
     }
 
     /// Brush keys: [ and ] size, { and } hardness, digits opacity. True when the key was one of those.

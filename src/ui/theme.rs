@@ -133,8 +133,10 @@ pub fn css(p: &Palette) -> String {
         list.navigation-sidebar > row:selected .dim-label {{ color: {dfg}; }}
         .dim-label, label.caption {{ color: {dfg}; }}
         .canvas-status {{ background-color: {dbg}; color: {dfg}; border-top: 1px solid {ddbg}; }}
-        entry, spinbutton, spinbutton text, dropdown > button {{ background-color: {dbg}; color: {fg}; border: 1px solid {lbg}; box-shadow: none; }}
-        spinbutton button {{ background-color: {lbg}; color: {fg}; border: none; }}
+        entry, spinbutton, dropdown > button {{ background-color: {dbg}; color: {fg}; border: 1px solid {lbg}; box-shadow: none; }}
+        spinbutton text, entry > text {{ background-color: transparent; border: none; box-shadow: none; }}
+        spinbutton button {{ background-color: transparent; color: {dfg}; border: none; border-left: 1px solid {lbg}; }}
+        spinbutton button:hover {{ background-color: {lbg}; color: {fg}; }}
         entry:focus-within, spinbutton:focus-within {{ border-color: {accent}; outline-color: {accent}; }}
         scale trough {{ background-color: {lbg}; }}
         scale highlight {{ background-color: {accent}; }}
@@ -185,7 +187,9 @@ pub fn look_css(font: &str) -> String {
         button.suggested-action {{ border: 1px solid transparent; }}
         button.suggested-action label {{ font-weight: 600; }}
         entry, spinbutton, dropdown > button {{ min-height: 22px; padding: 0 6px; }}
-        spinbutton button {{ padding: 0 6px; min-width: 18px; border-left: 1px solid alpha(currentColor, 0.15); }}
+        spinbutton {{ padding: 0; }}
+        spinbutton text {{ padding: 0 6px; border: none; background: none; box-shadow: none; }}
+        spinbutton button {{ padding: 0 5px; min-width: 16px; border: none; border-left: 1px solid alpha(currentColor, 0.15); background-image: none; }}
         scale {{ min-height: 16px; }}
         scale trough {{ min-height: 2px; }}
         scale highlight {{ min-height: 2px; }}
