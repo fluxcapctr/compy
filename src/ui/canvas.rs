@@ -1187,10 +1187,11 @@ impl Canvas {
         let size = d.size();
         let p = d.viewport.document_point(view, size);
         match drag {
-            PenDrag::Place(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { let m = (2.0 * a.point.0 - p.0, 2.0 * a.point.1 - p.1); if (p.0 - a.point.0).hypot(p.1 - a.point.1) > 1.0 { a.handle_out = Some(p); a.handle_in = Some(m); } } }
+            // A handle within a pixel of its anchor is no handle: it goes away, so the anchor stays reachable.
+            PenDrag::Place(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { let m = (2.0 * a.point.0 - p.0, 2.0 * a.point.1 - p.1); if (p.0 - a.point.0).hypot(p.1 - a.point.1) > 1.0 { a.handle_out = Some(p); a.handle_in = Some(m); } else { a.handle_out = None; a.handle_in = None; } } }
             PenDrag::Anchor(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { let (dx, dy) = (p.0 - a.point.0, p.1 - a.point.1); a.point = p; a.handle_in = a.handle_in.map(|h| (h.0 + dx, h.1 + dy)); a.handle_out = a.handle_out.map(|h| (h.0 + dx, h.1 + dy)); } }
-            PenDrag::HandleIn(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_in = Some(p); } }
-            PenDrag::HandleOut(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_out = Some(p); } }
+            PenDrag::HandleIn(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_in = if (p.0 - a.point.0).hypot(p.1 - a.point.1) > 1.0 { Some(p) } else { None }; } }
+            PenDrag::HandleOut(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_out = if (p.0 - a.point.0).hypot(p.1 - a.point.1) > 1.0 { Some(p) } else { None }; } }
         }
         drop(d);
         self.area.queue_draw();

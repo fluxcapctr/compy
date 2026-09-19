@@ -89,23 +89,43 @@ impl Default for AgentModels {
 
 pub fn agent_models() -> AgentModels {
     let path = config_dir().join("agent-models.json");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(m) = serde_json::from_str::<AgentModels>(&text) { return m; }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<AgentModels>(&text) {
+            Ok(m) => m,
+            // A file that does not parse is left alone (it may be half written); the defaults serve meanwhile.
+            Err(e) => { eprintln!("agent-models.json: {e}; using the defaults"); AgentModels::default() }
+        },
+        Err(_) => {
+            let m = AgentModels::default();
+            if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&m).unwrap_or_default());
+            m
+        }
     }
-    let m = AgentModels::default();
-    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&m).unwrap_or_default());
-    m
 }
 
-/// A family name or a full fal id, resolved to the id for generation (`edit` false) or editing.
+/// A family name or a full fal id, resolved to the id for generation (`edit` false) or editing. An
+/// empty name means the configured model; an empty configuration means the built-in default.
 pub fn resolve_model(name: &str, edit: bool) -> String {
+    let configured = agent_models();
+    resolve_configured(name, &configured, edit)
+}
+
+pub fn resolve_configured(name: &str, configured: &AgentModels, edit: bool) -> String {
     let n = name.trim().to_ascii_lowercase();
     if n.is_empty() {
-        let m = agent_models();
-        return resolve_model(if edit { &m.edit } else { &m.generate }, edit);
+        let c = if edit { configured.edit.trim() } else { configured.generate.trim() };
+        let d = AgentModels::default();
+        let fallback = if edit { d.edit } else { d.generate };
+        return if c.is_empty() { fallback } else { family_id(c, edit).unwrap_or_else(|| c.to_string()) };
     }
-    if n.contains('/') { return name.trim().to_string(); }
+    family_id(name.trim(), edit).unwrap_or_else(|| name.trim().to_string())
+}
+
+/// The fal id for a family name; None for anything that is not one (a full id passes through).
+fn family_id(name: &str, edit: bool) -> Option<String> {
+    let n = name.to_ascii_lowercase();
+    if n.contains('/') { return None; }
     let id = if n.contains("banana") || n.contains("gemini") || n.contains("google") {
         if edit { "fal-ai/nano-banana-2/edit" } else { "fal-ai/nano-banana-2" }
     } else if n.contains("gpt") || n.contains("openai") {
@@ -113,9 +133,9 @@ pub fn resolve_model(name: &str, edit: bool) -> String {
     } else if n.contains("flux") || n.contains("kontext") {
         if edit { "fal-ai/flux-pro/kontext" } else { "fal-ai/flux/dev" }
     } else {
-        return name.trim().to_string();
+        return None;
     };
-    id.to_string()
+    Some(id.to_string())
 }
 
 const ASPECTS: [(&str, f64); 14] = [("21:9", 21.0 / 9.0), ("16:9", 16.0 / 9.0), ("3:2", 1.5), ("4:3", 4.0 / 3.0), ("5:4", 1.25), ("1:1", 1.0), ("4:5", 0.8), ("3:4", 0.75), ("2:3", 2.0 / 3.0), ("9:16", 9.0 / 16.0), ("4:1", 4.0), ("1:4", 0.25), ("8:1", 8.0), ("1:8", 0.125)];
@@ -347,6 +367,16 @@ mod tests {
         assert_eq!(resolve_model("GPT image", true), "openai/gpt-image-2.5/flare/edit");
         assert_eq!(resolve_model("flux", true), "fal-ai/flux-pro/kontext");
         assert_eq!(resolve_model("fal-ai/anything/else", true), "fal-ai/anything/else");
+        let empty = AgentModels { generate: String::new(), edit: " ".into() };
+        assert_eq!(resolve_configured("", &empty, false), "fal-ai/nano-banana-2", "an empty configuration falls back, without recursing");
+        assert_eq!(resolve_configured("", &empty, true), "fal-ai/nano-banana-2/edit");
+        let named = AgentModels { generate: "gpt image".into(), edit: "openai/gpt-image-2.5/flare/edit".into() };
+        assert_eq!(resolve_configured("", &named, false), "openai/gpt-image-2.5/flare/text-to-image", "a family name in the configuration resolves too");
+        assert_eq!(resolve_configured("", &named, true), "openai/gpt-image-2.5/flare/edit");
+        assert_eq!(nearest_aspect(64, 64), "1:1");
+        assert_eq!(agent_body("fal-ai/nano-banana-2", "x", None, 64, 64, 9, false)["num_images"], 4, "count is capped at four");
+        assert_eq!(agent_body("fal-ai/nano-banana-2", "x", None, 64, 64, 1, false)["resolution"], "1K");
+        assert!(png_size(&[137, 80, 78, 71, 13, 10]).is_none(), "a truncated PNG has no size");
         assert_eq!(nearest_aspect(1920, 1080), "16:9");
         assert_eq!(nearest_aspect(1000, 1000), "1:1");
         assert_eq!(nearest_aspect(800, 1000), "4:5");

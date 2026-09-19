@@ -1192,6 +1192,15 @@ impl Document {
     /// Fills a Pen path on the active image layer in `color` (Fill Path).
     pub fn fill_path(&mut self, path: &crate::path::Path, color: [f64; 3]) -> Result<()> {
         if path.anchors.len() < 2 { bail!("Draw a path first."); }
+        if self.active_mask().is_some() {
+            // The mask is the target: the path becomes the area Fill paints white or black on it.
+            let area = path.selection(self.width(), self.height())?;
+            self.begin_edit("Fill Path");
+            let saved = self.selection.replace(area);
+            let result = self.fill(color);
+            self.selection = saved;
+            match result { Ok(()) => { self.end_edit(); return Ok(()) } Err(e) => { self.abort_edit(); return Err(e) } }
+        }
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
         let transform = self.renderer.layer(id).transform;
         let (w, h) = (image.width(), image.height());
@@ -1217,8 +1226,30 @@ impl Document {
         if path.anchors.len() < 2 { bail!("Draw a path first."); }
         let step = (settings.diameter * settings.spacing.unwrap_or(0.25).max(0.02) / 2.0).clamp(0.5, 20.0);
         let points = path.flatten(step);
+        if self.active_mask().is_some() {
+            // On a mask the brush paints white or black, whichever the color is nearer.
+            let white = settings.color[0] + settings.color[1] + settings.color[2] > 1.5;
+            return self.replay_mask_stroke(&points, settings, white);
+        }
         self.replay_stroke(&points, settings, StrokeKind::Paint)
     }
+
+    /// A whole stroke on the active mask at once, as `replay_stroke` does for pixels.
+    pub fn replay_mask_stroke(&mut self, points: &[(f64, f64)], settings: &crate::brush::BrushSettings, white: bool) -> Result<()> {
+        let Some((first, rest)) = points.split_first() else { return Ok(()) };
+        self.begin_mask_stroke(*first, settings, white)?;
+        let Some(id) = self.active else { return Ok(()) };
+        if let Some(mut stroke) = self.stroke.take() {
+            let result = stroke.replay(rest).and_then(|_| self.sync_mask_preview(id, &stroke));
+            self.stroke = Some(stroke);
+            if let Err(e) = result { self.cancel_stroke(); return Err(e); }
+        }
+        self.finish_stroke()
+    }
+
+    /// Whether an edit is in progress that a tool call should not run across: a stroke or warp mid-drag,
+    /// a Layer Style window previewing, or an open history edit (Free Transform).
+    pub fn busy_editing(&self) -> bool { self.stroke.is_some() || self.warp.is_some() || self.effects_preview.is_some() || self.history.is_editing() }
 
     /// Marching ants from a Pen path (Make Selection, Ctrl+Return); an open path closes itself.
     pub fn select_path(&mut self, path: &crate::path::Path, mode: Mode) -> Result<()> {
@@ -2282,7 +2313,7 @@ impl Document {
             if layer.image_file.is_some() { if let Some(s) = self.renderer.image(layer.id) { images.insert(layer.id, crate::autosave::pack(s)?); } }
             if layer.mask_file.is_some() { if let Some(s) = self.renderer.mask(layer.id) { masks.insert(layer.id, crate::autosave::pack(s)?); } }
         }
-        Ok(crate::autosave::Snapshot { id: self.document_id, title: title.to_string(), manifest, images, masks })
+        Ok(crate::autosave::Snapshot::new(self.document_id, title.to_string(), manifest, images, masks))
     }
 
     pub fn manifest(&self) -> crate::format::Manifest {
@@ -2689,6 +2720,11 @@ impl Document {
     /// A new layer from image bytes placed at `origin` with `size` (document pixels), above the active one.
     pub fn add_image_layer(&mut self, bytes: &[u8], name: &str, origin: (f64, f64), size: (f64, f64)) -> Result<Uuid> {
         let (surface, _, _) = Self::decode_image_bytes(bytes)?;
+        self.add_image_surface(surface, name, origin, size)
+    }
+
+    /// `add_image_layer` for pixels already decoded.
+    pub fn add_image_surface(&mut self, surface: ImageSurface, name: &str, origin: (f64, f64), size: (f64, f64)) -> Result<Uuid> {
         let (index, parent) = self.insertion();
         let mut record = self.blank_record(name.to_string(), parent);
         record.transform.origin = crate::format::Point(origin.0, origin.1);
@@ -2736,6 +2772,7 @@ impl Document {
     /// transparent where the old canvas was. `offset` overrides the anchor (Crop passes the crop's origin).
     pub fn canvas_size(&mut self, width: i32, height: i32, anchor: usize, fill: Option<[f64; 3]>, offset: Option<(f64, f64)>, name: &str) -> Result<()> {
         if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) || anchor > 8 { bail!("Canvas sizes run from 1 to 30,000 pixels per side."); }
+        if width as i64 * height as i64 > 100_000_000 { bail!("A canvas can hold up to 100 megapixels."); }
         let (ow, oh) = (self.width(), self.height());
         let (dx, dy) = offset.unwrap_or_else(|| ((((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor(), (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor()));
         if width == ow && height == oh && dx == 0.0 && dy == 0.0 { return Ok(()); }
@@ -2785,6 +2822,7 @@ impl Document {
     /// (baking its rotation), masks likewise, and the resolution changes (`ImageResizer`).
     pub fn image_size(&mut self, width: i32, height: i32, resolution: f64, sampling: crate::format::Sampling) -> Result<()> {
         if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) || !(1.0..=9600.0).contains(&resolution) { bail!("Image sizes run from 1 to 30,000 pixels per side, at 1 to 9600 pixels per inch."); }
+        if width as i64 * height as i64 > 100_000_000 { bail!("An image can hold up to 100 megapixels."); }
         self.begin_edit("Image Size");
         match self.resample(width, height, resolution, sampling) {
             Ok(()) => { self.end_edit(); Ok(()) }

@@ -79,18 +79,30 @@ pub fn tools() -> Vec<ToolSpec> {
     ]
 }
 
+/// How long a client waits for one call, including a generation job (the app abandons jobs after
+/// `JOB_TIMEOUT_SECONDS`).
+pub const JOB_TIMEOUT_SECONDS: u64 = 600;
+pub const CALL_TIMEOUT_SECONDS: u64 = JOB_TIMEOUT_SECONDS + 60;
+static NEXT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Sends one call to the running app and waits for its answer.
 pub fn call(tool: &str, args: Value) -> Result<Value> {
     let path = socket_path();
     let mut stream = std::os::unix::net::UnixStream::connect(&path).with_context(|| format!("Compy is not running (no socket at {})", path.display()))?;
-    let request = Request { id: 1, tool: tool.to_string(), args };
+    // A generation can take minutes in fal's queue; the app gives up on a job after ten, so wait a little longer.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(CALL_TIMEOUT_SECONDS)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
+    let id = std::process::id() as u64 * 1000 + NEXT_CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1000;
+    let request = Request { id, tool: tool.to_string(), args };
     let mut line = serde_json::to_string(&request)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
     let mut reader = BufReader::new(stream);
     let mut reply = String::new();
-    reader.read_line(&mut reply).context("reading the app's answer")?;
+    let n = reader.read_line(&mut reply).context("reading the app's answer (it may be busy or gone)")?;
+    if n == 0 { bail!("Compy closed the connection without answering"); }
     let response: Response = serde_json::from_str(reply.trim()).context("parsing the app's answer")?;
+    if response.id != id && response.id != 0 { bail!("Compy answered a different request ({} instead of {id})", response.id); }
     if response.ok { Ok(response.result) } else { bail!("{}", response.result.as_str().unwrap_or("the tool failed")) }
 }
 
@@ -101,10 +113,24 @@ pub fn run_mcp() -> Result<()> {
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() { continue; }
-        let message: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
+        let message: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                // JSON-RPC: a line that does not parse gets a parse error with a null id.
+                writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": format!("parse error: {e}")}}))?;
+                out.flush()?;
+                continue;
+            }
+        };
         let id = message.get("id").cloned();
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        if method == "tools/call" && (params.get("name").and_then(Value::as_str).is_none_or(str::is_empty) || params.get("arguments").is_some_and(|a| !a.is_object() && !a.is_null())) {
+            if id.is_none() { continue; }
+            writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": "tools/call needs a tool name and an arguments object"}}))?;
+            out.flush()?;
+            continue;
+        }
         let reply = match method {
             "initialize" => json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "compy", "version": env!("CARGO_PKG_VERSION")}}),
             "ping" => json!({}),

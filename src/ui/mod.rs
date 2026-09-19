@@ -35,6 +35,19 @@ use uuid::Uuid;
 pub const APP_ID: &str = "co.ericstevens.compositor";
 
 /// One open project and how it is being looked at and worked on.
+/// What the autosave timer and its worker threads share about one document.
+#[derive(Default)]
+pub struct AutosaveState {
+    /// The edit serial of the last autosave that was written in full, plus one (0: none yet).
+    pub done: std::sync::atomic::AtomicU64,
+    pub writing: std::sync::atomic::AtomicBool,
+}
+
+impl AutosaveState {
+    pub fn mark_done(&self, serial: u64) { self.done.store(serial + 1, std::sync::atomic::Ordering::SeqCst); }
+    pub fn is_done(&self, serial: u64) -> bool { self.done.load(std::sync::atomic::Ordering::SeqCst) == serial + 1 }
+}
+
 pub struct Doc {
     pub title: String,
     pub document: Document,
@@ -93,8 +106,9 @@ pub struct Doc {
     pub needs_redraw: bool,
     /// Rulers along the top and left of the canvas in document pixels (Ctrl+R), as Photoshop's.
     pub rulers: bool,
-    /// The edit serial the last autosave captured.
-    pub autosave_serial: Option<u64>,
+    /// The edit serial the last autosave captured (set from the worker once its write succeeded),
+    /// and whether a worker is writing now.
+    pub autosave: std::sync::Arc<AutosaveState>,
     /// Ctrl+H: the selection edges and guides stay out of the way.
     pub hide_extras: bool,
     /// Ctrl+Shift+H: the Move tool's transform handles (Photoshop's Show Transform Controls).
@@ -141,7 +155,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave_serial: None, hide_extras: false, show_handles: true, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -164,7 +178,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave_serial: None, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -431,7 +445,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("fill-foreground", &["<Alt>BackSpace", "<Alt>Delete"], |s| s.with_doc(|doc| { let color = if doc.document.mask_target() { if doc.mask_paint_white { [1.0; 3] } else { [0.0; 3] } } else { doc.brush.color }; doc.document.fill(color) })),
         ("fill-background", &["<Control>BackSpace", "<Control>Delete"], |s| s.with_doc(|doc| { let color = if doc.document.mask_target() { if doc.mask_paint_white { [0.0; 3] } else { [1.0; 3] } } else { doc.background }; doc.document.fill(color) })),
         ("clear", &[], |s| s.with_doc(|doc| { let white = !doc.mask_paint_white; doc.document.clear_selection(white) })),
-        ("open", &["<Control>o"], |s| { let state = s.clone(); dialogs::open_file(s.window.upcast_ref(), move |path| state.open_path(&path)); }),
+        ("open", &["<Control>o"], |s| { let state = s.clone(); dialogs::open_file(s.window.upcast_ref(), move |path| { state.open_path(&path); }); }),
         ("open-project", &["<Control><Shift>o"], |s| s.choose_and_open()),
         ("export-psd", &[], |s| s.export_psd()),
         ("close-tab", &["<Control>w"], |s| s.close_current()),
@@ -616,7 +630,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         let state = state.clone();
         window.connect_close_request(move |_| {
             let any = state.pages.borrow().iter().any(|p| p.canvas.doc().borrow().document.is_modified());
-            if any { state.close_window(); glib::Propagation::Stop } else { glib::Propagation::Proceed }
+            if any { state.close_window(); glib::Propagation::Stop } else { state.shutdown_assistant(); glib::Propagation::Proceed }
         });
     }
     state
@@ -908,7 +922,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
 ];
 
 impl App {
-    fn open_path(self: &Rc<Self>, path: &Path) {
+    fn open_path(self: &Rc<Self>, path: &Path) -> bool {
         match open_document(path) {
             Ok((mut doc, notes)) => {
                 if crate::autosave::is_autosave(path) {
@@ -920,8 +934,9 @@ impl App {
                 } else { recent::remember(path); }
                 self.add_page(doc);
                 if !notes.is_empty() { self.alert("Opened with changes", &format!("{}\n\nSave keeps it as a .comp project; use Export PSD to write a Photoshop file.", notes.join("\n"))); }
+                true
             }
-            Err(error) => self.alert("Could not open", &format!("{error:#}")),
+            Err(error) => { self.alert("Could not open", &format!("{error:#}")); false }
         }
     }
 
@@ -988,7 +1003,7 @@ impl App {
     fn close_window(self: &Rc<Self>) {
         let modified = self.pages.borrow().iter().position(|p| p.canvas.doc().borrow().document.is_modified()).and_then(|i| { let pages = self.pages.borrow(); self.notebook.page_num(&pages[i].root) });
         match modified {
-            None => self.window.destroy(),
+            None => { self.shutdown_assistant(); self.window.destroy() }
             Some(index) => { let state = self.clone(); self.close_page(index, Rc::new(move || state.close_window())); }
         }
     }
@@ -1035,14 +1050,22 @@ impl App {
     /// Ctrl+F: the picture alone on black, full screen; again brings everything back.
     /// Writes an autosave for every document changed since its last one.
     fn autosave_all(&self) {
+        use std::sync::atomic::Ordering;
         for page in self.pages.borrow().iter() {
-            let snapshot = {
-                let mut d = page.canvas.doc().borrow_mut();
-                if !d.document.is_modified() || d.autosave_serial == Some(d.document.edit_serial) { continue; }
+            let (snapshot, state, serial) = {
+                let d = page.canvas.doc().borrow();
+                let serial = d.document.edit_serial;
+                // Nothing to do when unchanged or already written; nothing sensible to write while an edit
+                // (Free Transform, a Layer Style preview, a stroke) is half way; one worker at a time.
+                if !d.document.is_modified() || d.autosave.is_done(serial) || d.document.busy_editing() || d.autosave.writing.load(Ordering::SeqCst) { continue; }
                 let title = d.title.clone();
-                match d.document.autosave_snapshot(&title) { Ok(s) => { d.autosave_serial = Some(d.document.edit_serial); s } Err(e) => { eprintln!("autosave: {e:#}"); continue; } }
+                match d.document.autosave_snapshot(&title) { Ok(s) => (s, d.autosave.clone(), serial), Err(e) => { eprintln!("autosave: {e:#}"); continue; } }
             };
-            std::thread::spawn(move || { if let Err(e) = snapshot.write() { eprintln!("autosave: {e:#}"); } });
+            state.writing.store(true, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                match snapshot.write() { Ok(_) => state.mark_done(serial), Err(e) => eprintln!("autosave: {e:#}") }
+                state.writing.store(false, Ordering::SeqCst);
+            });
         }
     }
 
@@ -1073,6 +1096,9 @@ impl App {
             if let Some(paned) = page.root.downcast_ref::<gtk::Paned>() { if let Some(end) = paned.end_child() { end.set_visible(!on); } }
         }
     }
+
+    /// The window is going: a Claude Code turn still running must not outlive it.
+    fn shutdown_assistant(&self) { if let Some(a) = self.assistant.borrow().as_ref() { a.shutdown(); } }
 
     /// Ctrl+K: Compy, docked under the layers of the current document (made on first use).
     fn open_assistant(self: &Rc<Self>) {
@@ -1230,7 +1256,7 @@ impl App {
                 Ok(()) => {
                     recent::remember(path);
                     crate::autosave::discard(d.document.document_id);
-                    d.autosave_serial = Some(d.document.edit_serial);
+                    d.autosave.mark_done(d.document.edit_serial);
                     saved = Some(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                     d.document.path = Some(path.to_path_buf());
                     d.title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());

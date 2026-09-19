@@ -31,12 +31,23 @@ fn unpack(p: Packed) -> Result<ImageSurface> {
 }
 
 /// Everything an autosave needs, taken on the main thread.
-pub struct Snapshot { pub id: Uuid, pub title: String, pub manifest: Manifest, pub images: HashMap<Uuid, Packed>, pub masks: HashMap<Uuid, Packed> }
+pub struct Snapshot { pub id: Uuid, pub title: String, pub manifest: Manifest, pub images: HashMap<Uuid, Packed>, pub masks: HashMap<Uuid, Packed>, discards: u64 }
+
+/// How many times each document's autosave has been discarded, so a write that finishes after a
+/// discard (the user saved or closed while the worker ran) removes what it wrote.
+static DISCARDS: std::sync::Mutex<Option<HashMap<Uuid, u64>>> = std::sync::Mutex::new(None);
+
+fn discards(id: Uuid) -> u64 { DISCARDS.lock().ok().and_then(|d| d.as_ref().and_then(|m| m.get(&id).copied())).unwrap_or(0) }
 
 impl Snapshot {
+    pub fn new(id: Uuid, title: String, manifest: Manifest, images: HashMap<Uuid, Packed>, masks: HashMap<Uuid, Packed>) -> Snapshot {
+        Snapshot { id, title, manifest, images, masks, discards: discards(id) }
+    }
+
     pub fn path(&self) -> PathBuf { path_for(self.id) }
 
-    /// Writes the package; meant for a worker thread.
+    /// Writes the package; meant for a worker thread. The package is staged and renamed into place, so a
+    /// reader never sees a half-written one.
     pub fn write(self) -> Result<PathBuf> {
         let target = self.path();
         std::fs::create_dir_all(dir())?;
@@ -46,6 +57,11 @@ impl Snapshot {
         for (id, p) in self.masks { masks.insert(id, unpack(p)?); }
         crate::format::save(&target, &self.manifest, &images, &masks)?;
         std::fs::write(title_path(self.id), self.title)?;
+        if discards(self.id) != self.discards {
+            // Discarded while this was being written: it must not come back.
+            discard(self.id);
+            anyhow::bail!("discarded while writing");
+        }
         Ok(target)
     }
 }
@@ -55,6 +71,7 @@ fn title_path(id: Uuid) -> PathBuf { dir().join(format!("{}.title", crate::forma
 
 /// Removes a document's autosave (after a save, or a close the user chose).
 pub fn discard(id: Uuid) {
+    if let Ok(mut d) = DISCARDS.lock() { *d.get_or_insert_with(HashMap::new).entry(id).or_insert(0) += 1; }
     let _ = std::fs::remove_dir_all(path_for(id));
     let _ = std::fs::remove_file(title_path(id));
 }

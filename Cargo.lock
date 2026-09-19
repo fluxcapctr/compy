@@ -218,6 +218,7 @@ dependencies = [
  "cc",
  "gtk4",
  "image",
+ "libc",
  "libheif-rs",
  "ort",
  "pangocairo",

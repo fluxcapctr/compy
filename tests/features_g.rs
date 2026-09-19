@@ -382,3 +382,45 @@ fn pen_paths_fill_stroke_and_select() {
     assert!(d.select_path(&two, Mode::Replace).is_err());
     let _ = id;
 }
+
+#[test]
+fn pen_fill_and_stroke_target_the_mask_when_it_is_the_target() {
+    use compositor::path::{Anchor, Path};
+    let mut d = Document::blank(60, 60, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 60.0, 60.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.add_mask(true).unwrap();
+    d.set_mask_target(true);
+    let mut path = Path::default();
+    path.anchors.push(Anchor::corner((10.0, 10.0)));
+    path.anchors.push(Anchor::corner((50.0, 10.0)));
+    path.anchors.push(Anchor::corner((50.0, 50.0)));
+    path.anchors.push(Anchor::corner((10.0, 50.0)));
+    path.closed = true;
+    // Filling black hides the layer inside the path: the composite there goes transparent, the pixels stay red.
+    d.fill_path(&path, [0.0, 0.0, 0.0]).unwrap();
+    assert_eq!(alpha_at(&mut d, 30, 30), 0, "hidden by the mask inside the path");
+    assert_eq!(alpha_at(&mut d, 5, 5), 255, "shown outside it");
+    assert_eq!(d.undo_name(), Some("Fill Path"));
+    assert_eq!(rgb_at(&mut d, 30, 30)[3], 0);
+    d.undo();
+    assert_eq!(alpha_at(&mut d, 30, 30), 255, "undone as one step");
+    // Stroking with a black brush along the path hides a band under the path, not the inside.
+    d.set_mask_target(true);
+    let mut brush = compositor::brush::BrushSettings::default();
+    brush.diameter = 6.0;
+    brush.color = [0.0, 0.0, 0.0];
+    d.stroke_path(&path, &brush).unwrap();
+    assert!(alpha_at(&mut d, 30, 50) < 40, "the edge is hidden: {}", alpha_at(&mut d, 30, 50));
+    assert_eq!(alpha_at(&mut d, 30, 30), 255, "the inside is not");
+    assert_eq!(d.undo_name(), Some("Paint Mask"));
+}
+
+#[test]
+fn image_and_canvas_size_stop_at_a_hundred_megapixels() {
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    assert!(d.image_size(20_000, 20_000, 72.0, compositor::format::Sampling::High).is_err());
+    assert!(d.canvas_size(20_000, 20_000, 4, None, None, "Canvas Size").is_err());
+    assert_eq!(d.width(), 40, "nothing changed");
+    assert!(d.image_size(9_000, 9_000, 72.0, compositor::format::Sampling::High).is_ok());
+}

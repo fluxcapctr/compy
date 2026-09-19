@@ -114,6 +114,7 @@ mod tests {
         let sel = p.selection(60, 60).unwrap();
         assert!(sel.contains(30.0, 30.0));
         assert!(!sel.contains(55.0, 5.0));
-        assert_eq!(p.flatten(5.0).len(), p.flatten(5.0).len());
+        assert!(p.flatten(5.0).len() < p.flatten(2.0).len(), "a coarser step gives fewer points");
+        assert_eq!(Path { anchors: vec![Anchor::corner((1.0, 1.0))], closed: false }.flatten(2.0).len(), 1, "one point flattens to itself");
     }
 }

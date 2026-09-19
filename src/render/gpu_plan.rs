@@ -18,6 +18,17 @@ fn blend_id(mode: BlendMode) -> u32 {
 
 fn slot(source: Source) -> u8 { match source { Source::Image => 0, Source::Mask => 1, Source::Preview => 2, Source::MaskPreview => 3 } }
 
+/// A number that belongs to one surface for its whole life, unlike its pointer, which the allocator
+/// hands to the next surface once this one is freed (a stale texture would then pass for current).
+fn identity(surface: &ImageSurface) -> usize {
+    static KEY: cairo::UserDataKey<usize> = cairo::UserDataKey::new();
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    if let Some(id) = surface.user_data(&KEY) { return *id; }
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = surface.set_user_data(&KEY, std::rc::Rc::new(id));
+    id
+}
+
 impl Renderer {
     /// A plan for the viewport whose device pixel centers map to document points by `device_to_document`,
     /// `width` x `height` device pixels; `max_dimension` is the GPU's texture limit.
@@ -64,10 +75,10 @@ impl Renderer {
         Ok(Some(Plan { items, width, height }))
     }
 
-    fn placed(&self, id: Uuid, source: Source, surface: &ImageSurface, grid: &Transform, device_to_document: &Matrix, nearest: bool, dirty: Option<(i32, i32, i32, i32)>) -> Result<Placed> {
+        fn placed(&self, id: Uuid, source: Source, surface: &ImageSurface, grid: &Transform, device_to_document: &Matrix, nearest: bool, dirty: Option<(i32, i32, i32, i32)>) -> Result<Placed> {
         let to_layer = crate::selection::document_to_layer(grid, surface.width(), surface.height())?;
         let to_texel = Matrix::multiply(device_to_document, &to_layer);
-        Ok(Placed { key: SurfaceKey { id, slot: slot(source), ptr: surface.to_raw_none() as usize }, surface: surface.clone(), to_texel: Affine::from_cairo(&to_texel), nearest, dirty })
+        Ok(Placed { key: SurfaceKey { id, slot: slot(source), ptr: identity(surface) }, surface: surface.clone(), to_texel: Affine::from_cairo(&to_texel), nearest, dirty })
     }
 
     fn layer_draw(&mut self, layer: &Layer, folders: Vec<MaskDraw>, device_to_document: &Matrix) -> Result<Option<LayerDraw>> {
@@ -85,7 +96,7 @@ impl Renderer {
                     let Some(surface) = surface else { return Ok(None) };
                     let mut to_texel = *device_to_document;
                     to_texel = Matrix::multiply(&to_texel, &Matrix::new(1.0, 0.0, 0.0, 1.0, -s.x, -s.y));
-                    Ok(Some(Placed { key: SurfaceKey { id, slot, ptr: surface.to_raw_none() as usize }, surface: surface.clone(), to_texel: Affine::from_cairo(&to_texel), nearest: false, dirty: None }))
+                    Ok(Some(Placed { key: SurfaceKey { id, slot, ptr: identity(surface) }, surface: surface.clone(), to_texel: Affine::from_cairo(&to_texel), nearest: false, dirty: None }))
                 };
                 Some(EffectsDraw { below: place(&s.below, 4)?, inside: place(&s.inside, 5)?, above: place(&s.above, 6)? })
             }

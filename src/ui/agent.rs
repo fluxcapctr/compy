@@ -18,17 +18,40 @@ use std::sync::mpsc;
 /// A tool call waiting for the GTK thread, with where to send its answer.
 struct Pending { request: Request, reply: mpsc::Sender<Response> }
 
-/// A long job (generation) running on a thread; the socket thread polls until it is done.
-struct Job { status: std::sync::Arc<std::sync::Mutex<(String, Option<Result<Value, String>>)>> }
+/// A long job (generation) running on a thread; the socket thread polls until it is done. The job
+/// remembers the document it started on, the layer it came from and the selection it was given, so
+/// the result lands there and not on whatever is current when it finishes.
+struct Job {
+    status: std::sync::Arc<std::sync::Mutex<(String, Option<Result<Value, String>>)>>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    document: uuid::Uuid,
+    source: Option<uuid::Uuid>,
+    selection: Option<crate::selection::Selection>,
+}
 
 thread_local! {
     static JOBS: RefCell<std::collections::HashMap<u64, Job>> = RefCell::new(std::collections::HashMap::new());
     static NEXT_JOB: Cell<u64> = const { Cell::new(1) };
 }
 
+/// Whether the client on `stream` has hung up (its end closed) without the server reading anything.
+fn client_gone(stream: &std::os::unix::net::UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut byte = [0u8; 1];
+    // A peek that does not wait: 0 means the peer closed; an error other than "nothing yet" means gone.
+    let n = unsafe { libc::recv(stream.as_raw_fd(), byte.as_mut_ptr() as *mut libc::c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    if n == 0 { return true; }
+    if n > 0 { return false; }
+    let e = std::io::Error::last_os_error();
+    e.kind() != std::io::ErrorKind::WouldBlock && e.kind() != std::io::ErrorKind::Interrupted
+}
+
 /// Starts listening. Requests arrive on a thread and are answered on the GTK thread in turn.
 pub fn serve(app: Rc<App>) {
     let path = agent::socket_path();
+    // Another Compy already listening keeps its socket: unlinking it would cut that app off from its
+    // own assistant. This one runs without an agent.
+    if std::os::unix::net::UnixStream::connect(&path).is_ok() { eprintln!("agent: another Compy is already serving {}; this window has no assistant", path.display()); return; }
     let _ = std::fs::remove_file(&path);
     let listener = match std::os::unix::net::UnixListener::bind(&path) { Ok(l) => l, Err(e) => { eprintln!("agent: cannot listen on {}: {e}", path.display()); return; } };
     let (tx, rx) = mpsc::channel::<Pending>();
@@ -37,9 +60,11 @@ pub fn serve(app: Rc<App>) {
             let Ok(stream) = stream else { continue };
             let tx = tx.clone();
             std::thread::spawn(move || {
-                let mut reader = BufReader::new(stream.try_clone().expect("socket clone"));
+                let Ok(clone) = stream.try_clone() else { return };
+                let mut reader = BufReader::new(clone);
                 let mut line = String::new();
                 while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    if !line.ends_with('\n') { break; }
                     let response = match serde_json::from_str::<Request>(line.trim()) {
                         Ok(request) => {
                             let id = request.id;
@@ -47,9 +72,19 @@ pub fn serve(app: Rc<App>) {
                             if tx.send(Pending { request, reply: reply_tx }).is_err() { break; }
                             let mut response = reply_rx.recv().unwrap_or(Response { id, ok: false, result: json!("the app went away") });
                             // A job id means the work continues on a thread: wait for it here, off the GTK thread.
+                            let started = std::time::Instant::now();
                             while response.ok && response.result.get("job").is_some() {
-                                std::thread::sleep(std::time::Duration::from_millis(300));
                                 let job = response.result["job"].as_u64().unwrap_or(0);
+                                let gone = client_gone(&stream);
+                                if gone || started.elapsed().as_secs() > agent::JOB_TIMEOUT_SECONDS {
+                                    // Nobody is waiting (Claude was stopped, its MCP server with it), or it has
+                                    // taken too long: cancel rather than pay for a result no one asked to keep.
+                                    let (c_tx, c_rx) = mpsc::channel();
+                                    if tx.send(Pending { request: Request { id, tool: "_cancel".into(), args: json!({"job": job}) }, reply: c_tx }).is_ok() { let _ = c_rx.recv(); }
+                                    response = Response { id, ok: false, result: json!(if gone { "the client went away; the job was cancelled" } else { "the job took too long and was cancelled" }) };
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(300));
                                 let (poll_tx, poll_rx) = mpsc::channel();
                                 if tx.send(Pending { request: Request { id, tool: "_poll".into(), args: json!({"job": job}) }, reply: poll_tx }).is_err() { break; }
                                 response = poll_rx.recv().unwrap_or(Response { id, ok: false, result: json!("the app went away") });
@@ -58,8 +93,8 @@ pub fn serve(app: Rc<App>) {
                         }
                         Err(e) => Response { id: 0, ok: false, result: json!(format!("bad request: {e}")) },
                     };
-                    let mut s = stream.try_clone().expect("socket clone");
-                    let _ = writeln!(s, "{}", serde_json::to_string(&response).unwrap_or_default());
+                    let Ok(mut s) = stream.try_clone() else { break };
+                    if writeln!(s, "{}", serde_json::to_string(&response).unwrap_or_default()).is_err() { break; }
                     line.clear();
                 }
             });
@@ -76,6 +111,11 @@ pub fn serve(app: Rc<App>) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// The undo step a tool's call makes: "new_layer" reads as "New Layer".
+fn step_name(tool: &str) -> String {
+    tool.split('_').map(|w| { let mut c = w.chars(); match c.next() { Some(f) => f.to_uppercase().collect::<String>() + c.as_str(), None => String::new() } }).collect::<Vec<_>>().join(" ")
 }
 
 fn num(args: &Value, key: &str) -> Option<f64> { args.get(key).and_then(Value::as_f64) }
@@ -158,25 +198,46 @@ impl App {
                 None => bail!("no such job"),
                 Some((_, None)) => Ok(json!({"job": job})),
                 Some((_, Some(result))) => {
-                    JOBS.with(|jobs| jobs.borrow_mut().remove(&job));
+                    let Some(job) = JOBS.with(|jobs| jobs.borrow_mut().remove(&job)) else { bail!("no such job") };
                     // The finished generation lands on the document here, on the GTK thread.
                     let value = result.map_err(|e| anyhow::anyhow!("{e}"))?;
-                    if value.get("images").is_some() { self.agent_land_fill(&value) } else { Ok(value) }
+                    if value.get("images").is_some() { self.agent_land_fill(&value, &job) } else { Ok(value) }
                 }
             };
         }
+        if tool == "_cancel" {
+            let job = args.get("job").and_then(Value::as_u64).unwrap_or(0);
+            JOBS.with(|jobs| { if let Some(j) = jobs.borrow_mut().remove(&job) { j.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); } });
+            return Ok(json!("cancelled"));
+        }
         match tool {
-            "open" => { let path = text(args, "path").ok_or_else(|| anyhow::anyhow!("path needed"))?; self.open_path(std::path::Path::new(&path)); return Ok(json!("opened")); }
+            "open" => {
+                let path = text(args, "path").ok_or_else(|| anyhow::anyhow!("path needed"))?;
+                if !self.open_path(std::path::Path::new(&path)) { bail!("Could not open {path}; the user has been shown why."); }
+                return Ok(json!("opened"));
+            }
             "new_document" => { let (w, h) = (num(args, "width").unwrap_or(1920.0) as i32, num(args, "height").unwrap_or(1080.0) as i32); let document = Document::blank(w, h, 72.0)?; self.add_page(Doc::from(document, "Untitled")); return Ok(json!("created")); }
             _ => {}
         }
         if self.notebook.current_page().is_none() { bail!("Nothing is open. Use open or new_document first."); }
+        // Tools that only look, navigate or write files run as they are; every other call changes the
+        // document as one undoable step, all of it or none.
+        let reads = matches!(tool, "state" | "snapshot" | "select_layer" | "zoom" | "export" | "save" | "undo" | "redo");
         let mut outcome: Result<Value> = Ok(Value::Null);
         let mut refresh = true;
         self.with_current(|p| {
+            // Typing on the canvas ends first, as a click elsewhere would.
+            if !reads && p.canvas.text_editing() { p.canvas.finish_text_edit(); }
             let doc = p.canvas.doc();
             let r: Result<Value> = (|| {
                 let mut d = doc.borrow_mut();
+                if !reads {
+                    // A floating Free Transform lands first, as Return would; anything else half done waits.
+                    if d.document.floating.is_some() { d.document.commit_free_transform()?; }
+                    if d.document.busy_editing() { bail!("The user is in the middle of an edit (a dialog or a stroke); try again when they are done."); }
+                    d.document.begin_edit(&step_name(tool));
+                }
+                let result: Result<Value> = (|| {
                 let dd = &mut d.document;
                 Ok(match tool {
                     "state" => { refresh = false; state_of(&d) }
@@ -198,9 +259,10 @@ impl App {
                     "rename_layer" => { let id = dd.active.ok_or_else(|| anyhow::anyhow!("no active layer"))?; dd.rename_layer(id, &text(args, "name").unwrap_or_default()); json!("renamed") }
                     "set_layer" => {
                         let id = dd.active.ok_or_else(|| anyhow::anyhow!("no active layer"))?;
+                        let blend = text(args, "blend").map(|b| blend_from(&b).ok_or_else(|| anyhow::anyhow!("unknown blend mode {b}"))).transpose()?;
                         if let Some(v) = flag(args, "visible") { dd.set_visible(id, v); }
                         if let Some(o) = num(args, "opacity") { dd.set_opacity(id, o.clamp(0.0, 1.0)); }
-                        if let Some(b) = text(args, "blend") { let mode = blend_from(&b).ok_or_else(|| anyhow::anyhow!("unknown blend mode {b}"))?; dd.set_blend_mode(id, mode); }
+                        if let Some(mode) = blend { dd.set_blend_mode(id, mode); }
                         json!("set")
                     }
                     "place_layer" => {
@@ -262,12 +324,26 @@ impl App {
                         if let Some(b) = flag(args, "bold") { style.bold = b; }
                         if let Some(i) = flag(args, "italic") { style.italic = i; }
                         if let Some(a) = text(args, "align") { style.align = match a.as_str() { "center" => 1, "right" => 2, _ => 0 }; }
+                        if style.text.trim().is_empty() { bail!("text needed: a type layer with nothing in it is dropped, as the Type tool does"); }
                         let dd = &mut d.document;
                         if tool == "set_text" { let id = dd.active.unwrap(); dd.set_text(id, &style)?; json!("text set") } else { let id = dd.add_text_layer(&style, num(args, "x").unwrap_or(40.0), num(args, "y").unwrap_or(40.0))?; json!({"id": crate::format::upper(id)}) }
                     }
                     "shape_layer" => { let ellipse = text(args, "kind").unwrap_or_default() == "ellipse"; let color = text(args, "color").and_then(|c| parse_color(&c)).unwrap_or(d.brush.color); let dd = &mut d.document; let id = dd.add_shape_layer(ellipse, (num(args, "x").unwrap_or(0.0), num(args, "y").unwrap_or(0.0), num(args, "width").unwrap_or(100.0), num(args, "height").unwrap_or(100.0)), color, num(args, "corner_radius").unwrap_or(0.0))?; json!({"id": crate::format::upper(id)}) }
                     "layer_style" => {
                         let id = dd.active.ok_or_else(|| anyhow::anyhow!("no active layer"))?;
+                        const KEYS: [&str; 7] = ["drop_shadow", "inner_shadow", "outer_glow", "inner_glow", "bevel", "stroke", "color_overlay"];
+                        let Some(map) = args.as_object() else { bail!("layer_style takes an object of effects") };
+                        for (k, v) in map {
+                            if !KEYS.contains(&k.as_str()) { bail!("unknown effect {k}; the effects are {}", KEYS.join(", ")); }
+                            let Some(fields) = v.as_object() else { bail!("{k} must be an object of settings") };
+                            for (f, fv) in fields {
+                                match f.as_str() {
+                                    "color" => { if fv.as_str().and_then(parse_color).is_none() { bail!("{k}.color must look like #rrggbb"); } }
+                                    "opacity" | "angle" | "distance" | "size" | "depth" | "altitude" | "style" | "position" => { if !fv.is_number() { bail!("{k}.{f} must be a number"); } }
+                                    other => bail!("{k}.{other} is not a setting"),
+                                }
+                            }
+                        }
                         let mut e = crate::effects::Effects::default();
                         let color = |v: &Value, key: &str, fallback: [f64; 3]| v.get(key).and_then(Value::as_str).and_then(parse_color).unwrap_or(fallback);
                         let f = |v: &Value, key: &str, fallback: f64| v.get(key).and_then(Value::as_f64).unwrap_or(fallback);
@@ -320,14 +396,15 @@ impl App {
                         let (image_png, mask_png, window, _) = dd.genfill_inputs(true)?;
                         let request = crate::genfill::Request { model: model.clone(), prompt, count, seed: None, image_png, mask_png };
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
+                        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
-                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone() }));
+                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: dd.selection.clone() }));
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
                                 let backend = crate::genfill::Fal { key };
                                 let progress = |t: &str| { if let Ok(mut s) = status.lock() { s.0 = t.to_string(); } };
-                                let outcome = backend.generate(&request, &progress, &|| false).map_err(|e| format!("{e:#}"));
+                                let outcome = backend.generate(&request, &progress, &|| cancelled.load(std::sync::atomic::Ordering::Relaxed)).map_err(|e| format!("{e:#}"));
                                 let value = outcome.map(|images| json!({"window": {"x": window.0, "y": window.1, "width": window.2, "height": window.3}, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": cost}));
                                 if let Ok(mut s) = status.lock() { s.1 = Some(value); }
                             });
@@ -369,14 +446,15 @@ impl App {
                             }
                         };
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
+                        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
-                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone() }));
+                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: None }));
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
                                 let backend = crate::genfill::Fal { key };
                                 let progress = |t: &str| { if let Ok(mut s) = status.lock() { s.0 = t.to_string(); } };
-                                let outcome = backend.run(&model, body, &progress, &|| false).map_err(|e| format!("{e:#}"));
+                                let outcome = backend.run(&model, body, &progress, &|| cancelled.load(std::sync::atomic::Ordering::Relaxed)).map_err(|e| format!("{e:#}"));
                                 let value = outcome.map(|images| json!({"mode": "layer", "place": {"x": place.0, "y": place.1, "width": place.2, "height": place.3}, "name": name, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": cost}));
                                 if let Ok(mut s) = status.lock() { s.1 = Some(value); }
                             });
@@ -386,41 +464,49 @@ impl App {
                     }
                     other => bail!("unknown tool {other}"),
                 })
+                })();
+                if !reads { match &result { Ok(_) => d.document.end_edit(), Err(_) => d.document.abort_edit() } }
+                result
             })();
             outcome = r;
             if refresh { p.refresh(); }
             if tool == "zoom" { match num(args, "percent") { Some(pct) => p.canvas.zoom_to(pct / 100.0), None => p.canvas.fit() } }
         });
-        // A finished generation lands on the document here, on the GTK thread, when the poll sees it.
-        if let Ok(v) = &outcome { if v.get("images").is_some() { return self.agent_land_fill(v); } }
         outcome
     }
 
-    /// Puts the first generated image on the document as Generative Fill does; the rest are returned
-    /// only as a count, since the user picks variations in the panel.
-    fn agent_land_fill(self: &Rc<Self>, v: &Value) -> Result<Value> {
+    /// Runs `f` on the page holding document `id`; false when it is no longer open.
+    fn with_document(&self, id: uuid::Uuid, f: impl FnOnce(&super::Page)) -> bool {
+        let pages = self.pages.borrow();
+        match pages.iter().find(|p| p.canvas.doc().borrow().document.document_id == id) { Some(page) => { f(page); true } None => false }
+    }
+
+    /// Puts the first generated image on the document the job started on, as Generative Fill does; the
+    /// rest are returned only as a count, since the user picks variations in the panel.
+    fn agent_land_fill(self: &Rc<Self>, v: &Value, job: &Job) -> Result<Value> {
         let images = v.get("images").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(first) = images.first().and_then(Value::as_str) else { bail!("no image came back") };
+        let bytes = crate::genfill::base64_decode(first)?;
+        let mut result = Err(anyhow::anyhow!("The document this was made for has been closed; the picture was not kept."));
         if v.get("mode").and_then(Value::as_str) == Some("layer") {
-            // A generated, edited, upscaled or relit picture: a new layer where its source was.
-            let Some(first) = images.first().and_then(Value::as_str) else { bail!("no image came back") };
-            let png = crate::genfill::base64_decode(first)?;
+            // A generated, edited, upscaled or relit picture: a new layer above the layer it came from.
+            let (surface, iw, ih) = Document::decode_image_bytes(&bytes)?;
             let p = v.get("place").cloned().unwrap_or(json!({}));
             let name = v.get("name").and_then(Value::as_str).unwrap_or("Generated").to_string();
             // The picture fits inside the place, centered, keeping its own proportions: models that
             // pick from a list of aspect ratios return something close to, not exactly, the request.
-            let (mut x, mut y, mut pw, mut ph) = (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0), p["width"].as_f64().unwrap_or(100.0), p["height"].as_f64().unwrap_or(100.0));
-            if let Some((iw, ih)) = crate::genfill::png_size(&png) {
-                let scale = (pw / iw as f64).min(ph / ih as f64);
-                let (fw, fh) = (iw as f64 * scale, ih as f64 * scale);
-                x += (pw - fw) / 2.0;
-                y += (ph - fh) / 2.0;
-                pw = fw;
-                ph = fh;
-            }
-            let mut result = Ok(Value::Null);
-            self.with_current(|page| {
+            let (mut x, mut y, mut pw, mut ph) = (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0), p["width"].as_f64().unwrap_or(0.0), p["height"].as_f64().unwrap_or(0.0));
+            if !(pw >= 1.0 && ph >= 1.0) { pw = iw as f64; ph = ih as f64; }
+            let scale = (pw / iw as f64).min(ph / ih as f64);
+            let (fw, fh) = (iw as f64 * scale, ih as f64 * scale);
+            x += (pw - fw) / 2.0;
+            y += (ph - fh) / 2.0;
+            pw = fw;
+            ph = fh;
+            self.with_document(job.document, |page| {
                 let mut d = page.canvas.doc().borrow_mut();
-                result = d.document.add_image_layer(&png, &name, (x, y), (pw, ph)).map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
+                if let Some(src) = job.source { if d.document.has_layer(src) { d.document.select_layer(Some(src)); } }
+                result = d.document.add_image_surface(surface, &name, (x, y), (pw, ph)).map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
                 drop(d);
                 page.refresh();
             });
@@ -428,10 +514,19 @@ impl App {
         }
         let window = v.get("window").ok_or_else(|| anyhow::anyhow!("no window"))?;
         let rect = (window["x"].as_i64().unwrap_or(0) as i32, window["y"].as_i64().unwrap_or(0) as i32, window["width"].as_i64().unwrap_or(0) as i32, window["height"].as_i64().unwrap_or(0) as i32);
-        let Some(first) = images.first().and_then(Value::as_str) else { bail!("no image came back") };
-        let png = crate::genfill::base64_decode(first)?;
-        let mut result = Ok(Value::Null);
-        self.with_current(|p| { let mut d = p.canvas.doc().borrow_mut(); result = d.document.apply_genfill(&png, rect, "Generative Fill").map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")})); drop(d); p.refresh(); });
+        self.with_document(job.document, |page| {
+            let mut d = page.canvas.doc().borrow_mut();
+            // The layer's mask comes from the selection the model was given, whatever is selected now.
+            let dd = &mut d.document;
+            dd.begin_edit("Generative Fill");
+            let current = std::mem::replace(&mut dd.selection, job.selection.clone());
+            let landed = dd.apply_genfill(&bytes, rect, "Generative Fill");
+            dd.selection = current;
+            match &landed { Ok(_) => dd.end_edit(), Err(_) => dd.abort_edit() }
+            result = landed.map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
+            drop(d);
+            page.refresh();
+        });
         result
     }
 }
@@ -459,6 +554,8 @@ pub struct Assistant {
     queue: RefCell<Vec<String>>,
     /// The running Claude Code process, so a stuck turn can be stopped.
     child_pid: Cell<Option<u32>>,
+    /// Counts turns; a turn's timer and process act only while this still names their turn.
+    turn: Cell<u64>,
     replied: Cell<bool>,
     app: Rc<App>,
 }
@@ -510,7 +607,7 @@ impl Assistant {
         row.append(&send);
         body.append(&row);
         content.append(&body);
-        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), replied: Cell::new(false), app });
+        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), turn: Cell::new(0), replied: Cell::new(false), app });
         { let t = this.clone(); fresh.connect_clicked(move |_| t.reset()); }
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
         { let t = this.clone(); entry.connect_changed(move |_| t.entry_changed.set(Some(std::time::Instant::now()))); }
@@ -579,7 +676,8 @@ impl Assistant {
         glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
             let Some(state) = voice_state() else { return glib::ControlFlow::Continue };
             let previous = this.voice_state.replace(state.clone());
-            if state == "recording" && previous != "recording" && this.app.window.is_active() {
+            let focused = this.app.window.is_active() || this.window.borrow().as_ref().is_some_and(|w| w.is_active());
+            if state == "recording" && previous != "recording" && focused {
                 this.reveal();
                 this.dictating.set(true);
                 this.entry_changed.set(None);
@@ -602,6 +700,12 @@ impl Assistant {
         let mut end = buffer.end_iter();
         let prefix = match who { "you" => "You: ", "claude" => "Compy: ", _ => "" };
         buffer.insert(&mut end, &format!("{prefix}{text}\n\n"));
+        // A long session stays light: the oldest lines go once the transcript passes a few hundred kilobytes.
+        if buffer.char_count() > 300_000 {
+            let (mut a, mut b) = (buffer.start_iter(), buffer.iter_at_offset(100_000));
+            b.forward_line();
+            buffer.delete(&mut a, &mut b);
+        }
         let mark = buffer.create_mark(None, &buffer.end_iter(), false);
         self.transcript.scroll_to_mark(&mark, 0.0, true, 0.0, 1.0);
     }
@@ -624,7 +728,7 @@ impl Assistant {
 
     /// Forgets the conversation; the next message starts a new one. A running turn is stopped.
     pub fn reset(&self) {
-        if let Some(pid) = self.child_pid.take() { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); }
+        self.stop_turn();
         *self.session.borrow_mut() = None;
         self.queue.borrow_mut().clear();
         self.busy.set(false);
@@ -633,13 +737,25 @@ impl Assistant {
         self.status.set_label("New conversation.");
     }
 
+    /// Stops the running turn, if any: its process is killed and its timer, seeing a new turn number,
+    /// stops touching the shared state.
+    fn stop_turn(&self) {
+        self.turn.set(self.turn.get() + 1);
+        if let Some(pid) = self.child_pid.take() { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); }
+    }
+
+    /// The window is closing: Claude Code must not keep running without it.
+    pub fn shutdown(&self) { self.stop_turn(); self.busy.set(false); }
+
     fn submit(self: &Rc<Self>) {
         let message = self.entry.text().trim().to_string();
         if message.is_empty() { return; }
         self.entry.set_text("");
+        // Sent by hand or by dictation, either way the recording is spent.
+        self.dictating.set(false);
+        self.append("you", &message);
         if self.busy.get() {
             // Compy is mid-turn: keep the message and send it as soon as the turn ends.
-            self.append("you", &message);
             self.queue.borrow_mut().push(message);
             self.status.set_label("Compy is still working; that goes next.");
             return;
@@ -647,25 +763,26 @@ impl Assistant {
         self.send_now(message);
     }
 
+    /// Runs one turn of Claude Code for `message`, which is already in the transcript.
     fn send_now(self: &Rc<Self>, message: String) {
         let Some(claude) = claude_binary() else { self.append("system", "Claude Code is not installed."); return };
-        if !self.queue.borrow().iter().any(|m| *m == message) { self.append("you", &message); }
         self.replied.set(false);
         self.busy.set(true);
         self.send.set_sensitive(false);
         self.status.set_label("Compy is thinking…");
+        let fail = |this: &Self, what: String| { this.append("system", &what); this.busy.set(false); this.send.set_sensitive(true); };
         // The MCP server is this same binary, pointed at the running app.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("compositor"));
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config")).join("compositor");
-        let _ = std::fs::create_dir_all(&config_dir);
         let config = config_dir.join("mcp.json");
-        let _ = std::fs::write(&config, json!({"mcpServers": {"compy": {"command": exe.display().to_string(), "args": ["mcp"]}}}).to_string());
         // Compy's own design skill lives in a folder of its own, which the session runs in so Claude Code
         // finds it as a project skill.
         let agent_dir = config_dir.join("agent");
         let skill_dir = agent_dir.join(".claude/skills/compy-design");
-        let _ = std::fs::create_dir_all(&skill_dir);
-        let _ = std::fs::write(skill_dir.join("SKILL.md"), include_str!("../../assets/compy-design.md"));
+        let prepared = std::fs::create_dir_all(&skill_dir)
+            .and_then(|_| std::fs::write(&config, json!({"mcpServers": {"compy": {"command": exe.display().to_string(), "args": ["mcp"]}}}).to_string()))
+            .and_then(|_| std::fs::write(skill_dir.join("SKILL.md"), include_str!("../../assets/compy-design.md")));
+        if let Err(e) = prepared { fail(self, format!("Could not write Compy's files under {}: {e}", config_dir.display())); return; }
         let (resume, session_id) = match self.session.borrow().clone() { Some(id) => (true, id), None => (false, uuid::Uuid::new_v4().to_string()) };
         *self.session.borrow_mut() = Some(session_id.clone());
         let context = self.context();
@@ -675,9 +792,13 @@ impl Assistant {
         command.current_dir(&agent_dir);
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let (tx, rx) = mpsc::channel::<(String, String)>();
+        let turn = self.turn.get() + 1;
+        self.turn.set(turn);
+        let pid;
         match command.spawn() {
             Ok(mut child) => {
-                self.child_pid.set(Some(child.id()));
+                pid = child.id();
+                self.child_pid.set(Some(pid));
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let tx2 = tx.clone();
@@ -688,20 +809,23 @@ impl Assistant {
                 });
                 std::thread::spawn(move || { if let Some(err) = stderr { for line in BufReader::new(err).lines().map_while(Result::ok) { let _ = tx2.send(("err".into(), line)); } } });
             }
-            Err(e) => { self.append("system", &format!("Could not start Claude Code: {e}")); self.busy.set(false); self.send.set_sensitive(true); return; }
+            Err(e) => { fail(self, format!("Could not start Claude Code: {e}")); return; }
         }
         let this = self.clone();
-        let started = std::time::Instant::now();
+        let mut quiet_since = std::time::Instant::now();
         let last_error = Rc::new(RefCell::new(String::new()));
         glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
-            // A turn that goes quiet for five minutes is stuck: stop it and say so.
-            if started.elapsed() > std::time::Duration::from_secs(300) { if let Some(pid) = this.child_pid.take() { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); } }
+            // A newer turn (or a reset) owns the panel now: this timer is done, its process already stopped.
+            if this.turn.get() != turn { return glib::ControlFlow::Break; }
+            // A turn that says nothing for five minutes is stuck: stop it and say so.
+            if quiet_since.elapsed() > std::time::Duration::from_secs(300) && this.child_pid.get() == Some(pid) { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); this.child_pid.set(None); }
             while let Ok((kind, line)) = rx.try_recv() {
+                quiet_since = std::time::Instant::now();
                 match kind.as_str() {
                     "out" => this.handle_line(&line),
                     "err" => { if !line.trim().is_empty() { eprintln!("claude: {line}"); *last_error.borrow_mut() = line.clone(); } }
                     _ => {
-                        this.child_pid.set(None);
+                        if this.child_pid.get() == Some(pid) { this.child_pid.set(None); }
                         this.busy.set(false);
                         this.send.set_sensitive(true);
                         if line != "0" {
