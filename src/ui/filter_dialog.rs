@@ -86,7 +86,7 @@ impl FilterDialog {
         { let (this, window) = (this.clone(), window.clone()); ok.connect_clicked(move |_| { this.commit(); window.close(); }); }
         { let this = this.clone(); window.connect_close_request(move |_| {
             match &this.adjustment {
-                Some((id, original)) => { if !this.committed.get() { this.doc.borrow_mut().document.set_adjustment(*id, original, false); (this.finished)(); } }
+                Some((id, original)) => { if !this.committed.get() && this.doc.borrow_mut().document.set_adjustment(*id, original, false) { (this.finished)(); } }
                 None => { this.doc.borrow_mut().document.clear_preview(); }
             }
             this.canvas.queue_draw();
@@ -343,8 +343,8 @@ impl FilterDialog {
     fn render_preview(&self) {
         if let Some((id, original)) = &self.adjustment {
             let shown = if self.preview.get() { self.current_adjustment().unwrap_or_else(|| original.clone()) } else { original.clone() };
-            self.doc.borrow_mut().document.set_adjustment(*id, &shown, false);
-            (self.finished)();
+            if self.doc.borrow_mut().document.set_adjustment(*id, &shown, false) { (self.finished)(); }
+            else { self.status.set_label("This adjustment layer no longer exists."); }
             return;
         }
         let settings = self.settings.borrow().clone();

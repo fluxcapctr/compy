@@ -84,9 +84,15 @@ impl Document {
         if let Some(before) = self.history.cancel() { self.apply(&before); }
     }
 
-    pub fn end_edit(&mut self) {
+    /// Ends an edit that folds into the previous one when it has the same name and came right after it, as
+    /// a slider's steps do.
+    pub fn end_edit_merging(&mut self) { self.finish_edit(true); }
+
+    pub fn end_edit(&mut self) { self.finish_edit(false); }
+
+    fn finish_edit(&mut self, merge: bool) {
         let state = self.state();
-        self.history.end(state, |held, current| {
+        self.history.end_with(state, merge, |held, current| {
             let renders: Vec<&render::State> = held.iter().map(|s| &s.render).collect();
             let mut bytes = render::State::retained_bytes(&renders, &current.render);
             let current_mask = current.selection.as_ref().map(|s| s.mask.to_raw_none() as usize);
@@ -933,14 +939,43 @@ impl Document {
     }
 
     pub fn adjustment(&self, id: Uuid) -> Option<crate::filters::Adjustment> {
+        self.renderer.layer_index(id)?;
         self.renderer.layer(id).adjustment.as_ref().and_then(crate::filters::Adjustment::from_record)
     }
 
+    pub fn has_layer(&self, id: Uuid) -> bool { self.renderer.layer_index(id).is_some() }
+
     /// Changes an adjustment layer's settings; `commit` makes it an undo step, otherwise it is a live preview.
-    pub fn set_adjustment(&mut self, id: Uuid, adjustment: &crate::filters::Adjustment, commit: bool) {
+    /// False when the layer is gone (a dialog can outlive its layer).
+    pub fn set_adjustment(&mut self, id: Uuid, adjustment: &crate::filters::Adjustment, commit: bool) -> bool {
+        if !self.has_layer(id) || self.renderer.layer(id).adjustment.is_none() { return false; }
         if commit { self.begin_edit(&format!("{} Adjustment", adjustment.kind_name())); }
         self.renderer.set_adjustment(id, Some(adjustment.to_record()));
         if commit { self.end_edit(); }
+        true
+    }
+
+    // Appearance: visibility, opacity and blend mode are undo steps; opacity changes from a slider merge.
+
+    pub fn set_visible(&mut self, id: Uuid, visible: bool) {
+        if !self.has_layer(id) || self.renderer.layer(id).is_visible == visible { return; }
+        self.begin_edit(if visible { "Show Layer" } else { "Hide Layer" });
+        self.renderer.set_visible(id, visible);
+        self.end_edit();
+    }
+
+    pub fn set_opacity(&mut self, id: Uuid, opacity: f64) {
+        if !self.has_layer(id) || self.renderer.layer(id).is_group() { return; }
+        self.begin_edit("Opacity");
+        self.renderer.set_opacity(id, opacity);
+        self.end_edit_merging();
+    }
+
+    pub fn set_blend_mode(&mut self, id: Uuid, mode: crate::format::BlendMode) {
+        if !self.has_layer(id) || self.renderer.layer(id).is_group() { return; }
+        self.begin_edit("Blend Mode");
+        self.renderer.set_blend_mode(id, mode);
+        self.end_edit();
     }
 
     /// Deletes the active layer (a folder with its contents); clipping links to it are dropped.
@@ -1068,6 +1103,9 @@ impl Document {
     pub fn decode_image(path: &std::path::Path) -> Result<(ImageSurface, usize, usize)> {
         use image::ImageDecoder;
         let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+        // The header's size, before any pixel buffer exists.
+        let (dw, dh) = decoder.dimensions();
+        if dw == 0 || dh == 0 || dw > 30_000 || dh > 30_000 || dw as u64 * dh as u64 > 100_000_000 { bail!("This image is {dw} x {dh}; sides run to 30,000 pixels and the whole to 100 megapixels."); }
         let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
         let mut decoded = image::DynamicImage::from_decoder(decoder)?;
         decoded.apply_orientation(orientation);

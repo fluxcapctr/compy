@@ -39,7 +39,7 @@ struct Inner {
 
 impl LayersPanel {
     pub fn new(doc: DocRef, canvas: gtk::DrawingArea) -> Rc<LayersPanel> {
-        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).width_request(WIDTH).build();
+        let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).width_request(WIDTH).css_classes(["layers-panel"]).build();
 
         let header = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).margin_start(18).margin_end(18).margin_top(14).margin_bottom(14).build();
         header.append(&gtk::Label::builder().label("Layers").css_classes(["heading"]).hexpand(true).xalign(0.0).build());
@@ -69,7 +69,7 @@ impl LayersPanel {
         widget.append(&scroller);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         // The footer: new layer, folder, mask, adjustment, and delete, as the Mac's panel has.
-        let footer = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).margin_start(8).margin_end(8).margin_top(4).margin_bottom(4).build();
+        let footer = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(2).margin_start(8).margin_end(8).margin_top(4).margin_bottom(4).css_classes(["layers-footer"]).build();
         for (icon, action, tip) in [("list-add-symbolic", "win.new-layer", "New blank layer (Ctrl+Shift+N)"), ("folder-new-symbolic", "win.new-folder", "New folder (Ctrl+G)"), ("image-x-generic-symbolic", "win.mask-reveal", "Add mask (from the selection, if any)")] {
             footer.append(&gtk::Button::builder().icon_name(icon).has_frame(false).action_name(action).tooltip_text(tip).build());
         }
@@ -107,7 +107,7 @@ impl Inner {
             let Some(mode) = BlendMode::ALL.get(dropdown.selected() as usize).copied() else { return };
             let mut d = this.doc.borrow_mut();
             let Some(id) = d.document.active else { return };
-            d.document.renderer.set_blend_mode(id, mode);
+            d.document.set_blend_mode(id, mode);
             drop(d);
             this.refresh_detail(id);
             this.canvas.queue_draw();
@@ -119,7 +119,7 @@ impl Inner {
             this.percent.set_label(&format!("{value:.0}%"));
             let mut d = this.doc.borrow_mut();
             let Some(id) = d.document.active else { return };
-            d.document.renderer.set_opacity(id, value / 100.0);
+            d.document.set_opacity(id, value / 100.0);
             drop(d);
             this.refresh_detail(id);
             this.canvas.queue_draw();
@@ -163,7 +163,7 @@ impl Inner {
                 let this = self.clone();
                 let id = info.id;
                 eye.connect_toggled(move |button| {
-                    this.doc.borrow_mut().document.renderer.set_visible(id, button.is_active());
+                    this.doc.borrow_mut().document.set_visible(id, button.is_active());
                     this.canvas.queue_draw();
                     this.rebuild();
                 });

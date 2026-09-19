@@ -129,6 +129,13 @@ inside a selection, Merge Down, drag-to-reorder in the layer panel, Flip Canvas,
 
 The tool icons are drawn as line glyphs in the style of the Mac app's SF Symbols, in the theme's text color.
 
+**Omarchy theme.** On Omarchy the app's chrome (window, header, tabs, tool rail, options bar, layers panel,
+fields, popovers, the canvas surround and the transform handles) takes its colors from the active theme's
+`~/.local/state/omarchy/current/theme/colors.toml`, and follows along live when you run `omarchy theme set`.
+The canvas checkerboard and the selection ants stay neutral on purpose, so image colors read true. Without
+that file (another desktop) the stock GTK look stays. `COMPOSITOR_THEME_COLORS=path` points the app at any
+other `colors.toml`, for trying a theme without switching to it.
+
 One deliberate deviation: a committed stroke's pixels are cropped to bounds snapped outward to a 64-pixel
 alignment, so a layer can carry up to 64 transparent pixels of margin the Mac app would trim. That alignment
 is what lets the reduced copies be cropped instead of rebuilt.
@@ -180,6 +187,7 @@ src/warp     Smudge and Liquify: the working copy at document size, dabbed and p
 src/history  value-snapshot undo with entry and byte limits
 src/viewport the canvas view math (fit, zoom around a point, pan), a port of CanvasViewport
 src/ui/      the GTK4 app: window and tabs, canvas widget, layers panel
+src/ui/theme Omarchy palette to GTK CSS, watched for live theme switches
 tests/       fixture-built .comp packages with pixel-exact expectations
 reference/   the macOS app, as a submodule, read-only
 ```

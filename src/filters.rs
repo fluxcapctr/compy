@@ -614,23 +614,33 @@ impl Adjustment {
         let s = &record.settings;
         let finite = |v: Option<&Value>| v.is_none_or(|v| v.as_f64().is_some_and(f64::is_finite));
         let within = |v: Option<&Value>, lo: f64, hi: f64| v.is_none_or(|v| v.as_f64().is_some_and(|n| n.is_finite() && (lo..=hi).contains(&n)));
-        let mut ok = within(s.get("hue"), -360.0, 360.0) && within(s.get("saturation"), -100.0, 100.0) && within(s.get("lightness"), -100.0, 100.0);
+        let boolean = |v: Option<&Value>| v.is_none_or(Value::is_boolean);
+        // A present container has to be the right kind of value; only an absent one takes the defaults.
+        let object = |v: Option<&Value>| v.is_none_or(Value::is_object);
+        let mut ok = within(s.get("hue"), -360.0, 360.0) && within(s.get("saturation"), -100.0, 100.0) && within(s.get("lightness"), -100.0, 100.0) && boolean(s.get("colorize"));
+        ok &= object(s.get("hsvSettings")) && object(s.get("levels")) && object(s.get("curves")) && object(s.get("exposureSettings")) && object(s.get("gradientMapSettings")) && object(s.get("grainSettings"));
+        if !ok { return false; }
         if let Some(v) = s.get("hsvSettings") {
-            ok &= keyed_entries(v.get("adjustments")).into_iter().all(|(_, a)| within(a.get("hue"), -360.0, 360.0) && within(a.get("saturation"), -100.0, 100.0) && within(a.get("lightness"), -100.0, 100.0));
-            ok &= keyed_entries(v.get("bands")).into_iter().all(|(_, b)| ["falloffStart", "rangeStart", "rangeEnd", "falloffEnd"].iter().all(|k| finite(b.get(*k))));
+            ok &= v.get("range").is_none_or(|r| r.as_str().is_some_and(|r| COLOR_RANGES.contains(&r) || r == "Master")) && boolean(v.get("colorize")) && boolean(v.get("invertRange"));
+            for key in ["adjustments", "bands"] { ok &= v.get(key).is_none_or(|d| d.is_array() || d.is_object()); }
+            ok &= keyed_entries(v.get("adjustments")).into_iter().all(|(_, a)| a.is_object() && within(a.get("hue"), -360.0, 360.0) && within(a.get("saturation"), -100.0, 100.0) && within(a.get("lightness"), -100.0, 100.0));
+            ok &= keyed_entries(v.get("bands")).into_iter().all(|(_, b)| b.is_object() && ["falloffStart", "rangeStart", "rangeEnd", "falloffEnd"].iter().all(|k| finite(b.get(*k))));
         }
         if let Some(ranges) = s.get("levels").and_then(|l| l.get("ranges")) {
             let Some(ranges) = ranges.as_array() else { return false };
             ok &= ranges.len() == 4 && ranges.iter().all(|r| {
+                if !r.is_object() { return false; }
                 let n = |k: &str, d: f64| r.get(k).and_then(Value::as_f64).unwrap_or(d);
+                let numeric = ["black", "gamma", "white", "outputBlack", "outputWhite"].iter().all(|k| finite(r.get(*k)));
                 let range = Range { black: n("black", 0.0), gamma: n("gamma", 1.0), white: n("white", 255.0), output_black: n("outputBlack", 0.0), output_white: n("outputWhite", 255.0) };
-                range == range.normalized()
+                numeric && range == range.normalized()
             });
         }
         if let Some(channels) = s.get("curves").and_then(|c| c.get("channels")) {
             let Some(channels) = channels.as_array() else { return false };
             ok &= channels.len() == 4 && channels.iter().all(|ch| {
                 let Some(points) = ch.as_array() else { return false };
+                if !points.iter().all(Value::is_object) { return false; }
                 let pts: Vec<(f64, f64)> = points.iter().map(|p| (p.get("x").and_then(Value::as_f64).unwrap_or(f64::NAN), p.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN))).collect();
                 (2..=32).contains(&pts.len()) && pts[0].0 == 0.0 && pts[pts.len() - 1].0 == 255.0
                     && pts.iter().all(|p| p.0.is_finite() && p.1.is_finite() && (0.0..=255.0).contains(&p.0) && (0.0..=255.0).contains(&p.1))
@@ -639,9 +649,10 @@ impl Adjustment {
         }
         if let Some(e) = s.get("exposureSettings") { ok &= within(e.get("exposure"), -20.0, 20.0) && within(e.get("offset"), -0.5, 0.5) && within(e.get("gamma"), 0.01, 9.99); }
         if let Some(g) = s.get("gradientMapSettings") {
-            for key in ["shadows", "highlights"] { if let Some(c) = g.get(key) { ok &= ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0)); } }
+            ok &= boolean(g.get("reversed"));
+            for key in ["shadows", "highlights"] { if let Some(c) = g.get(key) { ok &= c.is_object() && ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0)); } }
         }
-        if let Some(g) = s.get("grainSettings") { ok &= within(g.get("amount"), 0.0, 100.0) && within(g.get("size"), 0.5, 20.0) && within(g.get("roughness"), 0.0, 100.0); }
+        if let Some(g) = s.get("grainSettings") { ok &= within(g.get("amount"), 0.0, 100.0) && within(g.get("size"), 0.5, 20.0) && within(g.get("roughness"), 0.0, 100.0) && g.get("seed").is_none_or(|v| v.as_u64().is_some()); }
         ok
     }
 

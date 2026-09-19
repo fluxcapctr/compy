@@ -6,6 +6,7 @@ mod dialogs;
 mod filter_dialog;
 mod icons;
 mod layers;
+pub mod theme;
 mod tools;
 
 use crate::brush::BrushSettings;
@@ -209,6 +210,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     let css = gtk::CssProvider::new();
     css.load_from_string("button.tool { min-width: 0; min-height: 0; padding: 4px; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
+
     let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
     let header = gtk::HeaderBar::new();
     let open = gtk::Button::builder().label("Open").tooltip_text("Open a .comp project (Ctrl+O)").action_name("win.open").build();
@@ -225,6 +227,11 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     window.set_child(Some(&stack));
 
     let state = Rc::new(App { window: window.clone(), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
+    // Follow the Omarchy theme; every canvas rebuilds its frame when the palette changes.
+    {
+        let weak = Rc::downgrade(&state);
+        theme::start(Rc::new(move || { if let Some(state) = weak.upgrade() { for page in state.pages.borrow().iter() { page.canvas.drop_cache(); } } }));
+    }
 
     // Space held turns a drag into a pan; single letters pick tools, unless a text field has focus.
     let keys = gtk::EventControllerKey::new();
@@ -366,6 +373,13 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         let state = state.clone();
         notebook.connect_page_removed(move |_, _, _| state.prune());
     }
+    {
+        let state = state.clone();
+        window.connect_close_request(move |_| {
+            let any = state.pages.borrow().iter().any(|p| p.canvas.doc().borrow().document.is_modified());
+            if any { state.close_window(); glib::Propagation::Stop } else { glib::Propagation::Proceed }
+        });
+    }
     state
 }
 
@@ -441,7 +455,7 @@ fn menu() -> gio::Menu {
 }
 
 impl App {
-    fn open_path(&self, path: &Path) {
+    fn open_path(self: &Rc<Self>, path: &Path) {
         match open_document(path) {
             Ok((doc, notes)) => {
                 self.add_page(doc);
@@ -451,7 +465,7 @@ impl App {
         }
     }
 
-    fn add_page(&self, doc: Doc) {
+    fn add_page(self: &Rc<Self>, doc: Doc) {
         let title = doc.title.clone();
         let doc: DocRef = Rc::new(RefCell::new(doc));
         let canvas = canvas::Canvas::new(doc.clone(), self.space_held.clone());
@@ -479,8 +493,31 @@ impl App {
         self.pages.borrow_mut().push(Page { root: root.clone(), canvas, panel });
         self.notebook.set_current_page(Some(index));
         self.show_tabs(true);
-        let notebook = self.notebook.clone();
-        close.connect_clicked(move |_| { if let Some(n) = notebook.page_num(&root) { notebook.remove_page(Some(n)); } });
+        let state = self.clone();
+        close.connect_clicked(move |_| { if let Some(n) = state.notebook.page_num(&root) { state.close_page(n, Rc::new(|| {})); } });
+    }
+
+    /// Closes the page at `index`, asking about unsaved changes first; `then` runs once it is gone (not
+    /// when the user cancels).
+    fn close_page(self: &Rc<Self>, index: u32, then: Rc<dyn Fn()>) {
+        self.notebook.set_current_page(Some(index));
+        let (modified, title) = { let mut m = false; let mut t = String::new(); self.with_current(|p| { let d = p.canvas.doc().borrow(); m = d.document.is_modified(); t = d.title.clone(); }); (m, t) };
+        if !modified { self.notebook.remove_page(Some(index)); then(); return; }
+        let state = self.clone();
+        dialogs::unsaved(self.window.upcast_ref(), &title, move |choice| {
+            if choice == 0 { state.save_current(false); if state.current_modified() { return; } }
+            if let Some(index) = state.notebook.current_page() { state.notebook.remove_page(Some(index)); }
+            then();
+        });
+    }
+
+    /// Closing the window closes each modified page in turn, with its prompt, and then the window.
+    fn close_window(self: &Rc<Self>) {
+        let modified = self.pages.borrow().iter().position(|p| p.canvas.doc().borrow().document.is_modified()).and_then(|i| { let pages = self.pages.borrow(); self.notebook.page_num(&pages[i].root) });
+        match modified {
+            None => self.window.destroy(),
+            Some(index) => { let state = self.clone(); self.close_page(index, Rc::new(move || state.close_window())); }
+        }
     }
 
     fn show_tabs(&self, tabs: bool) {
@@ -532,13 +569,7 @@ impl App {
     /// Closes the current tab, asking first when it has unsaved changes.
     fn close_current(self: &Rc<Self>) {
         let Some(index) = self.notebook.current_page() else { return };
-        let (modified, title) = { let mut m = false; let mut t = String::new(); self.with_current(|p| { let d = p.canvas.doc().borrow(); m = d.document.is_modified(); t = d.title.clone(); }); (m, t) };
-        if !modified { self.notebook.remove_page(Some(index)); return; }
-        let state = self.clone();
-        dialogs::unsaved(self.window.upcast_ref(), &title, move |choice| {
-            if choice == 0 { state.save_current(false); if state.current_modified() { return; } }
-            if let Some(index) = state.notebook.current_page() { state.notebook.remove_page(Some(index)); }
-        });
+        self.close_page(index, Rc::new(|| {}));
     }
 
     fn current_modified(&self) -> bool { let mut m = false; self.with_current(|p| m = p.canvas.doc().borrow().document.is_modified()); m }

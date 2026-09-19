@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let result = match args.get(1).map(String::as_str) {
+    // Paths need not be UTF-8; only the options are matched as text.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let result = match args.get(1).and_then(|a| a.to_str()) {
         Some("info") if args.len() == 3 => info(Path::new(&args[2])),
         Some("render") if args.len() == 4 => render_to(Path::new(&args[2]), Path::new(&args[3])),
         Some("psd") if args.len() == 4 => convert_psd(Path::new(&args[2]), Path::new(&args[3])),
@@ -19,18 +20,20 @@ fn main() {
             let mut script = ui::Script::default();
             let mut rest = args[1..].iter();
             while let Some(arg) = rest.next() {
-                match arg.as_str() {
+                // Option values are text; anything else is a path.
+                let mut text = || rest.next().and_then(|a| a.to_str()).map(str::to_string);
+                match arg.to_str().unwrap_or("") {
                     "--screenshot" => script.screenshot = rest.next().map(PathBuf::from),
-                    "--zoom" => script.zoom = rest.next().and_then(|z| z.parse().ok()),
-                    "--wand" => script.wand = rest.next().and_then(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }),
-                    "--tool" => script.tool = rest.next().and_then(|t| ui::Tool::ALL.into_iter().find(|tool| format!("{tool:?}").to_lowercase() == *t)),
+                    "--zoom" => script.zoom = text().and_then(|z| z.parse().ok()),
+                    "--wand" => script.wand = text().and_then(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }),
+                    "--tool" => script.tool = text().and_then(|t| ui::Tool::ALL.into_iter().find(|tool| format!("{tool:?}").to_lowercase() == *t)),
                     "--ellipse" => script.ellipse = true,
-                    "--blur-mode" => script.blur_mode = rest.next().and_then(|m| m.parse().ok()),
-                    "--layer" => script.layer = rest.next().cloned(),
-                    "--adjustment" => script.adjustment = rest.next().cloned(),
-                    "--size" => { if let Some(size) = rest.next().and_then(|v| v.parse::<f64>().ok()) { script.brush_size = Some(size); } }
-                    "--stroke" => script.stroke = rest.next().map(|s| s.split(';').filter_map(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }).collect()).unwrap_or_default(),
-                    "--filter" => script.filter = rest.next().and_then(|f| match f.as_str() {
+                    "--blur-mode" => script.blur_mode = text().and_then(|m| m.parse().ok()),
+                    "--layer" => script.layer = text(),
+                    "--adjustment" => script.adjustment = text(),
+                    "--size" => { if let Some(size) = text().and_then(|v| v.parse::<f64>().ok()) { script.brush_size = Some(size); } }
+                    "--stroke" => script.stroke = text().map(|s| s.split(';').filter_map(|p| { let (x, y) = p.split_once(',')?; Some((x.parse().ok()?, y.parse().ok()?)) }).collect()).unwrap_or_default(),
+                    "--filter" => script.filter = text().and_then(|f| match f.as_str() {
                         "noise" => Some(compositor::filters::Kind::AddNoise), "grain" => Some(compositor::filters::Kind::Grain),
                         "lens" => Some(compositor::filters::Kind::LensCorrection), "gradient" => Some(compositor::filters::Kind::GradientMap),
                         "levels" => Some(compositor::filters::Kind::Levels), "gaussian" => Some(compositor::filters::Kind::GaussianBlur),

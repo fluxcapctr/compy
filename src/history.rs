@@ -21,7 +21,11 @@ struct Entry<S> {
     /// The revisions the two states carried, so returning to a saved state reads as unmodified.
     revision_before: u64,
     revision_after: u64,
+    at: std::time::Instant,
 }
+
+/// Same-named edits closer together than this merge when the caller asks (slider steps).
+const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 
 impl<S: Clone + PartialEq> History<S> {
     pub fn new(entry_limit: usize, byte_limit: usize) -> Self {
@@ -51,16 +55,34 @@ impl<S: Clone + PartialEq> History<S> {
 
     /// Ends an edit. An edit that changed nothing leaves history (and redo) alone. `bytes` measures what a
     /// list of states retains beyond `current`, for the byte budget.
-    pub fn end(&mut self, state: S, bytes: impl Fn(&[&S], &S) -> usize) {
+    pub fn end(&mut self, state: S, bytes: impl Fn(&[&S], &S) -> usize) { self.end_with(state, false, bytes); }
+
+    /// `merge` folds the edit into the previous entry when that has the same name, nothing was undone in
+    /// between, and it was made within the last second and a half.
+    pub fn end_with(&mut self, state: S, merge: bool, bytes: impl Fn(&[&S], &S) -> usize) {
         if self.depth == 0 { return; }
         self.depth -= 1;
         if self.depth > 0 { return; }
         let Some((name, before)) = self.pending.take() else { return };
         if before == state { return; }
+        let now = std::time::Instant::now();
+        if merge && self.future.is_empty() {
+            if let Some(last) = self.past.last_mut() {
+                if last.name == name && last.after == before && now.duration_since(last.at) < MERGE_WINDOW {
+                    last.after = state.clone();
+                    last.at = now;
+                    self.revision = self.next;
+                    self.next += 1;
+                    last.revision_after = self.revision;
+                    self.trim(&state, bytes);
+                    return;
+                }
+            }
+        }
         let revision_before = self.revision;
         self.revision = self.next;
         self.next += 1;
-        self.past.push(Entry { name, before, after: state.clone(), revision_before, revision_after: self.revision });
+        self.past.push(Entry { name, before, after: state.clone(), revision_before, revision_after: self.revision, at: now });
         self.future.clear();
         self.trim(&state, bytes);
     }

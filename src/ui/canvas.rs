@@ -83,7 +83,7 @@ impl Canvas {
             let (w, h) = d.size();
             size_label.set_label(&format!("{w} × {h} px · {} ppi", d.document.renderer.resolution()));
         }
-        let status = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(16).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).build();
+        let status = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(16).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).css_classes(["canvas-status"]).build();
         status.append(&zoom_label);
         status.append(&size_label);
         status.append(&message);
@@ -616,6 +616,9 @@ impl Canvas {
 
     pub fn set_refresh(&self, f: Rc<dyn Fn()>) { *self.refresh.borrow_mut() = Some(f); }
 
+    /// Drops the composited frame so the next draw rebuilds it (the surround color changed).
+    pub fn drop_cache(&self) { *self.cache.borrow_mut() = None; self.area.queue_draw(); }
+
     pub fn sync_brush_options(&self) { let settings = self.doc.borrow().brush.clone(); self.options.sync_brush(&settings); }
 
     fn begin_stroke(&self, view: (f64, f64), shift: bool) {
@@ -802,7 +805,8 @@ pub fn zoom_text(zoom: f64) -> String {
 }
 
 fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) -> Result<()> {
-    cr.set_source_rgb(0.105, 0.105, 0.105);
+    let (sr, sg, sb) = super::theme::surround();
+    cr.set_source_rgb(sr, sg, sb);
     cr.paint()?;
     let size = doc.size();
     let vp = doc.viewport;
@@ -925,24 +929,25 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
                 for i in [2, 4, 6] { cr.line_to(g.handles[i].0, g.handles[i].1); }
                 cr.close_path();
                 if !layer.is_group() { cr.move_to(g.handles[1].0, g.handles[1].1); cr.line_to(g.rotation.0, g.rotation.1); }
+                let (ar, ag, ab) = super::theme::accent();
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
                 cr.set_line_width(3.0);
                 cr.stroke_preserve()?;
-                cr.set_source_rgb(0.21, 0.52, 0.89);
+                cr.set_source_rgb(ar, ag, ab);
                 cr.set_line_width(1.0);
                 cr.stroke()?;
                 for (x, y) in g.handles {
                     cr.rectangle(x - 3.5, y - 3.5, 7.0, 7.0);
                     cr.set_source_rgb(1.0, 1.0, 1.0);
                     cr.fill_preserve()?;
-                    cr.set_source_rgb(0.21, 0.52, 0.89);
+                    cr.set_source_rgb(ar, ag, ab);
                     cr.stroke()?;
                 }
                 if !layer.is_group() {
                     cr.arc(g.rotation.0, g.rotation.1, 4.0, 0.0, std::f64::consts::TAU);
                     cr.set_source_rgb(1.0, 1.0, 1.0);
                     cr.fill_preserve()?;
-                    cr.set_source_rgb(0.21, 0.52, 0.89);
+                    cr.set_source_rgb(ar, ag, ab);
                     cr.stroke()?;
                 }
             }

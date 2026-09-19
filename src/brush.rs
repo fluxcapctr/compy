@@ -78,6 +78,9 @@ pub fn falloff(u: f64) -> f64 {
     ((-k * u * u).exp() - (-k).exp()) / (1.0 - (-k).exp()).max(0.0)
 }
 
+/// The widest tip kept in memory, as `BrushStroke.gridTipLimit`.
+pub const GRID_TIP_LIMIT: f64 = 3000.0;
+
 /// The tip as gray coverage in grid pixels, its box `size` wide.
 pub fn tip(grid_diameter: f64, hardness: f64) -> (usize, Vec<u8>) {
     let size = (grid_diameter.ceil() as usize).max(1);
@@ -182,6 +185,10 @@ impl Stroke {
         let preview = preview_grid(x0 as i32, y0 as i32, width as i32, height as i32, expanded)?;
         let scale = (to_document.xx() * to_document.xx() + to_document.yx() * to_document.yx()).sqrt();
         let grid_diameter = (settings.diameter / scale).max(1.0);
+        // The reference keeps grid tips to 3,000 pixels and falls back to a stamp; here the stroke is refused.
+        if !grid_diameter.is_finite() || grid_diameter > GRID_TIP_LIMIT {
+            bail!("The brush would be {} pixels wide on this layer's own pixels; the limit is {}. Use a smaller brush, or resample the layer with Image Size.", grid_diameter.round(), GRID_TIP_LIMIT);
+        }
         let (tip_size, tip) = tip(grid_diameter, settings.hardness);
         let spacing = (settings.diameter * if settings.hardness >= 1.0 { 0.015 } else { 0.025 }).max(0.25);
         Ok(Stroke {

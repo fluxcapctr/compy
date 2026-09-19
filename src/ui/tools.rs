@@ -40,7 +40,7 @@ impl ToolRail {
     /// `changed` runs after the document's tool has been set.
     pub fn new(doc: DocRef, changed: Rc<dyn Fn()>) -> Rc<ToolRail> {
         let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(3).width_request(45)
-            .margin_top(8).margin_start(8).margin_end(8).build();
+            .margin_top(8).margin_start(8).margin_end(8).css_classes(["tool-rail"]).build();
         let mut buttons = Vec::new();
         let current = doc.borrow().tool;
         let mut group: Option<gtk::ToggleButton> = None;
@@ -92,7 +92,7 @@ fn mode_buttons(doc: &DocRef) -> gtk::Box {
 
 impl OptionsBar {
     pub fn new(doc: DocRef) -> OptionsBar {
-        let stack = gtk::Stack::builder().vhomogeneous(false).build();
+        let stack = gtk::Stack::builder().vhomogeneous(false).css_classes(["options"]).build();
         let hint = gtk::Label::builder().xalign(0.0).margin_start(12).margin_top(8).margin_bottom(8).css_classes(["dim-label"]).build();
         stack.add_named(&hint, Some("hint"));
 

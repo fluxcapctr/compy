@@ -3,8 +3,33 @@
 
 use anyhow::{Context as _, Result, bail};
 use cairo::{Format, ImageSurface};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::sync::LazyLock;
+
+// Cairo hands out one pixel pointer per surface however many handles share it, so the raw accessors below
+// keep their own ledger: any number of readers, or one writer, per surface on this thread. A nested access
+// that would alias is refused instead of handing out overlapping slices.
+thread_local! { static BORROWS: RefCell<HashMap<usize, i32>> = RefCell::new(HashMap::new()); }
+
+struct Borrow(usize, i32);
+impl Borrow {
+    /// `delta` is +1 for a reader, -1 for the single writer.
+    fn take(ptr: usize, delta: i32) -> Result<Borrow> {
+        BORROWS.with(|b| {
+            let mut b = b.borrow_mut();
+            let count = b.entry(ptr).or_insert(0);
+            let allowed = if delta > 0 { *count >= 0 } else { *count == 0 };
+            if !allowed { bail!("the surface's pixels are already borrowed {}", if *count < 0 { "for writing" } else { "for reading" }); }
+            *count += delta;
+            Ok(Borrow(ptr, delta))
+        })
+    }
+}
+impl Drop for Borrow {
+    fn drop(&mut self) { BORROWS.with(|b| { let mut b = b.borrow_mut(); if let Some(c) = b.get_mut(&self.0) { *c -= self.1; if *c == 0 { b.remove(&self.0); } } }); }
+}
 
 /// A transparent premultiplied ARGB32 surface.
 pub fn new_argb(width: i32, height: i32) -> Result<ImageSurface> {
@@ -37,6 +62,7 @@ pub fn with_bytes<R>(surface: &ImageSurface, f: impl FnOnce(&[u8], usize) -> R) 
     let len = stride * surface.height() as usize;
     let ptr = unsafe { cairo::ffi::cairo_image_surface_get_data(surface.to_raw_none()) };
     if ptr.is_null() { bail!("surface has no pixel data"); }
+    let _borrow = Borrow::take(ptr as usize, 1)?;
     let data = unsafe { std::slice::from_raw_parts(ptr, len) };
     Ok(f(data, stride))
 }
@@ -173,6 +199,7 @@ pub fn with_bytes_raw_mut<R>(surface: &ImageSurface, f: impl FnOnce(&mut [u8], u
     let len = stride * surface.height() as usize;
     let ptr = unsafe { cairo::ffi::cairo_image_surface_get_data(surface.to_raw_none()) };
     if ptr.is_null() { bail!("surface has no pixel data"); }
+    let _borrow = Borrow::take(ptr as usize, -1)?;
     let data = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let result = f(data, stride);
     surface.mark_dirty();

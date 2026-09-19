@@ -188,7 +188,8 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
             let ppi = fixed as f64 / 65536.0;
             if ppi.is_finite() && (1.0..=9600.0).contains(&ppi) { resolution = ppi; }
         }
-        r.pos = start + size + (size & 1);
+        r.pos = start;
+        r.skip(size + (size & 1))?;
     }
     r.pos = resources_end;
     // Layer and mask information.
@@ -247,7 +248,9 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                     match &akey {
                         b"luni" => {
                             let n = r.u32()? as usize;
-                            let units: Vec<u16> = (0..n).filter_map(|_| r.u16().ok()).collect();
+                            if alen < 4 || n > (alen - 4) / 2 { bail!("a layer name runs past its block"); }
+                            let mut units = Vec::with_capacity(n);
+                            for _ in 0..n { units.push(r.u16()?); }
                             let unicode = String::from_utf16_lossy(&units);
                             if !unicode.is_empty() { name = unicode.trim_end_matches('\0').to_string(); }
                         }
@@ -255,7 +258,8 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                         b"brit" | b"blnc" | b"phfl" | b"vibA" | b"mixr" | b"thrs" | b"post" | b"nvrt" | b"selc" | b"clrL" | b"blwh" | b"SoCo" | b"GdFl" | b"PtFl" => { unsupported_adjustment = true; }
                         other => { if let Some((_, kind)) = ADJUSTMENT_KEYS.iter().find(|(k, _)| *k == other) { adjustment = Some(*kind); } }
                     }
-                    r.pos = astart + alen + (alen & 1);
+                    r.pos = astart;
+                    r.skip(alen + (alen & 1))?;
                 }
                 r.pos = extra_end;
                 records.push((top, left, bottom, right, channel_specs, blend, opacity, clipping, flags, name, section, mask, adjustment, unsupported_adjustment));
@@ -268,8 +272,8 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                     let (rows, cols) = if id == -2 {
                         match mask { Some((mt, ml, mb, mr, _, _)) => rect_dims(mt, ml, mb, mr)?, None => (0, 0) }
                     } else { rect_dims(top, left, bottom, right)? };
-                    if len < 2 || rows == 0 || cols == 0 { r.pos = start + len; continue; }
                     if len > data.len() - start { bail!("layer \"{name}\" channel {id} runs past the end of the file"); }
+                    if len < 2 || rows == 0 || cols == 0 { r.skip(len)?; continue; }
                     let compression = r.u16()?;
                     // Enough declared bytes for what the channel claims to hold, and a share of the budget.
                     let needed = match compression { 0 => rows * cols * sample_bytes, 1 => rows * 2, _ => 0 } + 2;
