@@ -88,9 +88,12 @@ impl Default for Overlay {
     fn default() -> Overlay { Overlay { enabled: true, color: [1.0, 0.0, 0.0], opacity: 1.0 } }
 }
 
-/// What the effects draw, in premultiplied ARGB32 rows the size of the alpha given.
+/// What the effects draw, in premultiplied ARGB32 rows the size of the alpha given: `below` goes under
+/// the layer, `inside` is composited within the layer's own coverage (Cairo's Atop, so it recolors
+/// without thickening soft edges), `above` goes over everything.
 pub struct Rendered {
     pub below: Option<Vec<u8>>,
+    pub inside: Option<Vec<u8>>,
     pub above: Option<Vec<u8>>,
 }
 
@@ -122,6 +125,7 @@ impl Effects {
     pub fn render(&self, alpha: &[u8], w: usize, h: usize) -> Rendered {
         let n = w * h;
         let mut below: Option<Vec<u8>> = None;
+        let mut inside: Option<Vec<u8>> = None;
         let mut above: Option<Vec<u8>> = None;
         let a01: Vec<f32> = alpha.iter().map(|a| *a as f32 / 255.0).collect();
         fn layer(buf: &mut Option<Vec<u8>>, n: usize) -> &mut Vec<u8> { buf.get_or_insert_with(|| vec![0u8; n * 4]) }
@@ -140,23 +144,24 @@ impl Effects {
             let cov: Vec<f32> = blurred.iter().zip(&a01).map(|(v, a)| clamp01((*v as f64 / 255.0 * 1.6).min(1.0) * g.opacity) as f32 * (1.0 - a)).collect();
             paint(layer(&mut below, n), &cov, g.color);
         }
+        // Interior effects carry no alpha of their own: the layer's coverage confines them when drawn Atop.
         if let Some(o) = self.color_overlay.as_ref().filter(|e| e.enabled) {
-            let cov: Vec<f32> = a01.iter().map(|a| a * o.opacity as f32).collect();
-            paint(layer(&mut above, n), &cov, o.color);
+            let cov: Vec<f32> = a01.iter().map(|a| if *a > 0.0 { o.opacity as f32 } else { 0.0 }).collect();
+            paint(layer(&mut inside, n), &cov, o.color);
         }
         if let Some(g) = self.inner_glow.as_ref().filter(|e| e.enabled) {
             let inverse: Vec<u8> = alpha.iter().map(|a| 255 - a).collect();
             let blurred = blur(&inverse, w, h, g.size);
-            let cov: Vec<f32> = blurred.iter().zip(&a01).map(|(v, a)| clamp01((*v as f64 / 255.0 * 1.6).min(1.0) * g.opacity) as f32 * a).collect();
-            paint(layer(&mut above, n), &cov, g.color);
+            let cov: Vec<f32> = blurred.iter().zip(&a01).map(|(v, a)| if *a > 0.0 { clamp01((*v as f64 / 255.0 * 1.6).min(1.0) * g.opacity) as f32 } else { 0.0 }).collect();
+            paint(layer(&mut inside, n), &cov, g.color);
         }
         if let Some(s) = self.inner_shadow.as_ref().filter(|e| e.enabled) {
             let inverse: Vec<u8> = alpha.iter().map(|a| 255 - a).collect();
             let blurred = blur(&inverse, w, h, s.size);
             let (dx, dy) = offset(s.angle, s.distance);
             let shifted = shift_fill(&blurred, w, h, dx, dy, 255);
-            let cov: Vec<f32> = shifted.iter().zip(&a01).map(|(v, a)| *v as f32 / 255.0 * s.opacity as f32 * a).collect();
-            paint(layer(&mut above, n), &cov, s.color);
+            let cov: Vec<f32> = shifted.iter().zip(&a01).map(|(v, a)| if *a > 0.0 { *v as f32 / 255.0 * s.opacity as f32 } else { 0.0 }).collect();
+            paint(layer(&mut inside, n), &cov, s.color);
         }
         if let Some(s) = self.stroke.as_ref().filter(|e| e.enabled && e.size > 0.0) {
             let inside: Vec<bool> = alpha.iter().map(|a| *a >= 128).collect();
@@ -166,9 +171,11 @@ impl Effects {
             let size = s.size as f32;
             let cov: Vec<f32> = (0..n).map(|i| {
                 let a = a01[i];
+                // Each field is zero on its own side; the distance to the edge is the other one.
+                let to_edge = if inside[i] { inside_d[i] } else { outside_d[i] };
                 let c = match s.position {
                     1 => (size + 1.0 - inside_d[i]).clamp(0.0, 1.0) * a,
-                    2 => (size / 2.0 + 1.0 - outside_d[i].min(inside_d[i])).clamp(0.0, 1.0),
+                    2 => (size / 2.0 + 1.0 - to_edge).clamp(0.0, 1.0),
                     _ => (size + 1.0 - outside_d[i]).clamp(0.0, 1.0) * (1.0 - a),
                 };
                 c * s.opacity as f32
@@ -193,15 +200,17 @@ impl Effects {
                     let len = (nx * nx + ny * ny + nz * nz).sqrt();
                     let dot = (nx * light.0 + ny * light.1 + nz * light.2) / len;
                     let delta = dot - light.2;
-                    let region = match b.style { 0 => a01[i], 1 => 1.0 - a01[i], _ => 1.0 };
+                    let region = match b.style { 0 => if a01[i] > 0.0 { 1.0 } else { 0.0 }, 1 => 1.0 - a01[i], _ => 1.0 };
                     if delta > 0.0 { highlight[i] = (delta * 2.0).min(1.0) * region * b.highlight_opacity as f32; }
                     else { shadow[i] = (-delta * 2.0).min(1.0) * region * b.shadow_opacity as f32; }
                 }
             }
-            paint(layer(&mut above, n), &highlight, [1.0; 3]);
-            paint(layer(&mut above, n), &shadow, [0.0; 3]);
+            // An inner bevel lives within the layer; outer and emboss reach past its edge.
+            let target = if b.style == 0 { &mut inside } else { &mut above };
+            paint(layer(target, n), &highlight, [1.0; 3]);
+            paint(layer(target, n), &shadow, [0.0; 3]);
         }
-        Rendered { below, above }
+        Rendered { below, inside, above }
     }
 }
 
@@ -333,7 +342,7 @@ mod tests {
         e.drop_shadow = Some(Shadow { size: 0.0, distance: 5.0, ..Shadow::drop_default() });
         let r = e.render(&a, w, h);
         let below = r.below.unwrap();
-        assert!(r.above.is_none());
+        assert!(r.above.is_none() && r.inside.is_none());
         let at = |x: usize, y: usize| below[(y * w + x) * 4 + 3];
         assert!(at(31, 31) > 150, "shadow lower right: {}", at(31, 31));
         assert_eq!(at(8, 8), 0, "no shadow upper left");
@@ -347,7 +356,24 @@ mod tests {
         assert_eq!(at(20, 20), 0, "nothing on the shape itself");
         assert_eq!(at(6, 20), 0, "nothing past the stroke");
         assert!(e.reach() >= 3);
-        assert_eq!(Effects::from_record(&e.to_record()), Some(e));
+        assert_eq!(Effects::from_record(&e.to_record()), Some(e.clone()));
+        // A center stroke rings the edge on both sides and leaves the far corner alone.
+        e.stroke = Some(Stroke { size: 2.0, position: 2, ..Stroke::default() });
+        let above = e.render(&a, w, h).above.unwrap();
+        let at = |x: usize, y: usize| above[(y * w + x) * 4 + 3];
+        assert_eq!(at(0, 0), 0, "far corner untouched");
+        assert_eq!(at(9, 20), 255, "one pixel outside");
+        assert_eq!(at(10, 20), 255, "one pixel inside");
+        assert_eq!(at(7, 20), 0);
+        assert_eq!(at(12, 20), 0);
+        // A color overlay is an interior effect at the overlay's own opacity.
+        let mut o = Effects::default();
+        o.color_overlay = Some(Overlay { color: [1.0, 0.0, 0.0], opacity: 0.5, enabled: true });
+        let r = o.render(&a, w, h);
+        let inside = r.inside.unwrap();
+        assert!(r.above.is_none());
+        assert_eq!(inside[(20 * w + 20) * 4 + 3], 128, "half opacity, not half times the alpha");
+        assert_eq!(inside[3], 0, "nothing outside the shape");
     }
 
     #[test]
@@ -356,8 +382,8 @@ mod tests {
         let a = square(w, h, 10, 10, 30, 30);
         let mut e = Effects::default();
         e.bevel = Some(Bevel::default());
-        let above = e.render(&a, w, h).above.unwrap();
-        let px = |x: usize, y: usize| { let p = &above[(y * w + x) * 4..][..4]; (p[2], p[3]) };
+        let inside = e.render(&a, w, h).inside.unwrap();
+        let px = |x: usize, y: usize| { let p = &inside[(y * w + x) * 4..][..4]; (p[2], p[3]) };
         let (top_r, top_a) = px(20, 11);
         let (bottom_r, bottom_a) = px(20, 28);
         // Premultiplied: white has red equal to alpha, black has none.

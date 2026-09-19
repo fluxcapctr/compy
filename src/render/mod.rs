@@ -72,8 +72,13 @@ struct Styled {
     x: i32,
     y: i32,
     below: Option<ImageSurface>,
+    inside: Option<ImageSurface>,
     above: Option<ImageSurface>,
 }
+
+/// A layer's rendered effects handed to the draw: where they sit, and the three surfaces.
+#[derive(Clone)]
+struct StyledDraw { x: f64, y: f64, below: Option<ImageSurface>, inside: Option<ImageSurface>, above: Option<ImageSurface> }
 
 /// The layers, pixels and masks at one moment, shared by reference: what undo history holds.
 #[derive(Clone)]
@@ -436,19 +441,19 @@ impl Renderer {
 
     /// The layer's effects, rendered from its committed pixels through its own mask, cached until the pixels,
     /// mask, placement or effects change. A stroke in progress draws over the effects as they were.
-    fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<(i32, i32, Option<ImageSurface>, Option<ImageSurface>)>> {
+    fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<StyledDraw>> {
         let Some(effects) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) else { return Ok(None) };
         let Some(image) = self.images.get(&id) else { return Ok(None) };
         let mask_ptr = self.masks.get(&id).map(|m| m.to_raw_none() as usize).unwrap_or(0);
         let key = format!("{:?}|{:?}|{:?}|{}|{}|{}", layer.transform, layer.mask_placement, layer.mask_enabled, image.to_raw_none() as usize, mask_ptr, layer.effects.as_ref().map(|e| e.to_string()).unwrap_or_default());
-        if let Some(s) = self.styled.get(&id) { if s.key == key { return Ok(Some((s.x, s.y, s.below.clone(), s.above.clone()))); } }
+        if let Some(s) = self.styled.get(&id) { if s.key == key { return Ok(Some(StyledDraw { x: s.x as f64, y: s.y as f64, below: s.below.clone(), inside: s.inside.clone(), above: s.above.clone() })); } }
         let reach = effects.reach();
-        let (bx, by, bw, bh) = layer.transform.bounds();
+        let (bx0, by0, bx1, by1) = layer.transform.bounds();
         // The layer's bounds padded by the effects' reach, kept within the canvas padded the same way.
-        let x0 = (bx.floor() as i64 - reach as i64).max(-(reach as i64));
-        let y0 = (by.floor() as i64 - reach as i64).max(-(reach as i64));
-        let x1 = ((bx + bw).ceil() as i64 + reach as i64).min(self.width as i64 + reach as i64);
-        let y1 = ((by + bh).ceil() as i64 + reach as i64).min(self.height as i64 + reach as i64);
+        let x0 = (bx0.floor() as i64 - reach as i64).max(-(reach as i64));
+        let y0 = (by0.floor() as i64 - reach as i64).max(-(reach as i64));
+        let x1 = (bx1.ceil() as i64 + reach as i64).min(self.width as i64 + reach as i64);
+        let y1 = (by1.ceil() as i64 + reach as i64).min(self.height as i64 + reach as i64);
         let (w, h) = ((x1 - x0).max(1) as i32, (y1 - y0).max(1) as i32);
         if w as i64 * h as i64 > 120_000_000 { return Ok(None); }
         let surface = new_argb(w, h)?;
@@ -466,9 +471,10 @@ impl Renderer {
         drop(surface);
         let rendered = effects.render(&alpha, wu, hu);
         let below = rendered.below.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
+        let inside = rendered.inside.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
         let above = rendered.above.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
-        self.styled.insert(id, Styled { key, x: x0 as i32, y: y0 as i32, below: below.clone(), above: above.clone() });
-        Ok(Some((x0 as i32, y0 as i32, below, above)))
+        self.styled.insert(id, Styled { key, x: x0 as i32, y: y0 as i32, below: below.clone(), inside: inside.clone(), above: above.clone() });
+        Ok(Some(StyledDraw { x: x0 as f64, y: y0 as f64, below, inside, above }))
     }
 
     pub fn set_layer_transform(&mut self, id: Uuid, transform: Transform) { self.touch();
@@ -768,9 +774,23 @@ impl Renderer {
         let direct = folders.is_empty() && clip.is_none() && layer.opacity() >= 1.0 && styled.is_none();
         cr.save()?;
         if !direct { cr.push_group(); }
-        if let Some((x, y, Some(below), _)) = &styled { cr.set_source_surface(below, *x as f64, *y as f64)?; cr.paint()?; }
-        self.paint_own(id, cr, if direct { operator(layer.blend_mode()) } else { Operator::Over })?;
-        if let Some((x, y, _, Some(above))) = &styled { cr.set_source_surface(above, *x as f64, *y as f64)?; cr.paint()?; }
+        if let Some(StyledDraw { x, y, below: Some(below), .. }) = &styled { cr.set_source_surface(below, *x, *y)?; cr.paint()?; }
+        match &styled {
+            Some(StyledDraw { x, y, inside: Some(inside), .. }) => {
+                // Interior effects recolor the layer within its own coverage: Atop in a group of its own,
+                // so the drop shadow already painted underneath is not part of that coverage.
+                cr.push_group();
+                self.paint_own(id, cr, Operator::Over)?;
+                cr.set_source_surface(inside, *x, *y)?;
+                cr.set_operator(Operator::Atop);
+                cr.paint()?;
+                cr.pop_group_to_source()?;
+                cr.set_operator(Operator::Over);
+                cr.paint()?;
+            }
+            _ => self.paint_own(id, cr, if direct { operator(layer.blend_mode()) } else { Operator::Over })?,
+        }
+        if let Some(StyledDraw { x, y, above: Some(above), .. }) = &styled { cr.set_source_surface(above, *x, *y)?; cr.paint()?; }
         if !direct {
             cr.pop_group_to_source()?;
             self.through_masks(cr, folders, clip)?;

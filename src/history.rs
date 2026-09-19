@@ -38,6 +38,8 @@ impl<S: Clone + PartialEq> History<S> {
     pub fn redo_name(&self) -> Option<&str> { self.future.last().map(|e| e.name.as_str()) }
     pub fn is_modified(&self) -> bool { self.revision != self.saved }
     pub fn mark_saved(&mut self) { self.saved = self.revision; }
+    /// An edit is open (its changes are on screen but not yet a step).
+    pub fn is_editing(&self) -> bool { self.depth > 0 }
 
     /// Starts an edit; nested begins fold into the outermost one.
     pub fn begin(&mut self, name: &str, state: S) {

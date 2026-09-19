@@ -564,13 +564,19 @@ impl Canvas {
         Some(Geometry::new(&layer.transform, |p| vp.view_point(p, size)))
     }
 
-    pub fn sync_inspector(&self) { self.options.sync_move(&self.doc); self.options.sync_type(&self.doc); self.options.show_mask_paint(self.doc.borrow().document.mask_target()); }
+    pub fn sync_inspector(&self) {
+        // Typing stops when the layer being typed into is no longer there (undo, delete, merge).
+        let stale = { let d = self.doc.borrow(); self.text_edit.borrow().is_some_and(|(id, _)| !d.document.has_layer(id) || d.document.text_style(id).is_none()) };
+        if stale { *self.text_edit.borrow_mut() = None; }
+        self.options.sync_move(&self.doc); self.options.sync_type(&self.doc); self.options.show_mask_paint(self.doc.borrow().document.mask_target());
+    }
 
     /// The Type tool's click: existing text under the point opens for editing, anywhere else starts a new
     /// type layer there, in the current style and the foreground color.
     fn type_at(&self, x: f64, y: f64) {
         // A click inside the text being edited moves the caret; anywhere else finishes it first.
-        if let Some((id, _)) = *self.text_edit.borrow() {
+        let editing = *self.text_edit.borrow();
+        if let Some((id, _)) = editing {
             let hit = { let d = self.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); d.document.text_layer_at(p) == Some(id) };
             if hit {
                 let index = { let d = self.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); Self::raster_point(&d, id, p).and_then(|(rx, ry)| d.document.text_style(id).map(|s| crate::text::index_at(&s, rx, ry))) };
@@ -600,16 +606,14 @@ impl Canvas {
         }
     }
 
-    /// A document point on a type layer's rendered surface (its raster), ignoring rotation.
+    /// A document point on a type layer's rendered surface (its raster), through the layer's full
+    /// placement (rotation and flips included).
     fn raster_point(d: &super::Doc, id: uuid::Uuid, p: (f64, f64)) -> Option<(f64, f64)> {
+        if !d.document.has_layer(id) { return None; }
         let t = d.document.renderer.layer(id).transform;
         let (rw, rh) = d.document.renderer.image_size(id)?;
-        let sx = t.size.0 / rw.max(1) as f64;
-        let sy = t.size.1 / rh.max(1) as f64;
-        let (mut x, mut y) = ((p.0 - t.origin.0) / sx.max(1e-9), (p.1 - t.origin.1) / sy.max(1e-9));
-        if t.flip_x { x = rw as f64 - x; }
-        if t.flip_y { y = rh as f64 - y; }
-        Some((x, y))
+        let to_raster = crate::selection::document_to_layer(&t, rw, rh).ok()?;
+        Some(to_raster.transform_point(p.0, p.1))
     }
 
     /// Starts typing into a type layer on the canvas, with the caret at byte `index` of its text.
@@ -647,8 +651,9 @@ impl Canvas {
     /// A key while typing on the canvas. True when it was taken.
     pub fn text_key(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
         let Some((id, mut index)) = *self.text_edit.borrow() else { return false };
-        let Some(mut style) = self.doc.borrow().document.text_style(id) else { self.finish_text_edit(); return false };
+        // The layer may have gone under the editor (undo, delete): then the edit is simply over.
         if !self.doc.borrow().document.has_layer(id) { self.finish_text_edit(); return false; }
+        let Some(mut style) = self.doc.borrow().document.text_style(id) else { self.finish_text_edit(); return false };
         let ctrl = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
         let alt = modifiers.contains(gdk::ModifierType::ALT_MASK);
         index = index.min(style.text.len());
@@ -1855,21 +1860,22 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         if doc.document.has_layer(id) {
             if let Some(style) = doc.document.text_style(id) {
                 let t = doc.document.renderer.layer(id).transform;
-                let (bx, by, bw, bh) = t.bounds();
-                let (x0, y0) = vp.view_point((bx, by), size);
-                let (x1, y1) = vp.view_point((bx + bw, by + bh), size);
                 cr.save()?;
                 cr.set_source_rgba(0.3, 0.7, 1.0, 0.9);
                 cr.set_line_width(1.0);
                 cr.set_dash(&[4.0, 3.0], 0.0);
-                cr.rectangle(x0.round() + 0.5, y0.round() + 0.5, (x1 - x0).round(), (y1 - y0).round());
-                cr.stroke()?;
-                cr.set_dash(&[], 0.0);
                 if let Some((rw, rh)) = doc.document.renderer.image_size(id) {
+                    // The frame follows the layer's placement: its raster corners through the transform.
+                    let to_doc = crate::render::pixel_to_document(&t, rw, rh);
+                    let corners = [(0.0, 0.0), (rw as f64, 0.0), (rw as f64, rh as f64), (0.0, rh as f64)].map(|(x, y)| { let d = to_doc.transform_point(x, y); vp.view_point(d, size) });
+                    cr.move_to(corners[0].0, corners[0].1);
+                    for c in &corners[1..] { cr.line_to(c.0, c.1); }
+                    cr.close_path();
+                    cr.stroke()?;
+                    cr.set_dash(&[], 0.0);
                     let (cx, cy, ch) = crate::text::caret(&style, index);
-                    let (sx, sy) = (t.size.0 / rw.max(1) as f64, t.size.1 / rh.max(1) as f64);
-                    let top = vp.view_point((t.origin.0 + cx * sx, t.origin.1 + cy * sy), size);
-                    let bottom = vp.view_point((t.origin.0 + cx * sx, t.origin.1 + (cy + ch) * sy), size);
+                    let top = vp.view_point(to_doc.transform_point(cx, cy), size);
+                    let bottom = vp.view_point(to_doc.transform_point(cx, cy + ch), size);
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
                     cr.set_line_width(3.0);
                     cr.move_to(top.0.round() + 0.5, top.1);

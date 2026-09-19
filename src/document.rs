@@ -679,11 +679,55 @@ impl Document {
     pub fn commit_free_transform(&mut self) -> Result<()> {
         let Some((id, source)) = self.floating.take() else { return Ok(()) };
         if !self.has_layer(id) || !self.has_layer(source) { self.end_edit(); return Ok(()); }
-        self.select_layer(Some(id));
-        let result = self.merge_layers();
-        if result.is_ok() { if let Some(merged) = self.active { let _ = self.select_layer_pixels(merged, Mode::Replace); } }
+        let result = self.merge_floating(id, source);
         self.end_edit();
         result
+    }
+
+    /// The floating pixels drawn onto the layer they came from, on that layer's own grid, which grows to
+    /// hold whatever landed outside it (`FloatingMerge.merge`); nothing off the canvas is lost. The moved
+    /// pixels stay selected.
+    fn merge_floating(&mut self, float: Uuid, source: Uuid) -> Result<()> {
+        let src = self.renderer.layer(source).clone();
+        let Some(image) = self.renderer.image(source).cloned() else { bail!("The layer has no pixels.") };
+        let (rw, rh) = (image.width(), image.height());
+        let to_doc = crate::render::pixel_to_document(&src.transform, rw, rh);
+        let to_raster = to_doc.try_invert()?;
+        let (x0, y0, x1, y1) = self.renderer.layer(float).transform.bounds();
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| to_raster.transform_point(x, y));
+        let (minx, miny) = corners.iter().fold((f64::MAX, f64::MAX), |a, c| (a.0.min(c.0), a.1.min(c.1)));
+        let (maxx, maxy) = corners.iter().fold((f64::MIN, f64::MIN), |a, c| (a.0.max(c.0), a.1.max(c.1)));
+        let (mut left, mut top) = ((-minx.floor()).max(0.0) as i32, (-miny.floor()).max(0.0) as i32);
+        let (mut right, mut bottom) = ((maxx.ceil() - rw as f64).max(0.0) as i32, (maxy.ceil() - rh as f64).max(0.0) as i32);
+        let (mut nw, mut nh) = (rw + left + right, rh + top + bottom);
+        if nw > 30_000 || nh > 30_000 || nw as i64 * nh as i64 > 100_000_000 { left = 0; top = 0; right = 0; bottom = 0; nw = rw; nh = rh; }
+        let _ = (right, bottom);
+        let out = new_argb(nw, nh)?;
+        {
+            let cr = Context::new(&out)?;
+            cr.set_source_surface(&image, left as f64, top as f64)?;
+            cr.paint()?;
+            // New raster point (x, y) is old raster point (x - left, y - top); through that, the document.
+            let mut shift = cairo::Matrix::identity();
+            shift.translate(-(left as f64), -(top as f64));
+            let new_to_doc = cairo::Matrix::multiply(&shift, &to_doc);
+            cr.transform(new_to_doc.try_invert()?);
+            self.renderer.draw_layer_plain(float, &cr)?;
+        }
+        let mut t = src.transform;
+        if (nw, nh) != (rw, rh) {
+            let scale = (t.size.0 / rw as f64, t.size.1 / rh as f64);
+            let center = to_doc.transform_point(nw as f64 / 2.0 - left as f64, nh as f64 / 2.0 - top as f64);
+            t.size = crate::format::Size(nw as f64 * scale.0, nh as f64 * scale.1);
+            t.origin = crate::format::Point(center.0 - t.size.0 / 2.0, center.1 - t.size.1 / 2.0);
+            if self.renderer.mask(source).is_some() && src.mask_placement.is_none() { self.renderer.set_mask_placement(source, Some(src.transform)); }
+        }
+        self.select_layer_pixels(float, Mode::Replace)?;
+        self.renderer.set_layer_transform(source, t);
+        self.renderer.set_image(source, out);
+        self.renderer.remove_layer(float);
+        self.select_layer(Some(source));
+        Ok(())
     }
 
     /// Escape: everything goes back to how it was before Ctrl+T.
@@ -716,10 +760,17 @@ impl Document {
         let visible: std::collections::HashSet<Uuid> = crate::format::visible_layers(&layers).into_iter().collect();
         if visible.is_empty() { bail!("No visible layers to merge."); }
         let flat = self.renderer.render_flat()?;
-        // Everything visible goes, along with whatever sits inside a visible folder.
-        let mut going: Vec<Uuid> = layers.iter().filter(|l| visible.contains(&l.id) || l.is_visible && l.parent_id.is_none_or(|p| visible.contains(&p))).map(|l| l.id).collect();
-        let mut i = 0;
-        while i < going.len() { let parent = going[i]; for l in &layers { if l.parent_id == Some(parent) && !going.contains(&l.id) { going.push(l.id); } } i += 1; }
+        // Everything that shows goes (visible layers inside visible folders, and those folders); a hidden
+        // layer inside a merged folder stays, moved up to the nearest folder that remains.
+        let going: Vec<Uuid> = crate::format::entries(&layers).into_iter().filter(|e| e.visible).map(|e| e.layer.id).collect();
+        let going_set: std::collections::HashSet<Uuid> = going.iter().copied().collect();
+        let mut reparent = Vec::new();
+        for l in &layers {
+            if going_set.contains(&l.id) { continue; }
+            let mut parent = l.parent_id;
+            while let Some(p) = parent { if !going_set.contains(&p) { break; } parent = layers.iter().find(|x| x.id == p).and_then(|x| x.parent_id); }
+            if parent != l.parent_id { reparent.push((l.id, parent)); }
+        }
         let top = layers.iter().rposition(|l| going.contains(&l.id)).unwrap_or(0);
         let name = layers[top].name.clone();
         let below = layers[..top].iter().filter(|l| !going.contains(&l.id)).count();
@@ -728,6 +779,7 @@ impl Document {
         record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
         let id = record.id;
         self.begin_edit("Merge Visible");
+        for (id, parent) in reparent { self.renderer.set_layer_parent(id, parent); }
         for g in &going { self.renderer.remove_layer(*g); }
         self.renderer.insert_layer(below.min(self.renderer.layers().len()), record, Some(flat), None);
         self.select_layer(Some(id));
@@ -973,6 +1025,11 @@ impl Document {
     pub fn effects(&self, id: Uuid) -> Option<crate::effects::Effects> {
         self.renderer.layer(id).effects.as_ref().and_then(crate::effects::Effects::from_record)
     }
+
+    /// The Layer Style dialog's session: one open edit from here until `end_layer_style`, so every change
+    /// previews live and the whole session is one step (or nothing, on Cancel).
+    pub fn begin_layer_style(&mut self) { self.begin_edit("Layer Style"); }
+    pub fn end_layer_style(&mut self, keep: bool) { if keep { self.end_edit(); } else { self.abort_edit(); } }
 
     /// Sets (or with None clears) a layer's effects; consecutive changes merge into one "Layer Style" step.
     pub fn set_effects(&mut self, id: Uuid, effects: Option<&crate::effects::Effects>) -> Result<()> {
@@ -2111,13 +2168,17 @@ impl Document {
     }
 
     pub fn save(&mut self, path: &std::path::Path) -> Result<()> {
+        // A floating selection lands first, as the Mac resolves it before writing.
+        if self.floating.is_some() { self.commit_free_transform()?; }
         let manifest = self.manifest();
         crate::format::save(path, &manifest, self.renderer.images(), self.renderer.masks())?;
         self.history.mark_saved();
         Ok(())
     }
 
-    pub fn is_modified(&self) -> bool { self.history.is_modified() }
+    /// Unsaved changes, counting a Free Transform or Layer Style still in progress (their pixels are on
+    /// screen even though the step has not closed).
+    pub fn is_modified(&self) -> bool { self.history.is_modified() || self.floating.is_some() || self.history.is_editing() }
 
     fn unique_name(&self, prefix: &str) -> String {
         let names: std::collections::HashSet<&str> = self.renderer.layers().iter().map(|l| l.name.as_str()).collect();

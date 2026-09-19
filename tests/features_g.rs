@@ -51,7 +51,12 @@ fn layer_via_copy_and_cut_lift_the_selection_in_place() {
     assert_eq!(alpha_at(&mut d, 15, 15), 0, "cut cleared the source");
     assert_eq!(alpha_at(&mut d, 5, 5), 255);
     d.undo();
-    assert_eq!(alpha_at(&mut d, 15, 15), 255, "one undo puts the pixels back");
+    assert!(d.renderer.layer(cut).is_visible, "the first undo only shows the cut layer again");
+    assert_eq!(d.undo_name(), Some("Layer Via Cut"));
+    d.undo();
+    assert!(!d.has_layer(cut), "the cut itself undone: the copy is gone");
+    d.set_visible(id, true);
+    assert_eq!(alpha_at(&mut d, 15, 15), 255, "and the source has its pixels back");
 }
 
 #[test]
@@ -122,6 +127,8 @@ fn free_transform_floats_the_selection_and_lands_it_as_one_step() {
     assert_eq!(alpha_at(&mut d, 5, 5), 0, "the pixels left their old place");
     assert_eq!(alpha_at(&mut d, 35, 35), 255, "and landed where the handles put them");
     assert_eq!(d.selection.as_ref().and_then(|s| s.bounds), Some((30, 30, 40, 40)), "the moved pixels stay selected");
+    let grown = d.renderer.layer(id).transform;
+    assert_eq!((grown.origin.0, grown.origin.1, grown.size.0, grown.size.1), (0.0, 0.0, 40.0, 40.0), "the source grid grew to hold the landing");
     assert_eq!(d.undo_name(), Some("Free Transform"));
     d.undo();
     assert_eq!(alpha_at(&mut d, 5, 5), 255, "one undo puts it all back");
@@ -138,4 +145,72 @@ fn free_transform_floats_the_selection_and_lands_it_as_one_step() {
     assert_eq!(alpha_at(&mut d, 35, 35), 0);
     d.deselect();
     assert!(d.begin_free_transform().is_err(), "needs a selection");
+}
+
+
+#[test]
+fn free_transform_keeps_off_canvas_pixels_merges_into_its_source_and_selects_only_the_moved_part() {
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    // A 20 by 20 layer half off the left edge, and an unrelated layer above it.
+    let id = d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let mut t = d.renderer.layer(id).transform;
+    t.origin = compositor::format::Point(-10.0, 0.0);
+    d.set_transform(id, t, "Move");
+    let other = d.add_shape_layer(false, (30.0, 30.0, 5.0, 5.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    d.select_layer(Some(id));
+    d.select_box(2.0, 2.0, 2.0, 2.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    // Reorder the float above the other layer: the commit must still land on its source.
+    d.move_layer_to_end(true);
+    let float = d.floating.unwrap().0;
+    let mut ft = d.renderer.layer(float).transform;
+    ft.origin = compositor::format::Point(20.0, 20.0);
+    d.set_transform(float, ft, "Move");
+    d.commit_free_transform().unwrap();
+    assert!(d.has_layer(other) && d.has_layer(id) && d.renderer.layers().len() == 3);
+    let t = d.renderer.layer(id).transform;
+    assert_eq!(t.origin.0, -10.0, "nothing off the canvas was lost");
+    assert!(t.size.0 >= 32.0, "the grid grew to hold the landing: {:?}", t.size);
+    assert_eq!(alpha_at(&mut d, 21, 21), 255);
+    assert_eq!(alpha_at(&mut d, 2, 2), 0, "cut from its old place");
+    assert_eq!(alpha_at(&mut d, 5, 5), 255, "the rest of the layer stayed");
+    assert_eq!(d.selection.as_ref().and_then(|s| s.bounds), Some((20, 20, 22, 22)), "only the moved pixels are selected");
+}
+
+#[test]
+fn free_transform_counts_as_modified_and_lands_before_saving() {
+    let mut d = Document::blank(20, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 10.0, 10.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let path = std::env::temp_dir().join(format!("compositor-test-{}-float.comp", std::process::id()));
+    d.save(&path).unwrap();
+    assert!(!d.is_modified());
+    d.select_box(0.0, 0.0, 5.0, 5.0, false, Mode::Replace, false).unwrap();
+    d.begin_free_transform().unwrap();
+    assert!(d.is_modified(), "a float in progress is unsaved work");
+    let float = d.floating.unwrap().0;
+    let mut t = d.renderer.layer(float).transform;
+    t.origin = compositor::format::Point(10.0, 10.0);
+    d.set_transform(float, t, "Move");
+    d.save(&path).unwrap();
+    assert!(d.floating.is_none(), "saving lands the float first");
+    assert!(!d.is_modified());
+    let reopened = Document::new(compositor::format::load(&path).unwrap()).unwrap();
+    assert_eq!(reopened.renderer.layers().len(), 2, "no floating layer in the file");
+}
+
+#[test]
+fn merge_visible_keeps_hidden_children_of_merged_folders() {
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let folder = d.add_folder();
+    d.select_layer(Some(folder));
+    let shown = d.add_shape_layer(false, (0.0, 0.0, 10.0, 10.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.select_layer(Some(folder));
+    let hidden = d.add_shape_layer(false, (20.0, 20.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    d.set_visible(hidden, false);
+    assert_eq!(d.renderer.layer(hidden).parent_id, Some(folder));
+    d.merge_visible().unwrap();
+    assert!(!d.has_layer(folder) && !d.has_layer(shown));
+    assert!(d.has_layer(hidden), "the hidden child survives");
+    assert_eq!(d.renderer.layer(hidden).parent_id, None, "moved up out of the merged folder");
+    assert_eq!(alpha_at(&mut d, 5, 5), 255);
 }

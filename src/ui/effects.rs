@@ -13,6 +13,13 @@ type Apply = Rc<dyn Fn()>;
 pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>) {
     let original = doc.borrow().document.effects(id).unwrap_or_default();
     let state = Rc::new(RefCell::new(original.clone()));
+    // One open edit for the whole session: OK closes it as a single step, Cancel drops it entirely.
+    doc.borrow_mut().document.begin_layer_style();
+    let ended = Rc::new(std::cell::Cell::new(false));
+    let end: Rc<dyn Fn(bool)> = {
+        let (doc, ended, finished) = (doc.clone(), ended.clone(), finished.clone());
+        Rc::new(move |keep| { if ended.replace(true) { return; } doc.borrow_mut().document.end_layer_style(keep); finished(); })
+    };
     let apply: Apply = {
         let (doc, state, finished) = (doc.clone(), state.clone(), finished.clone());
         Rc::new(move || {
@@ -65,10 +72,13 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
         clear.connect_clicked(move |_| { *state.borrow_mut() = Effects::default(); for (_, c) in &checks { c.set_active(false); } apply(); });
     }
     {
-        let (state, apply, window) = (state.clone(), apply.clone(), window.clone());
-        cancel.connect_clicked(move |_| { *state.borrow_mut() = original.clone(); apply(); window.close(); });
+        let (end, window) = (end.clone(), window.clone());
+        cancel.connect_clicked(move |_| { end(false); window.close(); });
     }
-    { let window = window.clone(); ok.connect_clicked(move |_| window.close()); }
+    { let (end, window) = (end.clone(), window.clone()); ok.connect_clicked(move |_| { end(true); window.close(); }); }
+    // Closing the window any other way keeps what is on screen, like OK.
+    { let end = end.clone(); window.connect_close_request(move |_| { end(true); gtk::glib::Propagation::Proceed }); }
+    let _ = original;
     let keys = gtk::EventControllerKey::new();
     { let cancel = cancel.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gtk::gdk::Key::Escape { cancel.emit_clicked(); gtk::glib::Propagation::Stop } else { gtk::glib::Propagation::Proceed } }); }
     window.add_controller(keys);

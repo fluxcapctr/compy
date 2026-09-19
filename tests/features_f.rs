@@ -148,3 +148,50 @@ fn layer_effects_render_around_the_layer_and_survive_saving() {
     assert!(folder.set_effects(f, Some(&Effects { stroke: Some(Stroke::default()), ..Effects::default() })).is_err());
     let _ = base;
 }
+
+
+#[test]
+fn layer_style_session_is_one_step_and_cancel_leaves_no_trace() {
+    use compositor::effects::{Effects, Stroke};
+    let mut d = Document::blank(30, 30, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (5.0, 5.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let path = std::env::temp_dir().join(format!("compositor-test-{}-style.comp", std::process::id()));
+    d.save(&path).unwrap();
+    d.begin_layer_style();
+    let mut e = Effects::default();
+    e.stroke = Some(Stroke { size: 2.0, position: 0, color: [1.0, 0.0, 0.0], opacity: 1.0, enabled: true });
+    d.set_effects(id, Some(&e)).unwrap();
+    assert!(d.is_modified(), "previewing counts as unsaved");
+    e.stroke.as_mut().unwrap().size = 3.0;
+    d.set_effects(id, Some(&e)).unwrap();
+    d.end_layer_style(false);
+    assert!(d.effects(id).is_none(), "cancel puts the layer back");
+    assert!(!d.is_modified(), "and leaves nothing to undo");
+    assert_ne!(d.undo_name(), Some("Layer Style"));
+    d.begin_layer_style();
+    d.set_effects(id, Some(&e)).unwrap();
+    e.stroke.as_mut().unwrap().size = 4.0;
+    d.set_effects(id, Some(&e)).unwrap();
+    d.end_layer_style(true);
+    assert_eq!(d.undo_name(), Some("Layer Style"));
+    d.undo();
+    assert!(d.effects(id).is_none(), "both changes undo as one step");
+}
+
+#[test]
+fn color_overlay_keeps_the_layer_alpha_and_effects_follow_a_layer_off_the_left_edge() {
+    use compositor::effects::{Effects, Overlay};
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let mut t = d.renderer.layer(id).transform;
+    t.origin = compositor::format::Point(-10.0, 0.0);
+    d.set_transform(id, t, "Move");
+    d.set_opacity(id, 0.5);
+    let mut e = Effects::default();
+    e.color_overlay = Some(Overlay { color: [1.0, 0.0, 0.0], opacity: 1.0, enabled: true });
+    d.set_effects(id, Some(&e)).unwrap();
+    let (px, w) = pixels(&mut d);
+    let p = px[(5 * w + 5) as usize];
+    assert!((p[3] as i32 - 128).abs() <= 2, "alpha stays the layer's: {p:?}");
+    assert!(p[0] > 120 && p[2] == 0, "recolored red, no blue left: {p:?}");
+}
