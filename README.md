@@ -186,7 +186,11 @@ finish. It acts through the compy tools, each an undoable step you watch happen:
 placement, fills, filters, adjustment layers, type, shapes, layer styles, canvas and image size, export,
 save, open, undo, and on fal.ai (with the cost stated first) Generative Fill and Expand, instruction
 edits of the active layer or its selected part ("give her a moustache", landing as a new layer over the
-original), a picture from a prompt, a four-times upscale, and relighting in a named style. Voice: with
+original), a picture from a prompt, a four-times upscale, and relighting in a named style. Edits and
+new pictures go to Nano Banana 2 (Google) by default; `~/.config/compositor/agent-models.json` sets the
+`generate` and `edit` models (GPT Image 2.5 is `openai/gpt-image-2.5/flare/text-to-image` and
+`.../flare/edit`; FLUX is `fal-ai/flux/dev` and `fal-ai/flux-pro/kontext`), and asking Compy for "gpt
+image" or "flux" on one job picks it for that job. Voice: with
 voxtype dictation running (Omarchy's Page Down), starting to talk opens Compy and the words go into its
 entry; when they stop, the message sends itself; the microphone button toggles the same. The same tools
 serve two other surfaces: `compositor mcp` is a Model Context Protocol server for Claude Code in the

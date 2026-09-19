@@ -65,8 +65,8 @@ pub fn tools() -> Vec<ToolSpec> {
         ToolSpec { name: "crop_to_selection", description: "Crop the canvas to the selection.", schema: obj(json!({}), &[]) },
         ToolSpec { name: "generative_fill", description: "Fill the selection with generated content from a text prompt (fal.ai, costs money; the result comes back as a masked layer). Returns the estimated cost when estimate_only is true.", schema: obj(json!({"prompt": {"type": "string"}, "count": {"type": "integer"}, "estimate_only": {"type": "boolean"}}), &["prompt"]) },
         ToolSpec { name: "generative_expand", description: "Grow the canvas by pixels on each side and fill the new area from a text prompt (fal.ai, costs money).", schema: obj(json!({"left": {"type": "integer"}, "right": {"type": "integer"}, "top": {"type": "integer"}, "bottom": {"type": "integer"}, "prompt": {"type": "string"}}), &["prompt"]) },
-        ToolSpec { name: "generative_edit", description: "Change the active layer's pixels (or just the selected part of them) by instruction, such as 'make the shirt red' or 'give her a moustache', through an image edit model on fal.ai (about $0.04 per image). The result lands as a new layer over the original, so both stay.", schema: obj(json!({"prompt": {"type": "string"}, "count": {"type": "integer"}}), &["prompt"]) },
-        ToolSpec { name: "generate_image", description: "Make a new picture from a text prompt on fal.ai (about $0.03 per megapixel) as a new layer; size defaults to the canvas.", schema: obj(json!({"prompt": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["prompt"]) },
+        ToolSpec { name: "generative_edit", description: "Change the active layer's pixels (or just the selected part of them) by instruction, such as 'make the shirt red' or 'give her a moustache', through an image edit model on fal.ai. The result lands as a new layer over the original, so both stay. model: 'nano banana' (Google, the default), 'gpt image' (OpenAI), 'flux' (Kontext), or a full fal id.", schema: obj(json!({"prompt": {"type": "string"}, "count": {"type": "integer"}, "model": {"type": "string"}}), &["prompt"]) },
+        ToolSpec { name: "generate_image", description: "Make a new picture from a text prompt on fal.ai as a new layer; size defaults to the canvas. model: 'nano banana' (Google, the default), 'gpt image' (OpenAI), 'flux', or a full fal id.", schema: obj(json!({"prompt": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "model": {"type": "string"}}), &["prompt"]) },
         ToolSpec { name: "upscale", description: "Four times the pixels of the active layer through an upscaler on fal.ai (about $0.02); the sharper result lands as a new layer at the same place.", schema: obj(json!({}), &[]) },
         ToolSpec { name: "relight", description: "Relight the active layer on fal.ai (about $0.05) with a lighting style: studio, golden_hour, blue_hour, dramatic, backlight, rim_light, side_light, candlelight, moonlight, spotlight or ambient. Lands as a new layer at the same place.", schema: obj(json!({"style": {"type": "string"}}), &["style"]) },
         ToolSpec { name: "export", description: "Write the visible composite to a PNG or JPEG file (path with .png or .jpg).", schema: obj(json!({"path": {"type": "string"}, "quality": {"type": "number"}}), &["path"]) },
@@ -160,6 +160,7 @@ mod tests {
         assert_eq!(names.len(), names.iter().collect::<std::collections::HashSet<_>>().len(), "unique names");
         assert_eq!(parse_color("#ff8000"), Some([1.0, 128.0 / 255.0, 0.0]));
         assert_eq!(parse_color("nope"), None);
-        assert!(matches!(call("state", json!({})), Err(_)), "no app running: a clear error");
+        // Only meaningful when no Compy is running on this desktop; with one up the call succeeds.
+        if !socket_path().exists() { assert!(matches!(call("state", json!({})), Err(_)), "no app running: a clear error"); }
     }
 }

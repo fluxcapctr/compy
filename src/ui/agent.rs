@@ -342,7 +342,9 @@ impl App {
                         let (model, body, place, name, cost): (String, Value, (f64, f64, f64, f64), String, f64) = match tool {
                             "generate_image" => {
                                 let (gw, gh) = (num(args, "width").unwrap_or(w).clamp(64.0, 4096.0), num(args, "height").unwrap_or(h).clamp(64.0, 4096.0));
-                                ("fal-ai/flux/dev".into(), json!({"prompt": text(args, "prompt").unwrap_or_default(), "image_size": {"width": gw as i64, "height": gh as i64}, "num_images": 1, "output_format": "png"}), ((w - gw) / 2.0, (h - gh) / 2.0, gw, gh), "Generated".into(), 0.03 * gw * gh / 1_000_000.0)
+                                let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_default(), false);
+                                let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), None, gw as usize, gh as usize, 1);
+                                (model, body, ((w - gw) / 2.0, (h - gh) / 2.0, gw, gh), "Generated".into(), 0.05)
                             }
                             _ => {
                                 let Some((png, rect)) = dd.copy_layer_pixels()? else { bail!("The active layer has no pixels there.") };
@@ -350,7 +352,12 @@ impl App {
                                 let uri = crate::genfill::data_uri(&png);
                                 let place = (rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64);
                                 match tool {
-                                    "generative_edit" => { let count = num(args, "count").unwrap_or(1.0).clamp(1.0, 4.0) as i64; ("fal-ai/flux-pro/kontext".into(), json!({"prompt": text(args, "prompt").unwrap_or_default(), "image_url": uri, "num_images": count, "output_format": "png"}), place, format!("{layer_name} edited"), 0.04 * count as f64) }
+                                    "generative_edit" => {
+                                        let count = num(args, "count").unwrap_or(1.0).clamp(1.0, 4.0) as i64;
+                                        let model = crate::genfill::resolve_model(&text(args, "model").unwrap_or_default(), true);
+                                        let body = crate::genfill::agent_body(&model, &text(args, "prompt").unwrap_or_default(), Some(&uri), rect.2 as usize, rect.3 as usize, count);
+                                        (model, body, place, format!("{layer_name} edited"), 0.05 * count as f64)
+                                    }
                                     "upscale" => ("fal-ai/aura-sr".into(), json!({"image_url": uri, "upscaling_factor": 4}), place, format!("{layer_name} upscaled"), 0.02),
                                     _ => ("fal-ai/image-apps-v2/relighting".into(), json!({"image_url": uri, "lighting_style": text(args, "style").unwrap_or_else(|| "studio".into())}), place, format!("{layer_name} relit"), 0.05),
                                 }
@@ -394,10 +401,21 @@ impl App {
             let png = crate::genfill::base64_decode(first)?;
             let p = v.get("place").cloned().unwrap_or(json!({}));
             let name = v.get("name").and_then(Value::as_str).unwrap_or("Generated").to_string();
+            // The picture fits inside the place, centered, keeping its own proportions: models that
+            // pick from a list of aspect ratios return something close to, not exactly, the request.
+            let (mut x, mut y, mut pw, mut ph) = (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0), p["width"].as_f64().unwrap_or(100.0), p["height"].as_f64().unwrap_or(100.0));
+            if let Some((iw, ih)) = crate::genfill::png_size(&png) {
+                let scale = (pw / iw as f64).min(ph / ih as f64);
+                let (fw, fh) = (iw as f64 * scale, ih as f64 * scale);
+                x += (pw - fw) / 2.0;
+                y += (ph - fh) / 2.0;
+                pw = fw;
+                ph = fh;
+            }
             let mut result = Ok(Value::Null);
             self.with_current(|page| {
                 let mut d = page.canvas.doc().borrow_mut();
-                result = d.document.add_image_layer(&png, &name, (p["x"].as_f64().unwrap_or(0.0), p["y"].as_f64().unwrap_or(0.0)), (p["width"].as_f64().unwrap_or(100.0), p["height"].as_f64().unwrap_or(100.0))).map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
+                result = d.document.add_image_layer(&png, &name, (x, y), (pw, ph)).map(|id| json!({"layer": crate::format::upper(id), "variations": images.len(), "cost_usd": v.get("cost_usd")}));
                 drop(d);
                 page.refresh();
             });

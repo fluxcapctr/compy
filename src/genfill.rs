@@ -74,6 +74,89 @@ pub fn models() -> Vec<Model> {
     list
 }
 
+/// The models Compy's generate_image and generative_edit tools use, from
+/// `~/.config/compositor/agent-models.json` (written with the defaults when absent). Each is a fal id
+/// or a family name that `resolve_model` understands ("nano banana", "gpt image", "flux").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentModels {
+    pub generate: String,
+    pub edit: String,
+}
+
+impl Default for AgentModels {
+    fn default() -> Self { Self { generate: "fal-ai/nano-banana-2".into(), edit: "fal-ai/nano-banana-2/edit".into() } }
+}
+
+pub fn agent_models() -> AgentModels {
+    let path = config_dir().join("agent-models.json");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(m) = serde_json::from_str::<AgentModels>(&text) { return m; }
+    }
+    let m = AgentModels::default();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&m).unwrap_or_default());
+    m
+}
+
+/// A family name or a full fal id, resolved to the id for generation (`edit` false) or editing.
+pub fn resolve_model(name: &str, edit: bool) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    if n.is_empty() {
+        let m = agent_models();
+        return resolve_model(if edit { &m.edit } else { &m.generate }, edit);
+    }
+    if n.contains('/') { return name.trim().to_string(); }
+    let id = if n.contains("banana") || n.contains("gemini") || n.contains("google") {
+        if edit { "fal-ai/nano-banana-2/edit" } else { "fal-ai/nano-banana-2" }
+    } else if n.contains("gpt") || n.contains("openai") {
+        if edit { "openai/gpt-image-2.5/flare/edit" } else { "openai/gpt-image-2.5/flare/text-to-image" }
+    } else if n.contains("flux") || n.contains("kontext") {
+        if edit { "fal-ai/flux-pro/kontext" } else { "fal-ai/flux/dev" }
+    } else {
+        return name.trim().to_string();
+    };
+    id.to_string()
+}
+
+const ASPECTS: [(&str, f64); 14] = [("21:9", 21.0 / 9.0), ("16:9", 16.0 / 9.0), ("3:2", 1.5), ("4:3", 4.0 / 3.0), ("5:4", 1.25), ("1:1", 1.0), ("4:5", 0.8), ("3:4", 0.75), ("2:3", 2.0 / 3.0), ("9:16", 9.0 / 16.0), ("4:1", 4.0), ("1:4", 0.25), ("8:1", 8.0), ("1:8", 0.125)];
+
+/// The Nano Banana aspect ratio nearest to `width` x `height`.
+pub fn nearest_aspect(width: usize, height: usize) -> &'static str {
+    let r = width.max(1) as f64 / height.max(1) as f64;
+    ASPECTS.iter().min_by(|a, b| (a.1.ln() - r.ln()).abs().partial_cmp(&(b.1.ln() - r.ln()).abs()).unwrap()).map(|a| a.0).unwrap_or("1:1")
+}
+
+/// The request body for a generation (`source` none, sized `width` x `height`) or an edit of `source`
+/// (a data URI) shaped for the model's family: Nano Banana takes an aspect ratio and a resolution
+/// tier, GPT Image a size and a quality, FLUX a size or a single image_url.
+pub fn agent_body(model: &str, prompt: &str, source: Option<&str>, width: usize, height: usize, count: i64) -> serde_json::Value {
+    let mut body = serde_json::json!({"prompt": prompt, "num_images": count.clamp(1, 4), "output_format": "png"});
+    let side = width.max(height);
+    if model.contains("nano-banana") {
+        body["aspect_ratio"] = serde_json::Value::from(if source.is_some() { "auto" } else { nearest_aspect(width, height) });
+        body["resolution"] = serde_json::Value::from(if side > 2800 { "4K" } else if side > 1400 { "2K" } else { "1K" });
+        if let Some(s) = source { body["image_urls"] = serde_json::json!([s]); }
+    } else if model.starts_with("openai/") {
+        body["image_size"] = if source.is_some() { serde_json::Value::from("auto") } else { serde_json::json!({"width": width, "height": height}) };
+        body["quality"] = serde_json::Value::from("high");
+        if let Some(s) = source { body["image_urls"] = serde_json::json!([s]); }
+    } else {
+        match source {
+            Some(s) => body["image_url"] = serde_json::Value::from(s),
+            None => body["image_size"] = serde_json::json!({"width": width, "height": height}),
+        }
+    }
+    body
+}
+
+/// The pixel size in a PNG's header.
+pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let reader = decoder.read_info().ok()?;
+    let info = reader.info();
+    Some((info.width, info.height))
+}
+
 /// Writes the key to `~/.config/compositor/fal.key`, readable by the user only.
 pub fn save_key(key: &str) -> Result<()> {
     let key = key.trim();
@@ -253,5 +336,29 @@ mod tests {
         assert_eq!(b["num_images"], 4);
         assert_eq!(b["seed"], 7);
         assert!(!b["prompt"].as_str().unwrap().is_empty(), "an empty prompt still asks for something");
+    }
+
+    #[test]
+    fn agent_bodies_follow_the_model_family() {
+        assert_eq!(resolve_model("nano banana", false), "fal-ai/nano-banana-2");
+        assert_eq!(resolve_model("GPT image", true), "openai/gpt-image-2.5/flare/edit");
+        assert_eq!(resolve_model("flux", true), "fal-ai/flux-pro/kontext");
+        assert_eq!(resolve_model("fal-ai/anything/else", true), "fal-ai/anything/else");
+        assert_eq!(nearest_aspect(1920, 1080), "16:9");
+        assert_eq!(nearest_aspect(1000, 1000), "1:1");
+        assert_eq!(nearest_aspect(800, 1000), "4:5");
+        let g = agent_body("fal-ai/nano-banana-2", "a cat", None, 1500, 1000, 1);
+        assert_eq!(g["aspect_ratio"], "3:2");
+        assert_eq!(g["resolution"], "2K");
+        assert!(g.get("image_urls").is_none());
+        let e = agent_body("fal-ai/nano-banana-2/edit", "redder", Some("data:x"), 500, 500, 2);
+        assert_eq!(e["aspect_ratio"], "auto");
+        assert_eq!(e["image_urls"][0], "data:x");
+        assert_eq!(e["num_images"], 2);
+        let o = agent_body("openai/gpt-image-2.5/flare/text-to-image", "a dog", None, 1024, 768, 1);
+        assert_eq!(o["image_size"]["width"], 1024);
+        assert_eq!(o["quality"], "high");
+        let f = agent_body("fal-ai/flux-pro/kontext", "bluer", Some("data:y"), 10, 10, 1);
+        assert_eq!(f["image_url"], "data:y");
     }
 }
