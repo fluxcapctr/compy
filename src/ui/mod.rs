@@ -329,6 +329,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     let bar = gtk::PopoverMenuBar::from_model(Some(&menu()));
     bar.add_css_class("main-menu");
     header.pack_start(&bar);
+    // Compy, the assistant, at the right end of the bar with the same robot Omarchy's bar shows for agents.
+    let compy = gtk::Button::builder().child(&gtk::Label::builder().label("\u{f16a3}").css_classes(["compy-glyph"]).build()).action_name("win.assistant").tooltip_text("Compy, the assistant (Ctrl+K)").has_frame(false).build();
+    header.pack_end(&compy);
     window.set_titlebar(Some(&header));
 
     let notebook = gtk::Notebook::builder().scrollable(true).show_border(false).build();
@@ -732,7 +735,7 @@ fn menu() -> gio::Menu {
     filter.append(Some("Heal Selection"), Some("win.heal-selection"));
     menu.append_submenu(Some("Filter"), &filter);
     let help = gio::Menu::new();
-    help.append(Some("Assistant (Ctrl+K)"), Some("win.assistant"));
+    help.append(Some("Compy, the assistant (Ctrl+K)"), Some("win.assistant"));
     help.append(Some("Keyboard Shortcuts (F1)"), Some("win.shortcuts"));
     menu.append_submenu(Some("Help"), &help);
     menu
@@ -899,7 +902,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("View", "Ctrl+Shift+H, Return", "Transform handles on and off; Return puts them away until the next click"),
     ("View", "Double-click a ruler", "New guide there; drag guides with Move"),
     ("Help", "F1, Ctrl+Alt+Shift+K", "This list"),
-    ("Help", "Ctrl+K", "The assistant: tell Claude what to do with the open document"),
+    ("Help", "Ctrl+K", "Compy, the assistant: tell it what to do with the open document"),
 ];
 
 impl App {

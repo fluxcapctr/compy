@@ -383,14 +383,14 @@ impl Assistant {
         let scroller = gtk::ScrolledWindow::builder().child(&transcript).min_content_height(300).min_content_width(380).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         content.append(&scroller);
         let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
-        let entry = gtk::Entry::builder().placeholder_text("Ask about what is open, or tell it what to do").hexpand(true).build();
+        let entry = gtk::Entry::builder().placeholder_text("Tell Compy what to do with what is open").hexpand(true).build();
         let send = gtk::Button::builder().label("Send").css_classes(["suggested-action"]).build();
         row.append(&entry);
         row.append(&send);
         content.append(&row);
-        let status = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "caption"]).label("Sees the canvas, the layers and the selection with every message. Uses your Claude Code login.").wrap(true).build();
+        let status = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "caption"]).label("Compy sees the canvas, the layers and your selection. Runs on your Claude Code login.").wrap(true).build();
         content.append(&status);
-        let window = super::dialogs::floating(app.window.upcast_ref(), "Assistant", false, 440, &content);
+        let window = super::dialogs::floating(app.window.upcast_ref(), "\u{f16a3}  Compy", false, 440, &content);
         window.set_resizable(true);
         let this = Rc::new(Assistant { window: window.clone(), transcript, entry: entry.clone(), status, send: send.clone(), session: RefCell::new(None), busy: Cell::new(false), app });
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
@@ -404,8 +404,8 @@ impl Assistant {
     fn append(&self, who: &str, text: &str) {
         let buffer = self.transcript.buffer();
         let mut end = buffer.end_iter();
-        let prefix = match who { "you" => "You: ", "claude" => "Claude: ", "tool" => "  ▸ ", _ => "" };
-        buffer.insert(&mut end, &format!("{prefix}{text}\n"));
+        let prefix = match who { "you" => "You: ", "claude" => "Compy: ", _ => "" };
+        buffer.insert(&mut end, &format!("{prefix}{text}\n\n"));
         let mark = buffer.create_mark(None, &buffer.end_iter(), false);
         self.transcript.scroll_to_mark(&mark, 0.0, true, 0.0, 1.0);
     }
@@ -415,11 +415,12 @@ impl Assistant {
         let mut state = json!(null);
         self.app.with_current(|p| state = state_of(&p.canvas.doc().borrow()));
         format!(concat!(
-            "You are the assistant inside Compy, a layer-based image editor. Use the compy MCP tools to look and act; every tool works on the document ",
+            "You are Compy, the assistant inside Compy, a layer-based image editor. Use the compy MCP tools to look and act; every tool works on the document ",
             "that is open in front of the user, as an undoable step they watch happen. When the user says 'this' or 'the thing I selected', they mean ",
             "the current selection (its bounds are in the state; call snapshot to see the canvas, the selection is outlined in red). Prefer native tools ",
             "(select, layers, adjustments, styles, type) over generation; generative tools cost money, so state the estimated cost before running one ",
-            "unless the user already asked for it plainly. Keep replies short and say what you did. Current state of the document:\n{}"),
+            "unless the user already asked for it plainly. Talk like a colleague at the next desk: short, plain sentences about the picture, never about tools, ",
+            "JSON, ids or code. Say what changed in a line or two. Current state of the document:\n{}"),
             serde_json::to_string(&state).unwrap_or_default())
     }
 
@@ -432,7 +433,7 @@ impl Assistant {
         self.append("you", &message);
         self.busy.set(true);
         self.send.set_sensitive(false);
-        self.status.set_label("Thinking…");
+        self.status.set_label("Compy is thinking…");
         // The MCP server is this same binary, pointed at the running app.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("compositor"));
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config")).join("compositor");
@@ -488,10 +489,9 @@ impl Assistant {
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => { if let Some(t) = block.get("text").and_then(Value::as_str) { if !t.trim().is_empty() { self.append("claude", t.trim()); } } }
                         Some("tool_use") => {
-                            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool").trim_start_matches("mcp__compy__").to_string();
-                            let input = block.get("input").map(|i| serde_json::to_string(i).unwrap_or_default()).unwrap_or_default();
-                            self.append("tool", &format!("{name} {}", if input.len() > 120 { format!("{}…", &input[..120]) } else { input }));
-                            self.status.set_label(&format!("Running {name}…"));
+                            // The work shows on the canvas, not in the chat: just a word in the status line.
+                            let name = block.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches("mcp__compy__").replace('_', " ");
+                            self.status.set_label(&format!("Compy is working ({name})…"));
                         }
                         _ => {}
                     }
@@ -500,7 +500,8 @@ impl Assistant {
             Some("result") => {
                 let cost = v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
                 let turns = v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
-                self.status.set_label(&format!("Done. {turns} steps, about ${cost:.3} of Claude usage this turn."));
+                let _ = turns;
+                self.status.set_label(&format!("Done. About ${cost:.2} of Claude usage this turn."));
             }
             _ => {}
         }
