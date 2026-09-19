@@ -50,6 +50,8 @@ pub struct Canvas {
     cache: RefCell<Option<FrameCache>>,
     /// The popover open over the canvas (brush settings or a context menu), closed by the next press.
     popover: RefCell<Option<gtk::Popover>>,
+    /// Text being typed on the canvas: the type layer and the caret's byte index in its text.
+    text_edit: RefCell<Option<(uuid::Uuid, usize)>>,
     /// A marquee or lasso being drawn.
     draft: RefCell<Option<Draft>>,
     /// Dragging a selection outline: its offset so far (document pixels).
@@ -128,11 +130,11 @@ impl Canvas {
 
         let canvas = Rc::new_cyclic(|weak: &std::rc::Weak<Canvas>| {
             let weak = weak.clone();
-            let rail = ToolRail::new(doc.clone(), Rc::new(move || { if let Some(c) = weak.upgrade() { c.tool_changed(); } }));
+            let rail = ToolRail::new(doc.clone(), Rc::new(move || { if let Some(c) = weak.upgrade() { c.finish_text_edit(); c.tool_changed(); } }));
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -217,7 +219,8 @@ impl Canvas {
                     }
                 }
                 if trace { eprintln!("  texture {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); }
-                if let Err(error) = draw_overlays(&mut d, cr, w as f64, h as f64, pointer.get(), draft.as_ref(), offset) { eprintln!("canvas overlay failed: {error:#}"); }
+                let text_edit = *this.text_edit.borrow();
+                if let Err(error) = draw_overlays(&mut d, cr, w as f64, h as f64, pointer.get(), draft.as_ref(), offset, text_edit) { eprintln!("canvas overlay failed: {error:#}"); }
                 if trace { eprintln!("frame {:.1} ms at {} ({rendered})", start.elapsed().as_secs_f64() * 1000.0, zoom_text(d.viewport.zoom())); }
             });
         }
@@ -368,6 +371,7 @@ impl Canvas {
             click.connect_pressed(move |g, n, x, y| {
                 this.close_popover();
                 if this.space_held.get() { return; }
+                if this.text_editing() && this.doc.borrow().tool != Tool::Type { this.finish_text_edit(); }
                 if n == 2 && this.doc.borrow().rulers && (x < RULER || y < RULER) {
                     // The single press already made and placed the guide; the second click leaves it there.
                     this.finish_guide_drag();
@@ -565,56 +569,123 @@ impl Canvas {
     /// The Type tool's click: existing text under the point opens for editing, anywhere else starts a new
     /// type layer there, in the current style and the foreground color.
     fn type_at(&self, x: f64, y: f64) {
+        // A click inside the text being edited moves the caret; anywhere else finishes it first.
+        if let Some((id, _)) = *self.text_edit.borrow() {
+            let hit = { let d = self.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); d.document.text_layer_at(p) == Some(id) };
+            if hit {
+                let index = { let d = self.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); Self::raster_point(&d, id, p).and_then(|(rx, ry)| d.document.text_style(id).map(|s| crate::text::index_at(&s, rx, ry))) };
+                if let Some(index) = index { self.text_edit.borrow_mut().as_mut().map(|e| e.1 = index); }
+                self.area.queue_draw();
+                return;
+            }
+        }
+        self.finish_text_edit();
         let result = {
             let mut d = self.doc.borrow_mut();
             let size = d.size();
             let point = d.viewport.document_point((x, y), size);
             match d.document.text_layer_at(point) {
-                Some(id) => { d.document.select_layer(Some(id)); Ok(id) }
-                None => { let mut style = d.text_style.clone(); style.color = d.brush.color; d.document.add_text_layer(&style, point.0, point.1) }
+                Some(id) => { d.document.select_layer(Some(id)); Ok((id, Some(point))) }
+                None => { let mut style = d.text_style.clone(); style.color = d.brush.color; style.text = String::new(); d.document.add_text_layer(&style, point.0, point.1).map(|id| (id, None)) }
             }
         };
         match result {
-            Ok(id) => { if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); } self.sync_inspector(); self.area.queue_draw(); self.edit_text(id); }
+            Ok((id, clicked)) => {
+                if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+                self.sync_inspector();
+                let index = { let d = self.doc.borrow(); match (clicked, d.document.text_style(id)) { (Some(p), Some(style)) => Self::raster_point(&d, id, p).map(|(rx, ry)| crate::text::index_at(&style, rx, ry)).unwrap_or(style.text.len()), (_, Some(style)) => style.text.len(), _ => 0 } };
+                self.begin_text_edit(id, index);
+            }
             Err(error) => self.notify(&format!("{error:#}")),
         }
     }
 
-    /// A floating editor for a type layer's text: each keystroke sets the layer again (one undo step).
+    /// A document point on a type layer's rendered surface (its raster), ignoring rotation.
+    fn raster_point(d: &super::Doc, id: uuid::Uuid, p: (f64, f64)) -> Option<(f64, f64)> {
+        let t = d.document.renderer.layer(id).transform;
+        let (rw, rh) = d.document.renderer.image_size(id)?;
+        let sx = t.size.0 / rw.max(1) as f64;
+        let sy = t.size.1 / rh.max(1) as f64;
+        let (mut x, mut y) = ((p.0 - t.origin.0) / sx.max(1e-9), (p.1 - t.origin.1) / sy.max(1e-9));
+        if t.flip_x { x = rw as f64 - x; }
+        if t.flip_y { y = rh as f64 - y; }
+        Some((x, y))
+    }
+
+    /// Starts typing into a type layer on the canvas, with the caret at byte `index` of its text.
+    pub fn begin_text_edit(&self, id: uuid::Uuid, index: usize) {
+        *self.text_edit.borrow_mut() = Some((id, index));
+        self.area.set_focusable(true);
+        self.area.grab_focus();
+        self.notify("Type on the canvas. Return adds a line; Escape or Ctrl+Return finishes; the options bar sets the font.");
+        self.area.queue_draw();
+    }
+
+    /// Edit Text from a menu: typing starts at the end of the layer's text.
     pub fn edit_text(&self, id: uuid::Uuid) {
-        let Some(parent) = self.widget.root().and_downcast::<gtk::Window>() else { return };
-        let Some(style) = self.doc.borrow().document.text_style(id) else { return };
-        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(10).margin_bottom(10).margin_start(10).margin_end(10).build();
-        let view = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).accepts_tab(false).top_margin(6).bottom_margin(6).left_margin(8).right_margin(8).build();
-        view.buffer().set_text(&style.text);
-        let scroller = gtk::ScrolledWindow::builder().child(&view).min_content_height(120).max_content_height(320).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
-        scroller.add_css_class("frame");
-        content.append(&scroller);
-        let hint = gtk::Label::builder().label("Edits show on the canvas as you type. Return adds a line; Escape or closing keeps the text; the options bar sets the font.").wrap(true).xalign(0.0).css_classes(["dim-label"]).build();
-        content.append(&hint);
-        let window = super::dialogs::floating(&parent, "Type", false, 380, &content);
+        let len = self.doc.borrow().document.text_style(id).map(|s| s.text.len()).unwrap_or(0);
+        self.begin_text_edit(id, len);
+    }
+
+    pub fn text_editing(&self) -> bool { self.text_edit.borrow().is_some() }
+
+    /// Ends typing. A layer left with no text goes, as Photoshop drops an empty type layer.
+    pub fn finish_text_edit(&self) {
+        let Some((id, _)) = self.text_edit.borrow_mut().take() else { return };
         {
-            let (doc, area, refresh) = (self.doc.clone(), self.area.clone(), self.refresh.borrow().clone());
-            view.buffer().connect_changed(move |buffer| {
-                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).to_string();
-                let Ok(mut d) = doc.try_borrow_mut() else { return };
-                if !d.document.has_layer(id) { return; }
-                let Some(mut style) = d.document.text_style(id) else { return };
-                if style.text == text || text.trim().is_empty() { return; }
-                style.text = text;
-                if let Err(error) = d.document.set_text(id, &style) { eprintln!("type: {error:#}"); return; }
-                drop(d);
-                if let Some(refresh) = refresh.as_ref() { refresh(); }
-                area.queue_draw();
-            });
+            let mut d = self.doc.borrow_mut();
+            if d.document.has_layer(id) && d.document.text_style(id).is_some_and(|s| s.text.trim().is_empty()) {
+                d.document.select_layer(Some(id));
+                d.document.delete_layer();
+            }
         }
-        let keys = gtk::EventControllerKey::new();
-        { let window = window.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gdk::Key::Escape { window.close(); glib::Propagation::Stop } else { glib::Propagation::Proceed } }); }
-        window.add_controller(keys);
-        window.present();
-        view.grab_focus();
-        let buffer = view.buffer();
-        buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.sync_inspector();
+        self.area.queue_draw();
+    }
+
+    /// A key while typing on the canvas. True when it was taken.
+    pub fn text_key(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+        let Some((id, mut index)) = *self.text_edit.borrow() else { return false };
+        let Some(mut style) = self.doc.borrow().document.text_style(id) else { self.finish_text_edit(); return false };
+        if !self.doc.borrow().document.has_layer(id) { self.finish_text_edit(); return false; }
+        let ctrl = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
+        let alt = modifiers.contains(gdk::ModifierType::ALT_MASK);
+        index = index.min(style.text.len());
+        while !style.text.is_char_boundary(index) { index -= 1; }
+        let prev = |t: &str, i: usize| t[..i].chars().next_back().map(|c| i - c.len_utf8()).unwrap_or(0);
+        let next = |t: &str, i: usize| t[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i);
+        let mut changed = false;
+        match key {
+            gdk::Key::Escape => { self.finish_text_edit(); return true; }
+            gdk::Key::Return | gdk::Key::KP_Enter if ctrl => { self.finish_text_edit(); return true; }
+            gdk::Key::Return | gdk::Key::KP_Enter => { style.text.insert(index, '\n'); index += 1; changed = true; }
+            gdk::Key::BackSpace => { if index > 0 { let p = if ctrl { word_start(&style.text, index) } else { prev(&style.text, index) }; style.text.replace_range(p..index, ""); index = p; changed = true; } }
+            gdk::Key::Delete | gdk::Key::KP_Delete => { if index < style.text.len() { let n = next(&style.text, index); style.text.replace_range(index..n, ""); changed = true; } }
+            gdk::Key::Left => { index = if ctrl { word_start(&style.text, index) } else { prev(&style.text, index) }; }
+            gdk::Key::Right => { index = if ctrl { word_end(&style.text, index) } else { next(&style.text, index) }; }
+            gdk::Key::Home => { index = style.text[..index].rfind('\n').map(|i| i + 1).unwrap_or(0); }
+            gdk::Key::End => { index = style.text[index..].find('\n').map(|i| index + i).unwrap_or(style.text.len()); }
+            gdk::Key::Up | gdk::Key::Down => {
+                let (cx, cy, h) = crate::text::caret(&style, index);
+                let target_y = if key == gdk::Key::Up { cy - h / 2.0 } else { cy + h * 1.5 };
+                if target_y >= 0.0 { index = crate::text::index_at(&style, cx, target_y); }
+            }
+            _ if ctrl || alt => return false,
+            _ => match key.to_unicode() {
+                Some(c) if !c.is_control() => { style.text.insert(index, c); index += c.len_utf8(); changed = true; }
+                _ => return false,
+            },
+        }
+        if changed {
+            let result = self.doc.borrow_mut().document.set_text(id, &style);
+            if let Err(error) = result { self.notify(&format!("{error:#}")); }
+            if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+            self.sync_inspector();
+        }
+        *self.text_edit.borrow_mut() = Some((id, index));
+        self.area.queue_draw();
+        true
     }
 
     /// Arrow keys nudge the layer (Move) or the selection outline (selection tools); Escape, Return and
@@ -1511,7 +1582,7 @@ fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) ->
 
 /// Everything that sits on top of the composited document and changes without it: the transform box and
 /// guides, selection drafts, the brush cursor, the clone crosshair, and the marching ants.
-fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, pointer: (f64, f64), draft: Option<&Draft>, outline_offset: (f64, f64)) -> Result<()> {
+fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, pointer: (f64, f64), draft: Option<&Draft>, outline_offset: (f64, f64), text_edit: Option<(uuid::Uuid, usize)>) -> Result<()> {
     let size = doc.size();
     let vp = doc.viewport;
     let (rx, ry, rw, rh) = vp.document_rect(size);
@@ -1779,6 +1850,41 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         }
     }
 
+    // Text being typed: a dashed frame around the type layer and the caret.
+    if let Some((id, index)) = text_edit {
+        if doc.document.has_layer(id) {
+            if let Some(style) = doc.document.text_style(id) {
+                let t = doc.document.renderer.layer(id).transform;
+                let (bx, by, bw, bh) = t.bounds();
+                let (x0, y0) = vp.view_point((bx, by), size);
+                let (x1, y1) = vp.view_point((bx + bw, by + bh), size);
+                cr.save()?;
+                cr.set_source_rgba(0.3, 0.7, 1.0, 0.9);
+                cr.set_line_width(1.0);
+                cr.set_dash(&[4.0, 3.0], 0.0);
+                cr.rectangle(x0.round() + 0.5, y0.round() + 0.5, (x1 - x0).round(), (y1 - y0).round());
+                cr.stroke()?;
+                cr.set_dash(&[], 0.0);
+                if let Some((rw, rh)) = doc.document.renderer.image_size(id) {
+                    let (cx, cy, ch) = crate::text::caret(&style, index);
+                    let (sx, sy) = (t.size.0 / rw.max(1) as f64, t.size.1 / rh.max(1) as f64);
+                    let top = vp.view_point((t.origin.0 + cx * sx, t.origin.1 + cy * sy), size);
+                    let bottom = vp.view_point((t.origin.0 + cx * sx, t.origin.1 + (cy + ch) * sy), size);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+                    cr.set_line_width(3.0);
+                    cr.move_to(top.0.round() + 0.5, top.1);
+                    cr.line_to(bottom.0.round() + 0.5, bottom.1);
+                    cr.stroke()?;
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.95);
+                    cr.set_line_width(1.0);
+                    cr.move_to(top.0.round() + 0.5, top.1);
+                    cr.line_to(bottom.0.round() + 0.5, bottom.1);
+                    cr.stroke()?;
+                }
+                cr.restore()?;
+            }
+        }
+    }
     // Marching ants: the outline in white, then black dashes walking along it.
     if let Some(selection) = doc.document.selection.as_ref().filter(|_| !doc.hide_extras) {
         if !selection.outline.is_empty() {
@@ -1828,4 +1934,20 @@ fn hex_rgb(text: &str) -> (f64, f64, f64) {
     let t = text.trim().trim_start_matches('#');
     let v = u32::from_str_radix(t, 16).unwrap_or(0x808080);
     (((v >> 16) & 255) as f64 / 255.0, ((v >> 8) & 255) as f64 / 255.0, (v & 255) as f64 / 255.0)
+}
+
+/// The start of the word before byte `i` (Ctrl+Backspace, Ctrl+Left).
+fn word_start(text: &str, i: usize) -> usize {
+    let head = &text[..i];
+    let trimmed = head.trim_end_matches(|c: char| !c.is_alphanumeric());
+    let cut = trimmed.trim_end_matches(|c: char| c.is_alphanumeric());
+    cut.len()
+}
+
+/// The end of the word after byte `i` (Ctrl+Right).
+fn word_end(text: &str, i: usize) -> usize {
+    let tail = &text[i..];
+    let skipped = tail.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let after = skipped.trim_start_matches(|c: char| c.is_alphanumeric());
+    text.len() - after.len()
 }

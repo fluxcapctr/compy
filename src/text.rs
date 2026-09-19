@@ -65,22 +65,56 @@ fn layout_for(style: &TextStyle) -> pango::Layout {
     layout
 }
 
+/// Where the layout's origin sits on the rendered surface: one pixel in from the ink or logical box,
+/// whichever reaches further, so glyph overhangs are kept.
+fn origin_offset(layout: &pango::Layout) -> (f64, f64) {
+    let (ink, logical) = layout.pixel_extents();
+    (-(ink.x().min(logical.x()) as f64) + 1.0, -(ink.y().min(logical.y()) as f64) + 1.0)
+}
+
 /// The text rendered on a transparent surface just its size, and where the ink's top-left sits relative to
-/// the layout's origin (so the layer lands where the click was).
+/// the layout's origin (so the layer lands where the click was). Empty text renders one line's worth of
+/// nothing, so a type layer being typed into has a size before the first letter.
 pub fn render(style: &TextStyle) -> Result<(ImageSurface, i32, i32)> {
-    if style.text.trim().is_empty() { bail!("The text is empty."); }
     let layout = layout_for(style);
+    if style.text.is_empty() { layout.set_text(" "); }
     let (ink, logical) = layout.pixel_extents();
     let (w, h) = ((ink.width().max(logical.width()) + 2).max(1), (ink.height().max(logical.height()) + 2).max(1));
     if w > 30_000 || h > 30_000 || w as i64 * h as i64 > 100_000_000 { bail!("The text is larger than the 30,000-pixel side or 100-megapixel limit."); }
     let surface = crate::raster::new_argb(w, h)?;
-    {
+    if !style.text.is_empty() {
         let cr = cairo::Context::new(&surface)?;
-        cr.translate(-(ink.x().min(logical.x()) as f64) + 1.0, -(ink.y().min(logical.y()) as f64) + 1.0);
+        let (ox, oy) = origin_offset(&layout);
+        cr.translate(ox, oy);
         cr.set_source_rgb(style.color[0], style.color[1], style.color[2]);
         pangocairo::functions::show_layout(&cr, &layout);
     }
     Ok((surface, ink.x().min(logical.x()) - 1, ink.y().min(logical.y()) - 1))
+}
+
+/// The caret before byte `index` of the text: its left, top and height on the rendered surface.
+pub fn caret(style: &TextStyle, index: usize) -> (f64, f64, f64) {
+    let layout = layout_for(style);
+    let empty = style.text.is_empty();
+    if empty { layout.set_text(" "); }
+    let (ox, oy) = origin_offset(&layout);
+    let index = if empty { 0 } else { index.min(style.text.len()) as i32 };
+    let pos = layout.index_to_pos(index as i32);
+    let scale = pango::SCALE as f64;
+    (pos.x() as f64 / scale + ox, pos.y() as f64 / scale + oy, (pos.height() as f64 / scale).max(1.0))
+}
+
+/// The byte index of the caret nearest a point on the rendered surface (after the character when the
+/// point is past its middle).
+pub fn index_at(style: &TextStyle, x: f64, y: f64) -> usize {
+    if style.text.is_empty() { return 0; }
+    let layout = layout_for(style);
+    let (ox, oy) = origin_offset(&layout);
+    let scale = pango::SCALE as f64;
+    let (_, index, trailing) = layout.xy_to_index(((x - ox) * scale) as i32, ((y - oy) * scale) as i32);
+    let mut i = index.max(0) as usize;
+    for _ in 0..trailing.max(0) { if let Some(c) = style.text[i..].chars().next() { i += c.len_utf8(); } }
+    i.min(style.text.len())
 }
 
 fn fonts_dir() -> PathBuf {
@@ -132,7 +166,13 @@ mod tests {
         assert!(painted > 100, "{painted} pixels painted");
         let back = TextStyle::from_record(&style.to_record()).unwrap();
         assert_eq!(back, style);
-        assert!(render(&TextStyle { text: "  ".into(), ..Default::default() }).is_err());
+        let (empty, _, _) = render(&TextStyle { text: String::new(), ..Default::default() }).unwrap();
+        assert!(empty.height() > 10, "empty text still has a line's height");
+        let (x0, _, h) = caret(&style, 0);
+        let (x1, _, _) = caret(&style, 2);
+        assert!(x1 > x0 + 10.0 && h > 20.0, "caret moves along the text: {x0} {x1} {h}");
+        assert_eq!(index_at(&style, x0 + 1.0, h / 2.0), 0);
+        assert_eq!(index_at(&style, x1 + 5.0, h / 2.0), 2);
         assert!(!families().is_empty());
     }
 }

@@ -56,9 +56,12 @@ fn type_layers_render_edit_and_round_trip() {
     let size = d.renderer.layer(id).transform.size;
     assert!((size.0 - raster2.0 as f64 * 2.0).abs() < 0.01 && (size.1 - raster2.1 as f64 * 2.0).abs() < 0.01, "still twice its raster: {size:?} vs {raster2:?}");
 
-    // Empty text is refused; a non-type layer is refused.
-    edited.text = "   ".into();
-    assert!(d.set_text(id, &edited).is_err());
+    // Empty text keeps a line's height (it is being typed into); a non-type layer is refused.
+    edited.text = String::new();
+    d.set_text(id, &edited).unwrap();
+    assert!(d.renderer.layer(id).transform.size.1 > 10.0);
+    edited.text = "Hi!!".into();
+    d.set_text(id, &edited).unwrap();
     let base = d.renderer.layers()[0].id;
     assert!(d.set_text(base, &style).is_err());
 

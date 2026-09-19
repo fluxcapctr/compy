@@ -136,8 +136,10 @@ dropdown fixes the proportions, Return applies. Eyedropper (I): picks the foregr
 to background or to transparent, reversed, at an opacity, over the layer or its mask inside the selection.
 Shape (U): rectangles with rounded corners and ellipses in the foreground color on a new layer, redrawn
 crisp when scaled (Shift+U swaps the kind). Type (T): click the canvas to set text on a new layer in the
-foreground color, or click existing text to edit it; a floating editor shows the text and the canvas updates
-as you type (Escape or closing keeps it). The options bar sets the family (a searchable list of every font
+foreground color, or click existing text to edit it, and type straight on the canvas: a caret and a dashed
+frame mark the text, every keystroke redraws it, Return adds a line, arrows, Home, End, Backspace and Delete
+edit (Ctrl skips words), a click moves the caret, and Escape, Ctrl+Return, another tool or a click elsewhere
+finishes. A layer left empty is dropped. The options bar sets the family (a searchable list of every font
 on the system), size, bold, italic, alignment, leading and tracking, and changes apply to the selected type
 layer live. To use a Google font, type its name into the "Google font" field and press Get: the family's
 regular, bold, italic and bold italic files download into `~/.local/share/fonts/compositor-google/` and the

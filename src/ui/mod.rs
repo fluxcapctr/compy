@@ -207,6 +207,8 @@ pub struct Script {
     /// Shows the grid; opens the shortcuts window.
     pub grid: bool,
     pub shortcuts: bool,
+    /// Starts typing on the canvas into the active type layer.
+    pub type_edit: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -220,7 +222,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -235,6 +237,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.layer_style { state.open_layer_style(); }
                     if script.grid { p.canvas.doc().borrow_mut().document.grid = Some((100.0, 4)); p.canvas.area.queue_draw(); }
                     if script.shortcuts { state.show_shortcuts(); }
+                    if script.type_edit { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { p.canvas.edit_text(id); } }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
@@ -319,6 +322,10 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         keys.connect_key_pressed(move |_, key, _, modifiers| {
             let state = &pressed;
             if gtk::prelude::GtkWindowExt::focus(&state.window).is_some_and(|w| w.is::<gtk::Editable>() || w.is::<gtk::Text>()) { return glib::Propagation::Proceed; }
+            // Text being typed on the canvas takes every key first.
+            let mut typed = false;
+            state.with_current(|p| { if p.canvas.text_editing() { typed = p.canvas.text_key(key, modifiers); } });
+            if typed { return glib::Propagation::Stop; }
             if key == gdk::Key::space {
                 if !state.space_held.get() { state.space_held.set(true); state.current_canvas_cursor(); }
                 return glib::Propagation::Stop;
