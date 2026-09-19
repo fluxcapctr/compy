@@ -244,6 +244,10 @@ impl Canvas {
                         if let Ok(bytes) = crate::raster::with_bytes(&cache.surface, |d, _| glib::Bytes::from(&d[..stride * ch as usize])) {
                             let texture = gdk::MemoryTexture::new(cw, ch, gdk::MemoryFormat::B8g8r8a8Premultiplied, &bytes, stride);
                             this.picture.set_paintable(Some(&texture));
+                            // The picture is changed from inside a draw, when GTK has already decided what this
+                            // frame shows; ask for the next frame too, or a fresh document waits for the mouse.
+                            let picture = this.picture.clone();
+                            glib::idle_add_local_once(move || picture.queue_draw());
                         }
                     }
                 }
