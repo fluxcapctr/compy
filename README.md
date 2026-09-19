@@ -77,6 +77,8 @@ preview and its reduced copies become the layer's own pixels rather than being c
 with eight scale handles and a rotation handle above the top edge: Shift constrains, Alt scales from the
 center, the corner handles keep proportions unless you hold Shift (or turn off Lock ratio), moves snap to
 the canvas and to the other layers' edges and centers with a guide drawn along the match (Ctrl drags freely),
+a click on empty canvas lets go of the layer so its handles disappear (a click on another layer changes
+nothing unless Auto-select is on or Ctrl is held),
 Ctrl-click or Auto-select picks the layer under the pointer, arrow keys nudge by 1 or 10 pixels, and the
 options bar shows X, Y, W, H and angle you can type into, plus Flip H and Flip V. The Marquee (M) drags a
 rectangle or ellipse (Shift squares it), the Lasso (L) draws freehand or, in Polygonal mode, click by click

@@ -701,7 +701,18 @@ impl Canvas {
                 .find(|id| d.document.renderer.has_image(*id) && d.document.renderer.layer(*id).transform.contains(point));
             let active_hit = target.is_some_and(|id| { let l = d.document.renderer.layer(id); if l.is_group() { !d.document.transform_members(id).is_empty() } else { d.document.renderer.has_image(id) && l.transform.contains(point) } });
             if picks && under.is_some() && !(active_hit && !state.contains(gdk::ModifierType::CONTROL_MASK)) { target = under; }
-            else if !active_hit && target.is_some_and(|id| !d.document.renderer.layer(id).is_group()) && !picks { return false; }
+            else if !active_hit && target.is_some_and(|id| !d.document.renderer.layer(id).is_group()) && !picks {
+                // A press on empty canvas lets go of the layer, so its handles disappear; on another
+                // layer it leaves things be (Auto-select or Ctrl picks that layer instead).
+                if under.is_none() {
+                    d.document.select_layer(None);
+                    drop(d);
+                    if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+                    self.sync_inspector();
+                    self.area.queue_draw();
+                }
+                return false;
+            }
             mode = Some(DragMode::Move);
         }
         let (Some(mode), Some(id)) = (mode, target) else { return false };
