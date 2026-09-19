@@ -11,6 +11,12 @@ fn main() {
     // Paths need not be UTF-8; only the options are matched as text.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let result = match args.get(1).and_then(|a| a.to_str()) {
+        Some("mcp") => compositor::agent::run_mcp(),
+        Some("tool") if args.len() >= 3 => {
+            // `compositor tool <name> [json args]`: one call to the running app, for scripts.
+            let parsed: Result<serde_json::Value> = match args.get(3).and_then(|a| a.to_str()) { Some(t) => serde_json::from_str(t).map_err(|e| anyhow::anyhow!("bad json: {e}")), None => Ok(serde_json::json!({})) };
+            parsed.and_then(|a| compositor::agent::call(&args[2].to_string_lossy(), a)).map(|v| println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()))
+        }
         Some("info") if args.len() == 3 => info(Path::new(&args[2])),
         Some("render") if args.len() == 4 => render_to(Path::new(&args[2]), Path::new(&args[3])),
         Some("psd") if args.len() == 4 => convert_psd(Path::new(&args[2]), Path::new(&args[3])),
@@ -54,6 +60,7 @@ fn main() {
                     "--shortcuts" => script.shortcuts = true,
                     "--type-edit" => script.type_edit = true,
                     "--layers-menu" => script.layers_menu = true,
+                    "--assistant" => script.assistant = true,
                     "--path" => script.path = text(),
                     "--layer-style" => script.layer_style = true,
                     "--guides" => { if let Some(spec) = text() { for part in spec.split(',') { if let Some(v) = part.strip_prefix('x').and_then(|v| v.parse().ok()) { script.guides.0.push(v); } else if let Some(v) = part.strip_prefix('y').and_then(|v| v.parse().ok()) { script.guides.1.push(v); } } } }
@@ -81,7 +88,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way\n  compositor brushes <out.abr>             write the bundled brush set as a Photoshop brush file\n  compositor convert-brushes <out.abr> <tips...>   GIMP .gbr/.gih (or .abr) tips as one Photoshop brush file";
+const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way\n  compositor brushes <out.abr>             write the bundled brush set as a Photoshop brush file\n  compositor mcp                           Model Context Protocol server for the running app (Claude Code)\n  compositor tool <name> [json]            one tool call to the running app\n  compositor convert-brushes <out.abr> <tips...>   GIMP .gbr/.gih (or .abr) tips as one Photoshop brush file";
 
 fn info(path: &Path) -> Result<()> {
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;

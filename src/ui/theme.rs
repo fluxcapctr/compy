@@ -215,6 +215,7 @@ pub fn look_css(font: &str) -> String {
         .layers-panel row label.caption {{ font-size: 10px; letter-spacing: 0.3px; }}
         .monospace {{ letter-spacing: 0; }}
         paned > separator {{ min-width: 1px; min-height: 1px; }}
+        .assistant-transcript {{ font-size: 12px; }}
         .layers-panel list.navigation-sidebar > row {{ border-bottom: 1px solid alpha(currentColor, 0.12); border-radius: 0; margin: 0; }}
     "#)
 }

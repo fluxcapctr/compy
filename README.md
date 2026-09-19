@@ -176,6 +176,17 @@ agree. Both modes are off by default: the readback costs about what the composit
 path, though it ran at 3 to 4 ms per 7 megapixel frame, has hung the GPU (a gfx ring reset) on RADV during
 testing and is not yet safe to leave on. `COMPOSITOR_TRACE=1` prints the adapter and frame times.
 
+**Assistant and agent tools.** Help > Assistant (Ctrl+K) opens a chat that drives Claude Code, the one
+already on the system, with the open document attached: every message carries the document's state
+(size, layers, the active layer, the selection's bounds) and Claude can call `snapshot` to see the canvas
+with the selection outlined in red, so "this" means what is selected. It acts through the compy tools,
+each an undoable step you watch happen: select, layers, placement, fills, filters, adjustment layers, type,
+shapes, layer styles, canvas and image size, export, save, open, undo, and Generative Fill and Expand on
+fal.ai (with the cost stated first). The same tools serve two other surfaces: `compositor mcp` is a Model
+Context Protocol server for Claude Code in the terminal (`claude mcp add compy compositor mcp`), and
+`compositor tool <name> [json]` makes one call from a script. Both talk to the running app over a socket
+in the user's runtime directory.
+
 **Autosave.** Every two minutes each document changed since its last autosave is written to
 `~/.local/share/compositor/autosave/` on another thread: the pixels are copied out first (milliseconds on
 a 12 megapixel file), so editing never waits on the disk. Saving a document, or closing it and choosing to

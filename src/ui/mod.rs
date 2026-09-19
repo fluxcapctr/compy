@@ -4,6 +4,7 @@
 pub mod brushes;
 mod canvas;
 pub mod color_wheel;
+mod agent;
 mod dialogs;
 mod recent;
 mod effects;
@@ -127,6 +128,7 @@ impl Page {
 struct App {
     window: gtk::ApplicationWindow,
     header: gtk::HeaderBar,
+    assistant: RefCell<Option<Rc<agent::Assistant>>>,
     preview: Cell<bool>,
     panels_hidden: Cell<bool>,
     stack: gtk::Stack,
@@ -219,6 +221,8 @@ pub struct Script {
     pub type_edit: bool,
     /// Opens the layers panel's background menu.
     pub layers_menu: bool,
+    /// Opens the assistant panel.
+    pub assistant: bool,
     /// A Pen path from "x,y x,y ..." (a point with "x,y:hx,hy" pulls a handle); a trailing "close" closes it.
     pub path: Option<String>,
     /// A window size to ask for (tiling compositors may override it).
@@ -234,7 +238,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || script.layers_menu || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || script.layers_menu || script.assistant || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -264,6 +268,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                         p.canvas.area.queue_draw();
                     }
                     if script.layers_menu { p.panel.background_menu(); }
+                    if script.assistant { state.open_assistant(); }
                     if script.type_edit { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { p.canvas.edit_text(id); } }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
@@ -333,7 +338,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     stack.add_named(&notebook, Some("tabs"));
     window.set_child(Some(&stack));
 
-    let state = Rc::new(App { window: window.clone(), header: header.clone(), preview: Cell::new(false), panels_hidden: Cell::new(false), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
+    let state = Rc::new(App { window: window.clone(), header: header.clone(), assistant: RefCell::new(None), preview: Cell::new(false), panels_hidden: Cell::new(false), stack, notebook: notebook.clone(), pages: RefCell::new(Vec::new()), space_held: Rc::new(Cell::new(false)) });
     // Follow the Omarchy theme; every canvas rebuilds its frame when the palette changes.
     {
         let weak = Rc::downgrade(&state);
@@ -384,13 +389,15 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         });
     }
     window.add_controller(keys);
+    // The agent socket: Claude Code and the assistant panel act on the open document through it.
+    agent::serve(state.clone());
     {
         // Autosave: a modified document's pixels are copied (milliseconds) and written on a thread.
         let state = state.clone();
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 97] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 98] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -479,6 +486,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.unpark_handles(); })),
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
         ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
+        ("assistant", &["<Control>k"], |s| s.open_assistant()),
         ("delete-layer", &[], |s| s.edit(|d| { d.delete_layer(); Ok(()) })),
         ("layer-up", &["<Control>bracketright"], |s| s.edit(|d| { d.move_layer(true); Ok(()) })),
         ("layer-down", &["<Control>bracketleft"], |s| s.edit(|d| { d.move_layer(false); Ok(()) })),
@@ -724,6 +732,7 @@ fn menu() -> gio::Menu {
     filter.append(Some("Heal Selection"), Some("win.heal-selection"));
     menu.append_submenu(Some("Filter"), &filter);
     let help = gio::Menu::new();
+    help.append(Some("Assistant (Ctrl+K)"), Some("win.assistant"));
     help.append(Some("Keyboard Shortcuts (F1)"), Some("win.shortcuts"));
     menu.append_submenu(Some("Help"), &help);
     menu
@@ -890,6 +899,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("View", "Ctrl+Shift+H, Return", "Transform handles on and off; Return puts them away until the next click"),
     ("View", "Double-click a ruler", "New guide there; drag guides with Move"),
     ("Help", "F1, Ctrl+Alt+Shift+K", "This list"),
+    ("Help", "Ctrl+K", "The assistant: tell Claude what to do with the open document"),
 ];
 
 impl App {
@@ -1056,6 +1066,15 @@ impl App {
         for page in self.pages.borrow().iter() {
             page.canvas.set_panels_hidden(on);
             if let Some(paned) = page.root.downcast_ref::<gtk::Paned>() { if let Some(end) = paned.end_child() { end.set_visible(!on); } }
+        }
+    }
+
+    /// Ctrl+K: the assistant panel, one per window.
+    fn open_assistant(self: &Rc<Self>) {
+        let existing = self.assistant.borrow().clone();
+        match existing {
+            Some(a) => a.present(),
+            None => { let a = agent::Assistant::open(self.clone()); *self.assistant.borrow_mut() = Some(a); }
         }
     }
 
