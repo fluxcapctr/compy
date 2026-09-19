@@ -129,6 +129,8 @@ pub fn css(p: &Palette) -> String {
         .panel-tab.current {{ background-color: {bg}; color: {bfg}; border-bottom: 1px solid {accent}; }}
         .options {{ background-color: {bg}; border-bottom: 1px solid {ddbg}; }}
         .layers-panel {{ background-color: {bg}; border-left: 1px solid {ddbg}; }}
+        .assistant {{ border-top: 1px solid {ddbg}; background-color: {bg}; }}
+        .assistant-header {{ background-color: {ddbg}; }}
         .layers-panel .heading {{ color: {bfg}; }}
         list.navigation-sidebar {{ background-color: {bg}; }}
         list.navigation-sidebar > row {{ color: {fg}; }}
@@ -216,6 +218,9 @@ pub fn look_css(font: &str) -> String {
         .monospace {{ letter-spacing: 0; }}
         paned > separator {{ min-width: 1px; min-height: 1px; }}
         .assistant-transcript {{ font-size: 12.5px; }}
+        .assistant-header {{ padding: 2px 6px; min-height: 26px; }}
+        .assistant-header button {{ padding: 0 5px; min-width: 0; min-height: 0; border: none; }}
+        .assistant-fold {{ font-size: 10px; }}
         .compy-glyph {{ font-size: 17px; }}
         .layers-panel list.navigation-sidebar > row {{ border-bottom: 1px solid alpha(currentColor, 0.12); border-radius: 0; margin: 0; }}
     "#)

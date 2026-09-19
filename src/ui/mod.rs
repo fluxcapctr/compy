@@ -604,7 +604,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     {
         let state = state.clone();
-        notebook.connect_switch_page(move |_, _, _| state.current_canvas_cursor());
+        notebook.connect_switch_page(move |_, _, _| { state.current_canvas_cursor(); let a = state.assistant.borrow().clone(); if let Some(a) = a { a.redock(); } });
     }
     {
         let state = state.clone();
@@ -1072,12 +1072,13 @@ impl App {
         }
     }
 
-    /// Ctrl+K: the assistant panel, one per window.
+    /// Ctrl+K: Compy, docked under the layers of the current document (made on first use).
     fn open_assistant(self: &Rc<Self>) {
+        if self.notebook.current_page().is_none() { return; }
         let existing = self.assistant.borrow().clone();
         match existing {
-            Some(a) => a.present(),
-            None => { let a = agent::Assistant::open(self.clone()); *self.assistant.borrow_mut() = Some(a); }
+            Some(a) => a.toggle(),
+            None => { let a = agent::Assistant::new(self.clone()); *self.assistant.borrow_mut() = Some(a); }
         }
     }
 

@@ -24,6 +24,8 @@ const LAYER_DRAG: &str = "compositor-layers";
 
 pub struct LayersPanel {
     pub widget: gtk::Box,
+    /// Where Compy, the assistant, docks: under the layer list.
+    pub assistant_slot: gtk::Box,
     inner: Rc<Inner>,
 }
 
@@ -105,11 +107,13 @@ impl LayersPanel {
             footer.append(&b);
         }
         widget.append(&footer);
+        let assistant_slot = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["assistant-slot"]).build();
+        widget.append(&assistant_slot);
 
         let inner = Rc::new(Inner { doc, canvas, list, blend, opacity, percent, count, rows: RefCell::new(Vec::new()), details: RefCell::new(HashMap::new()), syncing: Cell::new(false), on_select: RefCell::new(None) });
         inner.connect();
         inner.rebuild();
-        Rc::new(LayersPanel { widget, inner })
+        Rc::new(LayersPanel { widget, assistant_slot, inner })
     }
 
     pub fn rebuild(&self) { self.inner.rebuild(); }

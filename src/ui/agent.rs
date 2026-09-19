@@ -356,15 +356,25 @@ impl App {
     }
 }
 
-/// The assistant panel: a chat that drives Claude Code with the document attached.
+/// Compy's panel: a chat that drives Claude Code with the document attached. It lives under the layer
+/// list, folds away to its header, and pops out into a window of its own.
 pub struct Assistant {
-    window: gtk::Window,
+    content: gtk::Box,
+    body: gtk::Box,
+    fold: gtk::Button,
     transcript: gtk::TextView,
     entry: gtk::Entry,
     status: gtk::Label,
     send: gtk::Button,
+    popout: gtk::Button,
     session: RefCell<Option<String>>,
     busy: Cell<bool>,
+    expanded: Cell<bool>,
+    window: RefCell<Option<gtk::Window>>,
+    /// Dictation through voxtype: whether a recording started with the panel open, and when the entry last changed.
+    dictating: Cell<bool>,
+    entry_changed: Cell<Option<std::time::Instant>>,
+    voice_state: RefCell<String>,
     app: Rc<App>,
 }
 
@@ -375,30 +385,122 @@ fn claude_binary() -> Option<PathBuf> {
 }
 use std::path::PathBuf;
 
+/// voxtype's state file: "idle", "recording" or "transcribing" while its daemon runs.
+fn voice_state() -> Option<String> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    std::fs::read_to_string(base.join("voxtype/state")).ok().map(|s| s.trim().to_string())
+}
+
+fn voxtype_available() -> bool { std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join("voxtype").exists())).unwrap_or(false) }
+
 impl Assistant {
-    pub fn open(app: Rc<App>) -> Rc<Assistant> {
-        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(8).margin_bottom(10).margin_start(10).margin_end(10).build();
+    pub fn new(app: Rc<App>) -> Rc<Assistant> {
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(0).css_classes(["assistant"]).build();
+        // Header: fold arrow, the robot and name, the status, a microphone, and the pop-out.
+        let header = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(4).css_classes(["assistant-header"]).build();
+        let fold = gtk::Button::builder().label("\u{25be}").has_frame(false).tooltip_text("Fold Compy away or open it (Ctrl+K)").build();
+        fold.add_css_class("assistant-fold");
+        header.append(&fold);
+        let title = gtk::Label::builder().label("\u{f16a3}  COMPY").css_classes(["heading"]).xalign(0.0).build();
+        header.append(&title);
+        let status = gtk::Label::builder().xalign(1.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["dim-label", "caption"]).label("").build();
+        header.append(&status);
+        let mic = gtk::Button::builder().label("\u{f036c}").has_frame(false).tooltip_text("Talk to Compy (dictation through voxtype; Page Down does the same)").build();
+        mic.set_visible(voxtype_available());
+        header.append(&mic);
+        let popout = gtk::Button::builder().label("\u{f0d3}").has_frame(false).tooltip_text("Pop Compy out into its own window, or back under the layers").build();
+        header.append(&popout);
+        content.append(&header);
+        let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(4).margin_bottom(8).margin_start(8).margin_end(8).build();
         let transcript = gtk::TextView::builder().editable(false).cursor_visible(false).wrap_mode(gtk::WrapMode::WordChar).left_margin(6).right_margin(6).top_margin(6).bottom_margin(6).build();
         transcript.add_css_class("assistant-transcript");
-        let scroller = gtk::ScrolledWindow::builder().child(&transcript).min_content_height(300).min_content_width(380).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
-        content.append(&scroller);
+        let scroller = gtk::ScrolledWindow::builder().child(&transcript).min_content_height(180).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        body.append(&scroller);
         let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
-        let entry = gtk::Entry::builder().placeholder_text("Tell Compy what to do with what is open").hexpand(true).build();
+        let entry = gtk::Entry::builder().placeholder_text("Tell Compy what to do, or press Page Down and say it").hexpand(true).build();
         let send = gtk::Button::builder().label("Send").css_classes(["suggested-action"]).build();
         row.append(&entry);
         row.append(&send);
-        content.append(&row);
-        let status = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "caption"]).label("Compy sees the canvas, the layers and your selection. Runs on your Claude Code login.").wrap(true).build();
-        content.append(&status);
-        let window = super::dialogs::floating(app.window.upcast_ref(), "\u{f16a3}  Compy", false, 440, &content);
-        window.set_resizable(true);
-        let this = Rc::new(Assistant { window: window.clone(), transcript, entry: entry.clone(), status, send: send.clone(), session: RefCell::new(None), busy: Cell::new(false), app });
+        body.append(&row);
+        content.append(&body);
+        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), app });
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
+        { let t = this.clone(); entry.connect_changed(move |_| t.entry_changed.set(Some(std::time::Instant::now()))); }
         { let t = this.clone(); send.connect_clicked(move |_| t.submit()); }
+        { let t = this.clone(); fold.connect_clicked(move |_| t.toggle()); }
+        { let t = this.clone(); title.add_controller({ let g = gtk::GestureClick::new(); g.connect_released(move |_, _, _, _| t.toggle()); g }); }
+        { let t = this.clone(); popout.connect_clicked(move |_| { if t.window.borrow().is_some() { t.dock(); } else { t.undock(); } }); }
+        { mic.connect_clicked(move |_| { let _ = std::process::Command::new("voxtype").args(["record", "toggle"]).spawn(); }); }
         if claude_binary().is_none() { this.append("system", "Claude Code was not found on PATH. Install it, or set COMPOSITOR_CLAUDE to the claude binary."); }
-        window.present();
-        entry.grab_focus();
+        this.dock();
+        this.watch_voice();
         this
+    }
+
+    /// Under the current document's layer list.
+    pub fn dock(&self) {
+        if let Some(w) = self.window.borrow_mut().take() { self.content.unparent(); w.set_child(None::<&gtk::Widget>); w.close(); }
+        if let Some(parent) = self.content.parent() { if let Some(b) = parent.downcast_ref::<gtk::Box>() { b.remove(&self.content); } }
+        self.app.with_current(|p| p.panel.assistant_slot.append(&self.content));
+        self.popout.set_label("\u{f0d3}");
+        self.fold.set_visible(true);
+    }
+
+    /// Into a window of its own; closing the window docks it back.
+    pub fn undock(self: &Rc<Self>) {
+        if let Some(parent) = self.content.parent() { if let Some(b) = parent.downcast_ref::<gtk::Box>() { b.remove(&self.content); } }
+        self.expanded.set(true);
+        self.body.set_visible(true);
+        self.fold.set_visible(false);
+        let window = super::dialogs::floating(self.app.window.upcast_ref(), "\u{f16a3}  Compy", false, 460, &self.content);
+        window.set_resizable(true);
+        window.set_default_height(520);
+        { let t = self.clone(); window.connect_close_request(move |_| { if t.window.borrow().is_some() { let t2 = t.clone(); glib::idle_add_local_once(move || t2.dock()); } glib::Propagation::Proceed }); }
+        *self.window.borrow_mut() = Some(window.clone());
+        self.popout.set_label("\u{f0d2}");
+        window.present();
+        self.entry.grab_focus();
+    }
+
+    /// Moves along when the current document changes.
+    pub fn redock(&self) { if self.window.borrow().is_none() { self.dock(); } }
+
+    pub fn reveal(&self) {
+        self.expanded.set(true);
+        self.body.set_visible(true);
+        self.fold.set_label("\u{25be}");
+        if let Some(w) = self.window.borrow().as_ref() { w.present(); }
+        self.entry.grab_focus();
+    }
+
+    pub fn toggle(&self) {
+        if self.expanded.get() && self.window.borrow().is_none() { self.expanded.set(false); self.body.set_visible(false); self.fold.set_label("\u{25b8}"); } else { self.reveal(); }
+    }
+
+    /// Follows voxtype: a recording opens the panel so the words land in the entry, and once the
+    /// transcription has been typed the message sends itself.
+    fn watch_voice(self: &Rc<Self>) {
+        if !voxtype_available() { return; }
+        let this = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+            let Some(state) = voice_state() else { return glib::ControlFlow::Continue };
+            let previous = this.voice_state.replace(state.clone());
+            if state == "recording" && previous != "recording" && this.app.window.is_active() {
+                this.reveal();
+                this.dictating.set(true);
+                this.entry_changed.set(None);
+                this.status.set_label("Listening…");
+            }
+            if this.dictating.get() && state == "idle" && previous != "recording" {
+                // The words arrive as keystrokes; send once they have stopped coming.
+                match this.entry_changed.get() {
+                    Some(t) if t.elapsed() > std::time::Duration::from_millis(900) && !this.entry.text().trim().is_empty() => { this.dictating.set(false); this.submit(); }
+                    None if previous == "idle" && this.status.label() == "Listening…" => {}
+                    _ => {}
+                }
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     fn append(&self, who: &str, text: &str) {
@@ -513,5 +615,5 @@ impl Assistant {
         }
     }
 
-    pub fn present(&self) { self.window.present(); }
+    pub fn present(&self) { self.reveal(); }
 }
