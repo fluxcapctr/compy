@@ -102,6 +102,8 @@ pub fn css(p: &Palette) -> String {
         @define-color dialog_fg_color {fg};
         @define-color card_bg_color {lbg};
         window, .background {{ background-color: {bg}; color: {fg}; }}
+        .start-page, .start-page viewport, .start-page flowbox, .start-page flowboxchild {{ background-color: {bg}; color: {fg}; }}
+        .start-page button {{ color: {fg}; }}
         headerbar {{ background-color: {dbg}; color: {fg}; box-shadow: none; border-bottom: 1px solid {ddbg}; }}
         headerbar button, .options button {{ background-color: transparent; color: {fg}; border: 1px solid {lbg}; box-shadow: none; text-shadow: none; }}
         headerbar button:hover, .options button:hover {{ background-color: {lbg}; border-color: {muted}; }}
@@ -208,6 +210,7 @@ pub fn look_css(font: &str) -> String {
         .layers-panel row label.caption {{ font-size: 10px; letter-spacing: 0.3px; }}
         .monospace {{ letter-spacing: 0; }}
         paned > separator {{ min-width: 1px; min-height: 1px; }}
+        .layers-panel list.navigation-sidebar > row {{ border-bottom: 1px solid alpha(currentColor, 0.12); border-radius: 0; margin: 0; }}
     "#)
 }
 

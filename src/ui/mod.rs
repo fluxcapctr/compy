@@ -90,6 +90,8 @@ pub struct Doc {
     pub rulers: bool,
     /// Ctrl+H: the selection edges and guides stay out of the way.
     pub hide_extras: bool,
+    /// Ctrl+Shift+H: the Move tool's transform handles (Photoshop's Show Transform Controls).
+    pub show_handles: bool,
     /// Preview mode (Ctrl+F): the picture alone on black, every panel hidden.
     pub preview: bool,
 }
@@ -131,7 +133,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -154,7 +156,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -299,8 +301,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     window.set_titlebar(Some(&header));
 
     let notebook = gtk::Notebook::builder().scrollable(true).show_border(false).build();
-    let empty = gtk::Label::builder().label("Open an image, a Photoshop file or a .comp project to begin (Ctrl+O), or drop one here.")
-        .justify(gtk::Justification::Center).css_classes(["dim-label"]).vexpand(true).hexpand(true).build();
+    let empty = start_page();
     let stack = gtk::Stack::new();
     stack.add_named(&empty, Some("empty"));
     stack.add_named(&notebook, Some("tabs"));
@@ -351,7 +352,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 91] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 92] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -432,8 +433,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("liquify", &["<Control><Shift>x"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().blur_mode = 0; p.canvas.set_tool(Tool::Blur); })),
         ("toggle-extras", &["<Control>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.hide_extras = !d.hide_extras; } p.canvas.area.queue_draw(); })),
         ("toggle-panels", &[], |s| s.toggle_panels()),
+        ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.update_cursor(); p.canvas.area.queue_draw(); })),
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
-        ("shortcuts", &["<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
+        ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
         ("delete-layer", &[], |s| s.edit(|d| { d.delete_layer(); Ok(()) })),
         ("layer-up", &["<Control>bracketright"], |s| s.edit(|d| { d.move_layer(true); Ok(()) })),
         ("layer-down", &["<Control>bracketleft"], |s| s.edit(|d| { d.move_layer(false); Ok(()) })),
@@ -478,6 +480,14 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         action.connect_activate(move |_, parameter| {
             let Some(id) = parameter.and_then(|v| v.get::<String>()).and_then(|t| uuid::Uuid::parse_str(&t).ok()) else { return };
             state.edit(|d| { if d.has_layer(id) { d.select_layer(Some(id)); } Ok(()) });
+        });
+        window.add_action(&action);
+        let action = gio::SimpleAction::new("new-preset", Some(glib::VariantTy::STRING));
+        let state3 = state2.clone();
+        action.connect_activate(move |_, parameter| {
+            let Some(spec) = parameter.and_then(|v| v.get::<String>()) else { return };
+            let Some((w, h, r)) = parse_preset(&spec) else { return };
+            match Document::blank(w, h, r) { Ok(document) => state3.add_page(Doc::from(document, "Untitled")), Err(e) => state3.alert("Could not create the canvas", &format!("{e:#}")) }
         });
         window.add_action(&action);
         let action = gio::SimpleAction::new("delete-guide", Some(glib::VariantTy::STRING));
@@ -652,6 +662,7 @@ fn menu() -> gio::Menu {
     view.append(Some("Show Grid"), Some("win.toggle-grid"));
     view.append(Some("Extras (selection edges, guides)"), Some("win.toggle-extras"));
     view.append(Some("Panels"), Some("win.toggle-panels"));
+    view.append(Some("Transform Controls"), Some("win.toggle-handles"));
     menu.append_submenu(Some("View"), &view);
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
@@ -665,9 +676,66 @@ fn menu() -> gio::Menu {
     filter.append(Some("Heal Selection"), Some("win.heal-selection"));
     menu.append_submenu(Some("Filter"), &filter);
     let help = gio::Menu::new();
-    help.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
+    help.append(Some("Keyboard Shortcuts (F1)"), Some("win.shortcuts"));
     menu.append_submenu(Some("Help"), &help);
     menu
+}
+
+/// "1920x1080@72" as width, height and resolution.
+fn parse_preset(spec: &str) -> Option<(i32, i32, f64)> {
+    let (size, ppi) = spec.split_once('@')?;
+    let (w, h) = size.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?, ppi.parse().ok()?))
+}
+
+/// Photoshop's New Document presets: (group, name, width, height, ppi).
+const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
+    ("Photo", "Default Photoshop Size", 2100, 1500, 300), ("Photo", "Landscape 4 x 6 in", 1800, 1200, 300), ("Photo", "Portrait 4 x 6 in", 1200, 1800, 300), ("Photo", "8 x 10 in", 3000, 2400, 300),
+    ("Print", "Letter", 2550, 3300, 300), ("Print", "Legal", 2550, 4200, 300), ("Print", "Tabloid", 3300, 5100, 300), ("Print", "A4", 2480, 3508, 300), ("Print", "A3", 3508, 4961, 300),
+    ("Web", "Web Large 1920 x 1080", 1920, 1080, 72), ("Web", "Web Medium 1366 x 768", 1366, 768, 72), ("Web", "Web Small 1280 x 720", 1280, 720, 72), ("Web", "Common 1440 x 900", 1440, 900, 72),
+    ("Mobile", "iPhone 15 Pro", 1179, 2556, 72), ("Mobile", "iPhone SE", 750, 1334, 72), ("Mobile", "iPad Pro 13", 2064, 2752, 72), ("Mobile", "Android 1080 x 1920", 1080, 1920, 72),
+    ("Film and Video", "HDTV 1080p", 1920, 1080, 72), ("Film and Video", "UHD 4K", 3840, 2160, 72), ("Film and Video", "DCI 4K", 4096, 2160, 72), ("Film and Video", "Square 1080", 1080, 1080, 72),
+    ("Social", "Instagram Post", 1080, 1080, 72), ("Social", "Instagram Story", 1080, 1920, 72), ("Social", "YouTube Thumbnail", 1280, 720, 72), ("Social", "X Header", 1500, 500, 72), ("Social", "Icon 1024", 1024, 1024, 72),
+];
+
+/// What shows with nothing open: Photoshop's New Document presets in their groups, a custom size, and Open.
+fn start_page() -> gtk::Widget {
+    let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
+    page.append(&gtk::Label::builder().label("New document").xalign(0.0).css_classes(["heading"]).build());
+    let mut group = "";
+    let mut flow: Option<gtk::FlowBox> = None;
+    for &(g, name, w, h, ppi) in PRESETS {
+        if g != group {
+            group = g;
+            page.append(&gtk::Label::builder().label(g).xalign(0.0).css_classes(["dim-label", "caption"]).margin_top(6).build());
+            let f = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(6).min_children_per_line(2).homogeneous(true).build();
+            page.append(&f);
+            flow = Some(f);
+        }
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+        content.append(&gtk::Label::builder().label(name).xalign(0.0).build());
+        content.append(&gtk::Label::builder().label(format!("{w} × {h} px · {ppi} ppi")).xalign(0.0).css_classes(["dim-label", "caption"]).build());
+        let button = gtk::Button::builder().child(&content).action_name("win.new-preset").width_request(190).build();
+        button.set_action_target_value(Some(&format!("{w}x{h}@{ppi}").to_variant()));
+        if let Some(f) = &flow { f.insert(&button, -1); }
+    }
+    let custom = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).margin_top(12).build();
+    custom.append(&gtk::Label::builder().label("Custom").css_classes(["dim-label", "caption"]).build());
+    let width = gtk::SpinButton::with_range(1.0, 30000.0, 1.0);
+    width.set_value(1920.0);
+    let height = gtk::SpinButton::with_range(1.0, 30000.0, 1.0);
+    height.set_value(1080.0);
+    let ppi = gtk::SpinButton::with_range(1.0, 9600.0, 1.0);
+    ppi.set_value(72.0);
+    for (label, spin) in [("W", &width), ("H", &height), ("ppi", &ppi)] { custom.append(&gtk::Label::new(Some(label))); custom.append(spin); }
+    let create = gtk::Button::builder().label("Create").css_classes(["suggested-action"]).build();
+    { let (w, h, r) = (width.clone(), height.clone(), ppi.clone()); create.connect_clicked(move |b| { if let Some(root) = b.root().and_downcast::<gtk::ApplicationWindow>() { gtk::prelude::WidgetExt::activate_action(&root, "win.new-preset", Some(&format!("{}x{}@{}", w.value_as_int(), h.value_as_int(), r.value_as_int()).to_variant())).ok(); } }); }
+    custom.append(&create);
+    custom.append(&gtk::Box::builder().hexpand(true).build());
+    custom.append(&gtk::Button::builder().label("Open…").action_name("win.open").tooltip_text("An image, a Photoshop file or a .comp project (Ctrl+O); dropping one here works too").build());
+    page.append(&custom);
+    let scroller = gtk::ScrolledWindow::builder().child(&page).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).hexpand(true).css_classes(["start-page"]).build();
+    scroller.upcast()
 }
 
 /// Every shortcut, for the Help window: (group, key, what it does).
@@ -718,8 +786,9 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("View", "Ctrl+R, Ctrl+;, Ctrl+'", "Rulers, Guides, Grid"),
     ("View", "Ctrl+Shift+;", "Snap"),
     ("View", "Ctrl+H", "Extras: selection edges and guides"),
+    ("View", "Ctrl+Shift+H, Return", "Transform handles on and off; Return puts them away until the next click"),
     ("View", "Double-click a ruler", "New guide there; drag guides with Move"),
-    ("Help", "Ctrl+Alt+Shift+K", "This list"),
+    ("Help", "F1, Ctrl+Alt+Shift+K", "This list"),
 ];
 
 impl App {

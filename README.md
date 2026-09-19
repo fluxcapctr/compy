@@ -155,6 +155,11 @@ tracking on panel tabs and dialog titles, and a light filled primary button. Col
 active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
 `theme::look_css` and can be reverted as one commit.
 
+**Start page.** With nothing open the window shows Photoshop's New Document presets by group (Photo,
+Print, Web, Mobile, Film and Video, Social), a custom width, height and resolution, and Open. Return with
+the Move tool puts the transform handles away until the next click; View > Transform Controls
+(Ctrl+Shift+H) turns them off altogether. F1 lists every shortcut.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.
