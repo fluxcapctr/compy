@@ -155,8 +155,10 @@ tracking on panel tabs and dialog titles, and a light filled primary button. Col
 active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
 `theme::look_css` and can be reverted as one commit.
 
-**Start page.** With nothing open the window shows Photoshop's New Document presets by group (Photo,
-Print, Web, Mobile, Film and Video, Social), a custom width, height and resolution, and Open. Return with
+**Start page.** With nothing open the window shows the recent files (the last twelve opened or saved,
+kept in `~/.config/compositor/recent.list`), then Photoshop's New Document presets by group (Photo,
+Print, Web, Mobile, Film and Video, Social), each drawn as a box in its own aspect ratio, a custom width,
+height and resolution, and Open. Return with
 the Move tool puts the transform handles away until the next click; View > Transform Controls
 (Ctrl+Shift+H) turns them off altogether. F1 lists every shortcut.
 

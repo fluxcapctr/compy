@@ -5,6 +5,7 @@ pub mod brushes;
 mod canvas;
 pub mod color_wheel;
 mod dialogs;
+mod recent;
 mod effects;
 mod filter_dialog;
 mod genfill;
@@ -482,6 +483,10 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
             state.edit(|d| { if d.has_layer(id) { d.select_layer(Some(id)); } Ok(()) });
         });
         window.add_action(&action);
+        let action = gio::SimpleAction::new("open-path", Some(glib::VariantTy::STRING));
+        let state4 = state2.clone();
+        action.connect_activate(move |_, parameter| { if let Some(path) = parameter.and_then(|v| v.get::<String>()) { state4.open_path(Path::new(&path)); } });
+        window.add_action(&action);
         let action = gio::SimpleAction::new("new-preset", Some(glib::VariantTy::STRING));
         let state3 = state2.clone();
         action.connect_activate(move |_, parameter| {
@@ -698,21 +703,56 @@ const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
     ("Social", "Instagram Post", 1080, 1080, 72), ("Social", "Instagram Story", 1080, 1920, 72), ("Social", "YouTube Thumbnail", 1280, 720, 72), ("Social", "X Header", 1500, 500, 72), ("Social", "Icon 1024", 1024, 1024, 72),
 ];
 
-/// What shows with nothing open: Photoshop's New Document presets in their groups, a custom size, and Open.
+/// What shows with nothing open: recent files, then Photoshop's New Document presets in their groups,
+/// each drawn as a box in its own aspect ratio, a custom size, and Open.
 fn start_page() -> gtk::Widget {
-    let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
-    page.append(&gtk::Label::builder().label("New document").xalign(0.0).css_classes(["heading"]).build());
+    let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
+    let recent = recent::list();
+    if !recent.is_empty() {
+        page.append(&gtk::Label::builder().label("Recent").xalign(0.0).css_classes(["heading"]).build());
+        let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(4).min_children_per_line(1).homogeneous(true).build();
+        for path in &recent {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let folder = path.parent().map(|d| match d.strip_prefix(&home) { Ok(rel) if rel.as_os_str().is_empty() => "~".to_string(), Ok(rel) => format!("~/{}", rel.display()), Err(_) => d.display().to_string() }).unwrap_or_default();
+            let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+            content.append(&gtk::Label::builder().label(&name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Middle).max_width_chars(28).build());
+            content.append(&gtk::Label::builder().label(&folder).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Start).max_width_chars(28).css_classes(["dim-label", "caption"]).build());
+            let button = gtk::Button::builder().child(&content).action_name("win.open-path").width_request(230).tooltip_text(path.display().to_string()).build();
+            button.set_action_target_value(Some(&path.display().to_string().to_variant()));
+            flow.insert(&button, -1);
+        }
+        page.append(&flow);
+    }
+    page.append(&gtk::Label::builder().label("New document").xalign(0.0).css_classes(["heading"]).margin_top(if recent.is_empty() { 0 } else { 14 }).build());
     let mut group = "";
     let mut flow: Option<gtk::FlowBox> = None;
     for &(g, name, w, h, ppi) in PRESETS {
         if g != group {
             group = g;
-            page.append(&gtk::Label::builder().label(g).xalign(0.0).css_classes(["dim-label", "caption"]).margin_top(6).build());
+            page.append(&gtk::Label::builder().label(g).xalign(0.0).css_classes(["dim-label", "caption"]).margin_top(4).build());
             let f = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(6).min_children_per_line(2).homogeneous(true).build();
             page.append(&f);
             flow = Some(f);
         }
-        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+        // The shape of the document, drawn to its aspect ratio inside a fixed area.
+        let shape = gtk::DrawingArea::builder().content_width(120).content_height(72).halign(gtk::Align::Start).build();
+        shape.set_draw_func(move |area, cr, aw, ah| {
+            let (aw, ah) = (aw as f64, ah as f64);
+            let ratio = w as f64 / h as f64;
+            let (bw, bh) = if ratio >= aw / ah { (aw, aw / ratio) } else { (ah * ratio, ah) };
+            let (x, y) = (0.0, ((ah - bh) / 2.0).round());
+            let color = area.color();
+            cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, 0.10);
+            cr.rectangle(x + 0.5, y + 0.5, bw.round() - 1.0, bh.round() - 1.0);
+            cr.fill().ok();
+            cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, 0.7);
+            cr.set_line_width(1.0);
+            cr.rectangle(x + 0.5, y + 0.5, bw.round() - 1.0, bh.round() - 1.0);
+            cr.stroke().ok();
+        });
+        content.append(&shape);
         content.append(&gtk::Label::builder().label(name).xalign(0.0).build());
         content.append(&gtk::Label::builder().label(format!("{w} × {h} px · {ppi} ppi")).xalign(0.0).css_classes(["dim-label", "caption"]).build());
         let button = gtk::Button::builder().child(&content).action_name("win.new-preset").width_request(190).build();
@@ -795,6 +835,7 @@ impl App {
     fn open_path(self: &Rc<Self>, path: &Path) {
         match open_document(path) {
             Ok((doc, notes)) => {
+                recent::remember(path);
                 self.add_page(doc);
                 if !notes.is_empty() { self.alert("Opened with changes", &format!("{}\n\nSave keeps it as a .comp project; use Export PSD to write a Photoshop file.", notes.join("\n"))); }
             }
@@ -868,6 +909,11 @@ impl App {
     }
 
     fn show_tabs(&self, tabs: bool) {
+        if !tabs {
+            // Built fresh each time so the recent files are current.
+            if let Some(old) = self.stack.child_by_name("empty") { self.stack.remove(&old); }
+            self.stack.add_named(&start_page(), Some("empty"));
+        }
         self.stack.set_visible_child_name(if tabs { "tabs" } else { "empty" });
     }
 
@@ -1072,6 +1118,7 @@ impl App {
             let mut d = p.canvas.doc().borrow_mut();
             match d.document.save(path) {
                 Ok(()) => {
+                    recent::remember(path);
                     d.document.path = Some(path.to_path_buf());
                     d.title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
                 }
