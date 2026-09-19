@@ -59,6 +59,8 @@ pub struct Renderer {
     /// Rows of a preview changed in place since the GPU last uploaded it (layer pixels, half open).
     preview_dirty: HashMap<Uuid, (i32, i32, i32, i32)>,
     mask_preview_dirty: HashMap<Uuid, (i32, i32, i32, i32)>,
+    /// The GPU plan being built samples everything nearest (crisp zoom levels).
+    nearest_all: bool,
     live: live::LiveMasks,
     warnings: Vec<String>,
     /// Counts every change to what a draw would show, so a canvas can keep the last frame until it changes.
@@ -178,6 +180,7 @@ impl Renderer {
             styled: HashMap::new(),
             preview_dirty: HashMap::new(),
             mask_preview_dirty: HashMap::new(),
+            nearest_all: false,
             live: live::LiveMasks::default(),
             warnings: Vec::new(),
             revision: 1,

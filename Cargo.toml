@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 cairo-rs = "0.22"
-gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
+gtk = { version = "0.11", package = "gtk4", features = ["v4_14"] }
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "gif", "webp", "bmp"] }
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +28,7 @@ ureq = "3"
 pangocairo = "0.22"
 wgpu = "30"
 pollster = "1"
+ash = "0.38"
 
 [build-dependencies]
 cc = "1"

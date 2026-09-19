@@ -165,13 +165,16 @@ and handles can be dragged afterwards. Then Make Selection (Ctrl+Return) turns t
 with Brush paints along it with the current brush, all from the options bar or a right-click on the path.
 `--path "10,10 50,10:30,40 50,50 close"` draws one from a script.
 
-**GPU compositing (opt in).** `COMPOSITOR_GPU=1` composites frames on the GPU through wgpu: layers and
-masks live as textures with mipmaps, and each frame is a chain of full-screen passes that follow the CPU
-renderer's order (own masks, clipping stacks, folder masks, all 13 blend modes, opacity, effects, and
-Levels, Curves, Exposure and Gradient Map adjustments; Grain and Hue/Saturation still go to the CPU).
-`tests/gpu.rs` renders the same documents both ways and checks they agree. It is off by default because the
-frame is still read back and copied into the window, which costs about as much as the CPU composite saves;
-presenting the GPU frame directly is the next step. `COMPOSITOR_TRACE=1` prints the adapter and frame times.
+**GPU compositing (opt in, experimental).** `COMPOSITOR_GPU=readback` composites frames on the GPU through
+wgpu and copies them back for the window; `COMPOSITOR_GPU=present` also renders the whole canvas frame
+(surround, shadow, checkerboard, document) into Vulkan images exported as dma-bufs that GTK's renderer
+samples directly, with no copy at all. Layers and masks live as textures with mipmaps, and each frame is a
+chain of full-screen passes that follow the CPU renderer's order (own masks, clipping stacks, folder masks,
+all 13 blend modes, opacity, effects, and Levels, Curves, Exposure and Gradient Map adjustments; Grain and
+Hue/Saturation frames go to the CPU). `tests/gpu.rs` renders the same documents both ways and checks they
+agree. Both modes are off by default: the readback costs about what the composite saves, and the presented
+path, though it ran at 3 to 4 ms per 7 megapixel frame, has hung the GPU (a gfx ring reset) on RADV during
+testing and is not yet safe to leave on. `COMPOSITOR_TRACE=1` prints the adapter and frame times.
 
 **Menu bar and feedback.** File, Edit, Select, Layer, View, Image, Filter and Help run along the top as
 in Photoshop. Ctrl+S reports "Saved name" in the status line. Right-click below the rows in the layers

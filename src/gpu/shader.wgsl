@@ -34,6 +34,7 @@ const OP_RESTORE: u32 = 4u;
 const OP_ADJUST: u32 = 5u;
 const OP_DOWNSAMPLE: u32 = 6u;
 const OP_COPY: u32 = 7u;
+const OP_BACKGROUND: u32 = 8u;
 
 const FLAG_MASK: u32 = 1u;
 const FLAG_NEAREST: u32 = 2u;
@@ -205,6 +206,33 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             let faded = mix(straight, blended, u.opacity);
             let result = vec4(faded * dest.a, dest.a);
             return mix(dest, result, cov);
+        }
+        case OP_BACKGROUND: {
+            // The surround, the document's soft shadow (eight rings, shifted down), and the checkerboard
+            // inside the document's rectangle, as the CPU frame draws them.
+            let rect = vec4(u.to_layer0.x, u.to_layer0.y, u.to_layer0.z, u.to_layer0.w);
+            let tile = max(u.to_layer1.x, 1.0);
+            let shadow = u.to_layer1.y;
+            var color = vec4(u.to_mask0.x, u.to_mask0.y, u.to_mask0.z, 1.0);
+            let inside = frag.x >= rect.x && frag.y >= rect.y && frag.x < rect.x + rect.z && frag.y < rect.y + rect.w;
+            if (inside) {
+                let cell = floor((frag - rect.xy) / tile);
+                let odd = (i32(cell.x) + i32(cell.y)) % 2 == 0;
+                let g = select(0.30, 0.35, odd);
+                return vec4(g, g, g, 1.0);
+            }
+            if (shadow > 0.5) {
+                let ppx = u.mask_size.x;
+                let dx = max(max(rect.x - frag.x, frag.x - (rect.x + rect.z)), 0.0);
+                let dy = max(max((rect.y + 3.0 * ppx) - frag.y, frag.y - (rect.y + rect.w + 3.0 * ppx)), 0.0);
+                var a = 0.0;
+                for (var i = 1; i <= 8; i++) {
+                    let spread = f32(i) * 1.8 * ppx;
+                    if (dx <= spread && dy <= spread) { a = a + 0.055 * f32(9 - i) / 8.0 * (1.0 - a); }
+                }
+                color = vec4(color.rgb * (1.0 - a), 1.0);
+            }
+            return color;
         }
         case OP_DOWNSAMPLE: {
             let base = vec2<i32>(frag) * 2;

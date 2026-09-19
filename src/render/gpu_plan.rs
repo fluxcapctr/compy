@@ -21,7 +21,9 @@ fn slot(source: Source) -> u8 { match source { Source::Image => 0, Source::Mask 
 impl Renderer {
     /// A plan for the viewport whose device pixel centers map to document points by `device_to_document`,
     /// `width` x `height` device pixels; `max_dimension` is the GPU's texture limit.
-    pub fn gpu_plan(&mut self, device_to_document: Matrix, width: u32, height: u32, max_dimension: u32) -> Result<Option<Plan>> {
+    /// With `nearest` every layer is sampled without smoothing, as the crisp zoom levels show pixels.
+    pub fn gpu_plan(&mut self, device_to_document: Matrix, width: u32, height: u32, max_dimension: u32, nearest: bool) -> Result<Option<Plan>> {
+        self.nearest_all = nearest;
         self.live.reset();
         let visible = visible_layers(&self.layers);
         self.prepare_stacks(&visible);
@@ -73,7 +75,7 @@ impl Renderer {
         let kind = if self.previews.contains_key(&id) { Source::Preview } else { Source::Image };
         let Some(image) = self.store(kind).get(&id).cloned() else { return Ok(None) };
         let t = self.preview_transforms.get(&id).copied().unwrap_or(layer.transform);
-        let nearest = t.sampling == crate::format::Sampling::Nearest;
+        let nearest = self.nearest_all || t.sampling == crate::format::Sampling::Nearest;
         let dirty = if kind == Source::Preview { self.preview_dirty.get(&id).copied() } else { None };
         let placed = self.placed(id, kind, &image, &t, device_to_document, nearest, dirty)?;
         let mask = self.own_mask_draw(layer, &t, device_to_document, nearest)?;

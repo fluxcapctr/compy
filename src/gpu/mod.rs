@@ -4,6 +4,8 @@
 //! together, apply folder masks, blend with the layer's mode and opacity, run adjustment lookups. The
 //! result is read back as BGRA rows for the canvas. Anything the plan cannot express falls back to the CPU.
 
+pub mod present;
+
 use anyhow::{Context as _, Result, bail};
 use cairo::ImageSurface;
 use std::collections::HashMap;
@@ -73,16 +75,24 @@ pub enum Item {
     Adjust(AdjustDraw),
 }
 
-/// A frame to composite: the items in drawing order over a viewport of `width` x `height` device pixels,
-/// `to_device` mapping document points to device pixels.
+/// A frame to composite: the items in drawing order over a viewport of `width` x `height` device pixels.
 #[derive(Clone, Debug)]
 pub struct Plan { pub items: Vec<Item>, pub width: u32, pub height: u32 }
+
+/// What lies behind the document when a whole window frame is composited: the surround color, the
+/// document's rectangle in device pixels, the checker tile size, and the document shadow's spread.
+#[derive(Clone, Copy, Debug)]
+pub struct Background { pub surround: [f32; 3], pub rect: (f32, f32, f32, f32), pub tile: f32, pub shadow: bool }
 
 struct Cached { texture: wgpu::Texture, view: wgpu::TextureView, width: u32, height: u32, mips: u32, frame: u64 }
 
 struct Target { texture: wgpu::Texture, view: wgpu::TextureView }
 
 pub struct Gpu {
+    /// Exported presentation buffers, declared first so they go before the device they were made on.
+    pub buffers: Vec<present::Buffer>,
+    pub buffer_size: (u32, u32),
+    pub next_buffer: usize,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
@@ -98,6 +108,8 @@ pub struct Gpu {
     frame: u64,
     max_dimension: u32,
     pub name: String,
+    /// The device can export images as dma-bufs (its creation enabled the extensions).
+    pub export: bool,
 }
 
 const OP_COMPOSITE: u32 = 0;
@@ -108,6 +120,7 @@ const OP_RESTORE: u32 = 4;
 const OP_ADJUST: u32 = 5;
 const OP_DOWNSAMPLE: u32 = 6;
 const OP_COPY: u32 = 7;
+const OP_BACKGROUND: u32 = 8;
 
 const FLAG_MASK: u32 = 1;
 const FLAG_NEAREST: u32 = 2;
@@ -150,8 +163,9 @@ fn identity() -> Affine { Affine([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]) }
 impl Gpu {
     /// A device on the best adapter, or None when there is no usable GPU (the CPU path stays).
     pub fn new() -> Option<Gpu> {
-        // Opt in while the frame still comes back through a readback: set COMPOSITOR_GPU=1.
-        if !std::env::var("COMPOSITOR_GPU").is_ok_and(|v| v == "1") { return None; }
+        // Opt in: COMPOSITOR_GPU=present (frames straight to GTK as dma-bufs) or =readback (frames copied
+        // back through the CPU). Off by default until the presented path is proven stable on the driver.
+        if !std::env::var("COMPOSITOR_GPU").is_ok_and(|v| v == "present" || v == "readback") { return None; }
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         descriptor.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
         let instance = wgpu::Instance::new(descriptor);
@@ -161,7 +175,18 @@ impl Gpu {
         let max_dimension = limits.max_texture_dimension_2d.min(16384);
         let mut required = wgpu::Limits::default();
         required.max_texture_dimension_2d = max_dimension;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("compy"), required_limits: required, ..Default::default() })).ok()?;
+        // A Vulkan device made with the dma-buf export extensions, so frames can go straight to GTK; failing
+        // that, a plain device whose frames are read back.
+        let descriptor = wgpu::DeviceDescriptor { label: Some("compy"), required_limits: required.clone(), ..Default::default() };
+        let exported = if info.backend == wgpu::Backend::Vulkan {
+            let opened = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }.and_then(|hal| {
+                let callback: Box<wgpu::hal::vulkan::CreateDeviceCallback<'_>> = Box::new(|args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_, '_>| { for e in present::extensions() { if !args.extensions.contains(&e) { args.extensions.push(e); } } });
+                unsafe { hal.open_with_callback(descriptor.required_features, &descriptor.required_limits, &descriptor.memory_hints, Some(callback)) }.ok()
+            });
+            opened.and_then(|open| unsafe { adapter.create_device_from_hal::<wgpu::hal::api::Vulkan>(open, &descriptor) }.ok())
+        } else { None };
+        let export = exported.is_some();
+        let (device, queue) = match exported { Some(pair) => pair, None => pollster::block_on(adapter.request_device(&descriptor)).ok()? };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("composite"), source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
@@ -192,7 +217,7 @@ impl Gpu {
         queue.write_texture(blank.texture.as_image_copy(), &[0, 0, 0, 0], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None }, wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
         let blank_mask = Self::make_texture(&device, 1, 1, wgpu::TextureFormat::R8Unorm, 1);
         queue.write_texture(blank_mask.texture.as_image_copy(), &[255], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: None }, wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 });
-        Some(Gpu { device, queue, pipeline, r8_pipeline_layout: layout, lin, near, textures: HashMap::new(), pool: Vec::new(), pool_size: (0, 0), blank, blank_mask, frame: 0, max_dimension, name: format!("{} ({:?})", info.name, info.backend) })
+        Some(Gpu { buffers: Vec::new(), buffer_size: (0, 0), next_buffer: 0, device, queue, pipeline, r8_pipeline_layout: layout, lin, near, textures: HashMap::new(), pool: Vec::new(), pool_size: (0, 0), blank, blank_mask, frame: 0, max_dimension, name: format!("{} ({:?}){}", info.name, info.backend, if export { ", dma-buf export" } else { "" }), export })
     }
 
     pub fn max_dimension(&self) -> u32 { self.max_dimension }
@@ -296,9 +321,29 @@ impl Gpu {
 
     /// Composites `plan` and returns the frame as tightly packed BGRA premultiplied rows.
     pub fn render(&mut self, plan: &Plan) -> Result<Vec<u8>> {
+        let canvas = self.compose(plan, None)?;
+        let (w, h) = (plan.width, plan.height);
+        let bytes = self.read_back(&canvas, w, h)?;
+        self.give_back(canvas);
+        Ok(bytes)
+    }
+
+    /// Composites `plan` into an exported buffer (with `background` behind it) for GTK to show, and waits
+    /// for the GPU so the buffer is complete when handed over.
+    pub fn present(&mut self, plan: &Plan, background: Background, buffer: &present::Buffer) -> Result<()> {
+        let canvas = self.compose(plan, Some(background))?;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
+        encoder.copy_texture_to_texture(canvas.texture.as_image_copy(), buffer.texture().as_image_copy(), wgpu::Extent3d { width: plan.width, height: plan.height, depth_or_array_layers: 1 });
+        self.queue.submit([encoder.finish()]);
+        self.device.poll(wgpu::PollType::wait_indefinitely()).context("waiting for the frame")?;
+        self.give_back(canvas);
+        Ok(())
+    }
+
+    fn compose(&mut self, plan: &Plan, background: Option<Background>) -> Result<Target> {
         self.frame += 1;
         let (w, h) = (plan.width, plan.height);
-        if w == 0 || h == 0 { return Ok(Vec::new()); }
+        if w == 0 || h == 0 { bail!("empty viewport"); }
         if w > self.max_dimension || h > self.max_dimension { bail!("viewport {w}x{h} is larger than the GPU allows"); }
         // Upload everything first, so the passes only bind.
         for item in &plan.items {
@@ -315,6 +360,14 @@ impl Gpu {
         let mut frame = Frame { gpu: self, width: w, height: h, encoder: None };
         let mut canvas = frame.gpu.take_target(w, h);
         frame.clear(&canvas);
+        if let Some(b) = background {
+            let mut u = frame.base_uniforms();
+            u.op = OP_BACKGROUND;
+            u.to_layer = Affine([b.rect.0 as f64, b.rect.1 as f64, b.rect.2 as f64, b.rect.3 as f64, b.tile as f64, if b.shadow { 1.0 } else { 0.0 }]);
+            u.to_mask = Affine([b.surround[0] as f64, b.surround[1] as f64, b.surround[2] as f64, 0.0, 0.0, 0.0]);
+            let (blank, blank_mask) = (frame.gpu.blank.view.clone(), frame.gpu.blank_mask.view.clone());
+            canvas = frame.step(canvas, &u, &blank, &blank_mask);
+        }
         for item in &plan.items {
             match item {
                 Item::Layer(l) => { let g = frame.layer_group(l)?; canvas = frame.composite_group(canvas, &g, l.opacity, l.blend); frame.gpu.give_back(g); }
@@ -348,13 +401,11 @@ impl Gpu {
             }
         }
         frame.flush();
-        let bytes = frame.gpu.read_back(&canvas, w, h)?;
         let gpu = frame.gpu;
-        gpu.give_back(canvas);
         // Forget textures no frame has used for a while.
         let current = gpu.frame;
         gpu.textures.retain(|_, c| current - c.frame < 120);
-        Ok(bytes)
+        Ok(canvas)
     }
 
     fn upload_layer(&mut self, l: &LayerDraw) -> Result<()> {

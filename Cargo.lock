@@ -213,6 +213,7 @@ name = "compositor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "cairo-rs",
  "cc",
  "gtk4",

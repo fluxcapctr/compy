@@ -54,6 +54,9 @@ pub struct Canvas {
     text_edit: RefCell<Option<(uuid::Uuid, usize)>>,
     /// A Pen drag in progress: the anchor being placed (its handles follow), or an anchor or handle moved.
     pen_drag: Cell<Option<PenDrag>>,
+    /// What the picture last showed straight from the GPU: the document revision and viewport, and the size.
+    presented_revision: Cell<Option<(u64, crate::viewport::Viewport)>>,
+    presented_size: Cell<(i32, i32, i32)>,
     /// Return with the Move tool puts this layer's transform handles away until the next click on the
     /// canvas, a new transform, another layer, or Transform Controls switched on.
     handles_parked: Cell<Option<uuid::Uuid>>,
@@ -142,7 +145,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None), presented_revision: Cell::new(None), presented_size: Cell::new((0, 0, 0)) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -150,6 +153,11 @@ impl Canvas {
     }
 
     pub fn doc(&self) -> &DocRef { &self.doc }
+
+    /// Whether the document or view moved on since the last presented frame.
+    fn doc_revision_changed(&self, d: &super::Doc) -> bool {
+        match self.presented_revision.get() { Some((r, v)) => r != d.document.renderer.revision() || v != d.viewport, None => true }
+    }
 
     /// Brings the cached frame up to date: nothing when the document and view are as they were, only the
     /// changed region after a stroke step, everything otherwise. Returns what it did, for tracing.
@@ -209,14 +217,27 @@ impl Canvas {
                 let draft = draft_ref.draft.borrow();
                 let offset = outline_ref.outline_move.get().unwrap_or((0.0, 0.0));
                 let scale = area.scale_factor();
-                let rendered = match this.cached_frame(&mut d, w, h, scale) {
-                    Ok(rendered) => rendered,
-                    Err(error) => { eprintln!("canvas draw failed: {error:#}"); "failed" }
+                // Straight to the screen through the GPU when it can present; else the CPU frame cache.
+                let presented = if this.doc_revision_changed(&d) || this.presented_size.get() != (w, h, scale) { present_frame(&mut d, w, h, scale) } else { None };
+                let rendered = if let Some(texture) = presented {
+                    d.document.take_dirty();
+                    this.picture.set_paintable(Some(&texture));
+                    this.presented_size.set((w, h, scale));
+                    this.presented_revision.set(Some((d.document.renderer.revision(), d.viewport)));
+                    "presented"
+                } else if this.presented_revision.get().is_some_and(|(r, v)| r == d.document.renderer.revision() && v == d.viewport) && this.presented_size.get() == (w, h, scale) {
+                    "presented"
+                } else {
+                    this.presented_revision.set(None);
+                    match this.cached_frame(&mut d, w, h, scale) {
+                        Ok(rendered) => rendered,
+                        Err(error) => { eprintln!("canvas draw failed: {error:#}"); "failed" }
+                    }
                 };
                 let t = std::time::Instant::now();
                 // A changed frame becomes a new texture for the picture underneath; an unchanged one is left
                 // to the GPU copy GTK already holds.
-                if rendered != "cached" {
+                if rendered != "cached" && rendered != "presented" {
                     if let Some(cache) = this.cache.borrow().as_ref() {
                         let (cw, ch) = (cache.surface.width(), cache.surface.height());
                         let stride = cache.surface.stride() as usize;
@@ -1646,11 +1667,60 @@ fn with_gpu<R>(f: impl FnOnce(&mut crate::gpu::Gpu) -> R) -> Option<R> {
 
 /// The document composited on the GPU for `w` x `h` device pixels whose centers `device_to_document`
 /// maps onto the document; None when there is no GPU or the frame needs the CPU path.
+thread_local! {
+    /// Presentation has failed for good this session (the CPU frame cache draws instead).
+    static PRESENT_FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The whole canvas frame composited on the GPU and handed to GTK as a dma-buf texture: nothing crosses
+/// back to the CPU. None when that path is unavailable, so the frame cache draws as before.
+fn present_frame(doc: &mut super::Doc, w: i32, h: i32, scale: i32) -> Option<gdk::Texture> {
+    if PRESENT_FAILED.with(|f| f.get()) || w <= 0 || h <= 0 { return None; }
+    if !std::env::var("COMPOSITOR_GPU").is_ok_and(|v| v == "present") { return None; }
+    let ds = scale.max(1) as f64;
+    let (dw, dh) = ((w as f64 * ds) as u32, (h as f64 * ds) as u32);
+    let size = doc.size();
+    let vp = doc.viewport;
+    let (rx, ry, rw, rh) = vp.document_rect(size);
+    let ppp = vp.points_per_pixel();
+    let device_to_document = cairo::Matrix::new(1.0 / (ds * ppp), 0.0, 0.0, 1.0 / (ds * ppp), -rx / ppp, -ry / ppp);
+    let surround = if doc.preview { (0.0, 0.0, 0.0) } else { super::theme::surround() };
+    let background = crate::gpu::Background { surround: [surround.0 as f32, surround.1 as f32, surround.2 as f32], rect: ((rx * ds) as f32, (ry * ds) as f32, (rw * ds) as f32, (rh * ds) as f32), tile: (10.0 * ds) as f32, shadow: !doc.preview };
+    let nearest = vp.zoom() >= CRISP_ZOOM;
+    let trace = std::env::var_os("COMPOSITOR_TRACE").is_some();
+    let t = std::time::Instant::now();
+    let result = with_gpu(|gpu| {
+        if !gpu.export { return None; }
+        let plan = match doc.document.renderer.gpu_plan(device_to_document, dw, dh, gpu.max_dimension(), nearest) { Ok(Some(p)) => p, Ok(None) => return None, Err(e) => { eprintln!("gpu plan: {e:#}"); return None; } };
+        if gpu.buffer_size != (dw, dh) || gpu.buffers.len() < 3 {
+            gpu.buffers.clear();
+            for _ in 0..3 { match gpu.export_buffer(dw, dh) { Ok(b) => gpu.buffers.push(b), Err(e) => { eprintln!("gpu present: {e:#}"); PRESENT_FAILED.with(|f| f.set(true)); return None; } } }
+            gpu.buffer_size = (dw, dh);
+            gpu.next_buffer = 0;
+        }
+        let index = gpu.next_buffer;
+        gpu.next_buffer = (index + 1) % gpu.buffers.len();
+        let buffer = std::mem::take(&mut gpu.buffers);
+        let outcome = gpu.present(&plan, background, &buffer[index]);
+        let display = gdk::Display::default();
+        let texture = match (outcome, display) {
+            (Ok(()), Some(display)) => match crate::gpu::present::gdk_texture(&display, &buffer[index], dw, dh) { Ok(t) => Some(t), Err(e) => { eprintln!("gpu present: {e:#}"); PRESENT_FAILED.with(|f| f.set(true)); None } },
+            (Err(e), _) => { eprintln!("gpu present: {e:#}"); None }
+            _ => None,
+        };
+        gpu.buffers = buffer;
+        texture
+    }).flatten();
+    if trace { eprintln!("  gpu present {}x{} {:.1} ms{}", dw, dh, t.elapsed().as_secs_f64() * 1000.0, if result.is_some() { "" } else { " (fell back)" }); }
+    result
+}
+
 fn gpu_frame(doc: &mut super::Doc, device_to_document: cairo::Matrix, w: u32, h: u32) -> Option<cairo::ImageSurface> {
     if w == 0 || h == 0 { return None; }
+    if !std::env::var("COMPOSITOR_GPU").is_ok_and(|v| v == "readback") { return None; }
     with_gpu(|gpu| {
         let t = std::time::Instant::now();
-        let plan = match doc.document.renderer.gpu_plan(device_to_document, w, h, gpu.max_dimension()) { Ok(Some(p)) => p, Ok(None) => return None, Err(e) => { eprintln!("gpu plan: {e:#}"); return None; } };
+        let plan = match doc.document.renderer.gpu_plan(device_to_document, w, h, gpu.max_dimension(), false) { Ok(Some(p)) => p, Ok(None) => return None, Err(e) => { eprintln!("gpu plan: {e:#}"); return None; } };
         let bytes = match gpu.render(&plan) { Ok(b) => b, Err(e) => { eprintln!("gpu render: {e:#}"); return None; } };
         if std::env::var_os("COMPOSITOR_TRACE").is_some() { eprintln!("  gpu frame {}x{} {:.1} ms", w, h, t.elapsed().as_secs_f64() * 1000.0); }
         cairo::ImageSurface::create_for_data(bytes, cairo::Format::ARgb32, w as i32, h as i32, (w * 4) as i32).ok()

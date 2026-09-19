@@ -15,7 +15,7 @@ fn cpu(d: &mut Document) -> Vec<u8> {
 
 fn gpu(g: &mut Gpu, d: &mut Document) -> Option<Vec<u8>> {
     let (w, h) = (d.width() as u32, d.height() as u32);
-    let plan = d.renderer.gpu_plan(cairo::Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), w, h, g.max_dimension()).unwrap()?;
+    let plan = d.renderer.gpu_plan(cairo::Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), w, h, g.max_dimension(), false).unwrap()?;
     Some(g.render(&plan).unwrap())
 }
 
@@ -100,7 +100,7 @@ fn gpu_matches_cpu_on_blends_masks_folders_clips_and_adjustments() {
     let mut f = Fixture::new("gpu-reduced", 128, 128);
     f.add(Spec { name: "Fine", size: (128.0, 128.0), pixels: Some(checker(128, 128, [255, 255, 255, 255], [0, 0, 0, 255])), ..Spec::default() });
     let mut d = Document::new(f.load().unwrap()).unwrap();
-    let plan = d.renderer.gpu_plan(cairo::Matrix::new(4.0, 0.0, 0.0, 4.0, 0.0, 0.0), 32, 32, g.max_dimension()).unwrap().unwrap();
+    let plan = d.renderer.gpu_plan(cairo::Matrix::new(4.0, 0.0, 0.0, 4.0, 0.0, 0.0), 32, 32, g.max_dimension(), false).unwrap().unwrap();
     let small = g.render(&plan).unwrap();
     let mean_gray = small.chunks_exact(4).map(|p| p[1] as f64).sum::<f64>() / (32.0 * 32.0);
     assert!((mean_gray - 127.5).abs() < 20.0, "a fine checker averages to gray when reduced: {mean_gray}");
