@@ -53,6 +53,13 @@ impl GenFill {
         content.append(&row);
         let composite = gtk::CheckButton::builder().label("Send every visible layer as context (off: the active layer alone)").active(true).build();
         content.append(&composite);
+        // The key, entered once here and kept in ~/.config/compositor/fal.key.
+        let key_row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).visible(genfill::key().is_none()).build();
+        let key_entry = gtk::PasswordEntry::builder().placeholder_text("fal.ai API key").hexpand(true).show_peek_icon(true).build();
+        let key_save = gtk::Button::with_label("Save key");
+        key_row.append(&key_entry);
+        key_row.append(&key_save);
+        content.append(&key_row);
         let results = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(4).min_children_per_line(2).column_spacing(6).row_spacing(6).homogeneous(true).build();
         content.append(&results);
         let status = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).build();
@@ -69,7 +76,19 @@ impl GenFill {
         let this = Rc::new(GenFill { doc, window: window.clone(), prompt, models, count, composite, generate, status, results, window_rect: Cell::new(None), layer: Cell::new(None), images: RefCell::new(Vec::new()), running: Rc::new(RefCell::new(None)), finished });
         match genfill::key() {
             Some(_) => this.status.set_label("Only the selection and a margin around it are sent to fal.ai."),
-            None => { this.status.set_label("No fal.ai key found. Put it on the first line of ~/.config/compositor/fal.key (or set FAL_KEY) and reopen this panel."); this.generate.set_sensitive(false); }
+            None => { this.status.set_label("No fal.ai key yet: paste it above and press Save key (it is kept in ~/.config/compositor/fal.key)."); this.generate.set_sensitive(false); }
+        }
+        {
+            let (t, entry, row) = (this.clone(), key_entry.clone(), key_row.clone());
+            let save = move || {
+                match genfill::save_key(&entry.text()) {
+                    Ok(()) => { row.set_visible(false); t.generate.set_sensitive(true); t.status.set_label("Key saved to ~/.config/compositor/fal.key. Only the selection and a margin around it are sent to fal.ai."); }
+                    Err(e) => t.status.set_label(&format!("{e:#}")),
+                }
+            };
+            let s2 = save.clone();
+            key_save.connect_clicked(move |_| s2());
+            key_entry.connect_activate(move |_| save());
         }
         { let t = this.clone(); this.generate.connect_clicked(move |_| t.start()); }
         { let t = this.clone(); this.prompt.connect_activate(move |_| if t.generate.is_sensitive() { t.start() }); }

@@ -49,6 +49,18 @@ pub fn models() -> Vec<Model> {
     list
 }
 
+/// Writes the key to `~/.config/compositor/fal.key`, readable by the user only.
+pub fn save_key(key: &str) -> Result<()> {
+    let key = key.trim();
+    if key.is_empty() { bail!("The key is empty."); }
+    let path = config_dir().join("fal.key");
+    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(&path, format!("{key}\n"))?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)); }
+    Ok(())
+}
+
 /// The fal key: `FAL_KEY`, or the first line of `~/.config/compositor/fal.key`.
 pub fn key() -> Option<String> {
     if let Ok(k) = std::env::var("FAL_KEY") { let k = k.trim().to_string(); if !k.is_empty() { return Some(k); } }
