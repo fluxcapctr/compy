@@ -52,6 +52,8 @@ pub struct Canvas {
     popover: RefCell<Option<gtk::Popover>>,
     /// Text being typed on the canvas: the type layer and the caret's byte index in its text.
     text_edit: RefCell<Option<(uuid::Uuid, usize)>>,
+    /// A Pen drag in progress: the anchor being placed (its handles follow), or an anchor or handle moved.
+    pen_drag: Cell<Option<PenDrag>>,
     /// Return with the Move tool puts this layer's transform handles away until the next click on the
     /// canvas, a new transform, another layer, or Transform Controls switched on.
     handles_parked: Cell<Option<uuid::Uuid>>,
@@ -86,6 +88,9 @@ pub enum DraftKind { Rectangle, Ellipse, Freehand, Polygonal }
 
 /// The rulers' thickness in view points.
 const RULER: f64 = 18.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PenDrag { Place(usize), Anchor(usize), HandleIn(usize), HandleOut(usize) }
 
 /// What a Gradient, Shape or Crop drag is doing, from `start` (document pixels).
 #[derive(Clone, Copy, PartialEq)]
@@ -137,7 +142,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -247,7 +252,7 @@ impl Canvas {
             motion.connect_motion(move |_, x, y| {
                 this.pointer.set((x, y));
                 let tool = this.doc.borrow().tool;
-                if tool.is_brush() || this.doc.borrow().rulers { this.area.queue_draw(); }
+                if tool.is_brush() || this.doc.borrow().rulers || (tool == Tool::Pen && !this.doc.borrow().pen_done) { this.area.queue_draw(); }
                 if tool == Tool::Move && !this.dragging.get() && this.transform_drag.borrow().is_none() { this.update_cursor(); }
                 let polygonal = this.draft.borrow().as_ref().is_some_and(|d| d.kind == DraftKind::Polygonal);
                 if polygonal {
@@ -307,6 +312,20 @@ impl Canvas {
                 this.close_popover();
                 let tool = this.doc.borrow().tool;
                 if tool.is_brush() { g.set_state(gtk::EventSequenceState::Claimed); this.brush_popover(x, y); return; }
+                if tool == Tool::Pen && !this.doc.borrow().pen.is_empty() {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    let menu = gio::Menu::new();
+                    menu.append(Some("Make Selection"), Some("win.path-select"));
+                    menu.append(Some("Fill Path"), Some("win.path-fill"));
+                    menu.append(Some("Stroke with Brush"), Some("win.path-stroke"));
+                    menu.append(Some("Clear Path"), Some("win.path-clear"));
+                    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+                    popover.set_parent(&this.area);
+                    popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                    this.track_popover(popover.upcast_ref());
+                    popover.popup();
+                    return;
+                }
                 // Over a selection: what can be done with it, Generative Fill first.
                 let inside = { let d = this.doc.borrow(); let size = d.size(); let p = d.viewport.document_point((x, y), size); d.document.selection.as_ref().is_some_and(|s| !s.is_empty() && s.contains(p.0.floor(), p.1.floor())) };
                 g.set_state(gtk::EventSequenceState::Claimed);
@@ -457,6 +476,7 @@ impl Canvas {
                     if button == 1 && this.begin_guide_from_ruler((x, y)) { this.stroke_start.set((x, y)); return; }
                     if button == 1 && tool == Tool::Move { if let Some(g) = this.guide_at((x, y)) { this.guide_drag.set(Some(g)); this.stroke_start.set((x, y)); return; } }
                     if button == 1 && tool == Tool::Move { if this.begin_transform((x, y), state) { this.stroke_start.set((x, y)); return; } }
+                    if button == 1 && tool == Tool::Pen { this.stroke_start.set((x, y)); this.pen_press((x, y)); return; }
                     if button == 1 && matches!(tool, Tool::Gradient | Tool::Shape | Tool::Crop) {
                         this.stroke_start.set((x, y));
                         this.begin_tool_drag((x, y), state);
@@ -494,6 +514,11 @@ impl Canvas {
                         this.update_tool_drag((sx + dx, sy + dy), state);
                         return;
                     }
+                    if this.pen_drag.get().is_some() {
+                        let (sx, sy) = this.stroke_start.get();
+                        this.pen_drag_to((sx + dx, sy + dy));
+                        return;
+                    }
                     if this.guide_drag.get().is_some() {
                         let (sx, sy) = this.stroke_start.get();
                         this.update_guide_drag((sx + dx, sy + dy));
@@ -511,6 +536,7 @@ impl Canvas {
                 if this.transform_drag.borrow().is_some() { this.finish_transform(); }
                 if this.outline_move.get().is_some() { this.finish_outline_move(); }
                 if this.tool_drag.get().is_some() { this.finish_tool_drag(); }
+                this.pen_drag.set(None);
                 if this.guide_drag.get().is_some() { this.finish_guide_drag(); }
                 else if this.draft.borrow().as_ref().is_some_and(|d| d.kind != DraftKind::Polygonal) { this.finish_draft(); }
                 this.dragging.set(false);
@@ -522,6 +548,7 @@ impl Canvas {
 
     fn tool_changed(&self) {
         self.handles_parked.set(None);
+        self.pen_drag.set(None);
         { let mut d = self.doc.borrow_mut(); d.crop = None; d.gradient_line = None; d.shape_draft = None; if d.tool != Tool::Gradient { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } } }
         let tool = self.doc.borrow().tool;
         *self.draft.borrow_mut() = None;
@@ -543,6 +570,7 @@ impl Canvas {
                 Tool::Hand => "grab", Tool::Zoom => "zoom-in", Tool::Wand => "crosshair", Tool::Marquee | Tool::Lasso => "crosshair",
                 Tool::Crop | Tool::Gradient | Tool::Shape | Tool::Eyedropper => "crosshair",
                 Tool::Type => "text",
+                Tool::Pen => "crosshair",
                 t if t.is_brush() => "none",
                 Tool::Move if self.guide_at(self.pointer.get()).is_some_and(|(v, _)| v) => "ew-resize",
                 Tool::Move if self.guide_at(self.pointer.get()).is_some() => "ns-resize",
@@ -724,6 +752,7 @@ impl Canvas {
             self.area.queue_draw();
             return true;
         }
+        if tool == Tool::Pen && self.pen_key(key, modifiers) { return true; }
         // Return with the Move tool: the layer is placed; its handles go away until the next click.
         if tool == Tool::Move && self.draft.borrow().is_none() && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
             self.handles_parked.set(self.doc.borrow().document.active);
@@ -1101,6 +1130,93 @@ impl Canvas {
     pub fn cancel_crop(&self) { self.doc.borrow_mut().crop = None; self.area.queue_draw(); }
 
     /// Preview mode hides everything but the picture.
+    // The Pen tool
+
+    /// A press with the Pen: closes the path on its first point, picks up an anchor or handle, or places a
+    /// new corner (a drag then pulls out its handles). A finished path starts over on a press away from it.
+    fn pen_press(&self, view: (f64, f64)) {
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let p = d.viewport.document_point(view, size);
+        let tolerance = 7.0 / d.viewport.zoom().max(1e-6);
+        if d.pen_done {
+            match d.pen.hit(p, tolerance) {
+                Some(crate::path::Hit::Anchor(i)) => self.pen_drag.set(Some(PenDrag::Anchor(i))),
+                Some(crate::path::Hit::HandleIn(i)) => self.pen_drag.set(Some(PenDrag::HandleIn(i))),
+                Some(crate::path::Hit::HandleOut(i)) => self.pen_drag.set(Some(PenDrag::HandleOut(i))),
+                None => { d.pen = crate::path::Path::default(); d.pen_done = false; d.pen.anchors.push(crate::path::Anchor::corner(p)); self.pen_drag.set(Some(PenDrag::Place(0))); }
+            }
+        } else {
+            let first_hit = d.pen.anchors.len() >= 2 && d.pen.anchors.first().is_some_and(|a| (a.point.0 - p.0).hypot(a.point.1 - p.1) <= tolerance);
+            if first_hit { d.pen.closed = true; d.pen_done = true; self.pen_drag.set(Some(PenDrag::HandleIn(0))); drop(d); self.notify("Path closed. Ctrl+Return makes a selection; the options bar fills or strokes it."); self.area.queue_draw(); return; }
+            match d.pen.hit(p, tolerance) {
+                Some(crate::path::Hit::Anchor(i)) => self.pen_drag.set(Some(PenDrag::Anchor(i))),
+                Some(crate::path::Hit::HandleIn(i)) => self.pen_drag.set(Some(PenDrag::HandleIn(i))),
+                Some(crate::path::Hit::HandleOut(i)) => self.pen_drag.set(Some(PenDrag::HandleOut(i))),
+                None => { d.pen.anchors.push(crate::path::Anchor::corner(p)); let i = d.pen.anchors.len() - 1; self.pen_drag.set(Some(PenDrag::Place(i))); }
+            }
+        }
+        drop(d);
+        self.area.queue_draw();
+    }
+
+    fn pen_drag_to(&self, view: (f64, f64)) {
+        let Some(drag) = self.pen_drag.get() else { return };
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let p = d.viewport.document_point(view, size);
+        match drag {
+            PenDrag::Place(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { let m = (2.0 * a.point.0 - p.0, 2.0 * a.point.1 - p.1); if (p.0 - a.point.0).hypot(p.1 - a.point.1) > 1.0 { a.handle_out = Some(p); a.handle_in = Some(m); } } }
+            PenDrag::Anchor(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { let (dx, dy) = (p.0 - a.point.0, p.1 - a.point.1); a.point = p; a.handle_in = a.handle_in.map(|h| (h.0 + dx, h.1 + dy)); a.handle_out = a.handle_out.map(|h| (h.0 + dx, h.1 + dy)); } }
+            PenDrag::HandleIn(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_in = Some(p); } }
+            PenDrag::HandleOut(i) => { if let Some(a) = d.pen.anchors.get_mut(i) { a.handle_out = Some(p); } }
+        }
+        drop(d);
+        self.area.queue_draw();
+    }
+
+    /// Return ends an open path, Backspace drops the last point, Escape clears. True when taken.
+    fn pen_key(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+        if modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) { return false; }
+        let mut d = self.doc.borrow_mut();
+        match key {
+            gdk::Key::Return | gdk::Key::KP_Enter => { if d.pen.anchors.len() >= 2 { d.pen_done = true; } }
+            gdk::Key::Escape => { d.pen = crate::path::Path::default(); d.pen_done = false; }
+            gdk::Key::BackSpace | gdk::Key::Delete if !d.pen_done => { d.pen.anchors.pop(); }
+            _ => return false,
+        }
+        drop(d);
+        self.pen_drag.set(None);
+        self.area.queue_draw();
+        true
+    }
+
+    pub fn path_select(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); let path = d.pen.clone(); let mode = d.mode; d.document.select_path(&path, mode) };
+        match result { Ok(()) => { self.doc.borrow_mut().pen_done = true; if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); } } Err(e) => self.notify(&format!("{e:#}")) }
+        self.area.queue_draw();
+    }
+
+    pub fn path_fill(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); let (path, color) = (d.pen.clone(), d.brush.color); d.document.fill_path(&path, color) };
+        if let Err(e) = result { self.notify(&format!("{e:#}")); }
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.area.queue_draw();
+    }
+
+    pub fn path_stroke(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); let (path, brush) = (d.pen.clone(), d.brush.clone()); d.document.stroke_path(&path, &brush) };
+        if let Err(e) = result { self.notify(&format!("{e:#}")); }
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.area.queue_draw();
+    }
+
+    pub fn path_clear(&self) {
+        { let mut d = self.doc.borrow_mut(); d.pen = crate::path::Path::default(); d.pen_done = false; }
+        self.pen_drag.set(None);
+        self.area.queue_draw();
+    }
+
     /// Handles come back: a new transform, or Transform Controls switched on.
     pub fn unpark_handles(&self) { self.handles_parked.set(None); self.update_cursor(); self.area.queue_draw(); }
 
@@ -1873,6 +1989,44 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
         }
     }
 
+    // The Pen path: the curve, its anchors as squares, handles as lines with round ends, and while it is
+    // being drawn, a rubber band from the last anchor to the pointer.
+    if doc.tool == Tool::Pen && !doc.pen.is_empty() && !doc.preview {
+        let to_view = |p: (f64, f64)| vp.view_point(p, size);
+        cr.save()?;
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        doc.pen.trace(cr, to_view);
+        cr.stroke_preserve()?;
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
+        cr.set_dash(&[4.0, 4.0], 0.0);
+        cr.stroke()?;
+        cr.set_dash(&[], 0.0);
+        if !doc.pen_done {
+            if let Some(last) = doc.pen.anchors.last() {
+                let from = to_view(last.handle_out.unwrap_or(last.point));
+                let start = to_view(last.point);
+                cr.set_source_rgba(0.3, 0.7, 1.0, 0.8);
+                if last.handle_out.is_some() { cr.move_to(start.0, start.1); cr.curve_to(from.0, from.1, pointer.0, pointer.1, pointer.0, pointer.1); } else { cr.move_to(start.0, start.1); cr.line_to(pointer.0, pointer.1); }
+                cr.stroke()?;
+            }
+        }
+        for a in &doc.pen.anchors {
+            let p = to_view(a.point);
+            for h in [a.handle_in, a.handle_out].into_iter().flatten() {
+                let v = to_view(h);
+                cr.set_source_rgba(0.3, 0.7, 1.0, 0.9);
+                cr.move_to(p.0, p.1); cr.line_to(v.0, v.1); cr.stroke()?;
+                cr.arc(v.0, v.1, 2.5, 0.0, std::f64::consts::TAU); cr.fill()?;
+            }
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.rectangle(p.0.round() - 3.0, p.1.round() - 3.0, 6.0, 6.0);
+            cr.fill_preserve()?;
+            cr.set_source_rgb(0.1, 0.4, 0.8);
+            cr.stroke()?;
+        }
+        cr.restore()?;
+    }
     // Text being typed: a dashed frame around the type layer and the caret.
     if let Some((id, index)) = text_edit {
         if doc.document.has_layer(id) {

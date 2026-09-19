@@ -74,6 +74,9 @@ pub struct Doc {
     pub shape_ellipse: bool,
     pub shape_radius: f64,
     pub shape_draft: Option<(f64, f64, f64, f64)>,
+    /// Pen tool: the path being drawn or just drawn, and whether it is finished (no rubber band).
+    pub pen: crate::path::Path,
+    pub pen_done: bool,
     /// Type tool: the font and setting for new text (the color is the foreground color).
     pub text_style: crate::text::TextStyle,
     /// Crop tool: the frame (x, y, w, h) and the ratio choice (0 free, 1 original, 2 square, 3 4:3, 4 16:9).
@@ -134,7 +137,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -157,7 +160,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -212,6 +215,8 @@ pub struct Script {
     pub shortcuts: bool,
     /// Starts typing on the canvas into the active type layer.
     pub type_edit: bool,
+    /// A Pen path from "x,y x,y ..." (a point with "x,y:hx,hy" pulls a handle); a trailing "close" closes it.
+    pub path: Option<String>,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -225,7 +230,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -240,6 +245,20 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.layer_style { state.open_layer_style(); }
                     if script.grid { p.canvas.doc().borrow_mut().document.grid = Some((100.0, 4)); p.canvas.area.queue_draw(); }
                     if script.shortcuts { state.show_shortcuts(); }
+                    if let Some(spec) = &script.path {
+                        let mut d = p.canvas.doc().borrow_mut();
+                        let mut path = crate::path::Path::default();
+                        for part in spec.split_whitespace() {
+                            if part == "close" { path.closed = true; continue; }
+                            let (point, handle) = part.split_once(':').map(|(a, b)| (a, Some(b))).unwrap_or((part, None));
+                            let parse = |t: &str| t.split_once(',').and_then(|(x, y)| Some((x.parse::<f64>().ok()?, y.parse::<f64>().ok()?)));
+                            if let Some(pt) = parse(point) { let mut a = crate::path::Anchor::corner(pt); if let Some(h) = handle.and_then(parse) { a.handle_out = Some(h); a.handle_in = Some((2.0 * pt.0 - h.0, 2.0 * pt.1 - h.1)); } path.anchors.push(a); }
+                        }
+                        d.pen_done = path.closed;
+                        d.pen = path;
+                        drop(d);
+                        p.canvas.area.queue_draw();
+                    }
                     if script.type_edit { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { p.canvas.edit_text(id); } }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
@@ -353,7 +372,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 92] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 96] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -434,6 +453,10 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("liquify", &["<Control><Shift>x"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().blur_mode = 0; p.canvas.set_tool(Tool::Blur); })),
         ("toggle-extras", &["<Control>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.hide_extras = !d.hide_extras; } p.canvas.area.queue_draw(); })),
         ("toggle-panels", &[], |s| s.toggle_panels()),
+        ("path-select", &["<Control>Return", "<Control>KP_Enter"], |s| s.with_current(|p| p.canvas.path_select())),
+        ("path-fill", &[], |s| s.with_current(|p| p.canvas.path_fill())),
+        ("path-stroke", &[], |s| s.with_current(|p| p.canvas.path_stroke())),
+        ("path-clear", &[], |s| s.with_current(|p| p.canvas.path_clear())),
         ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.unpark_handles(); })),
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
         ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
@@ -600,6 +623,7 @@ fn menu() -> gio::Menu {
     select.append(Some("Inverse"), Some("win.invert-selection"));
     select.append(Some("All Layers"), Some("win.select-all-layers"));
     select.append(Some("Feather…"), Some("win.feather-selection"));
+    select.append(Some("From Path"), Some("win.path-select"));
     select.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
     select.append(Some("Expand…"), Some("win.expand-selection"));
     select.append(Some("Contract…"), Some("win.contract-selection"));
@@ -780,7 +804,8 @@ fn start_page() -> gtk::Widget {
 
 /// Every shortcut, for the Help window: (group, key, what it does).
 pub const SHORTCUTS: &[(&str, &str, &str)] = &[
-    ("Tools", "V M L W C I B E J S R G T U H Z", "Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Smear, Gradient, Type, Shape, Hand, Zoom"),
+    ("Tools", "V M L W C I B E J S R G P T U H Z", "Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Smear, Gradient, Pen, Type, Shape, Hand, Zoom"),
+    ("Tools", "Pen: Return, Ctrl+Return, Backspace, Escape", "End the path, make a selection from it, drop the last point, clear it"),
     ("Tools", "Shift+M, Shift+L, Shift+U", "Swap the marquee, lasso or shape kind"),
     ("Tools", "X, D", "Swap the colors, reset them"),
     ("Tools", "[ ], Shift+[ ], 0 to 9", "Brush size, hardness, opacity"),

@@ -155,6 +155,13 @@ tracking on panel tabs and dialog titles, and a light filled primary button. Col
 active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
 `theme::look_css` and can be reverted as one commit.
 
+**Pen.** Pen (P) draws Bezier paths: click to place a corner, drag to pull out curve handles, click the
+first point to close, Return ends an open path, Backspace drops the last point, Escape clears. Anchors
+and handles can be dragged afterwards. Then Make Selection (Ctrl+Return) turns the path into marching ants
+(an open path closes itself), Fill Path fills it on the active layer in the foreground color, and Stroke
+with Brush paints along it with the current brush, all from the options bar or a right-click on the path.
+`--path "10,10 50,10:30,40 50,50 close"` draws one from a script.
+
 **Start page.** With nothing open the window shows the recent files (the last twelve opened or saved,
 kept in `~/.config/compositor/recent.list`), then Photoshop's New Document presets by group (Photo,
 Print, Web, Mobile, Film and Video, Social), each drawn as a box in its own aspect ratio, a custom width,

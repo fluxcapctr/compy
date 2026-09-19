@@ -343,3 +343,42 @@ fn color_balance_keeps_luminosity_even_when_a_channel_clips() {
     let luma = 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
     assert!(luma < 2.0, "black stays black in luminosity: {p:?}");
 }
+
+#[test]
+fn pen_paths_fill_stroke_and_select() {
+    use compositor::path::{Anchor, Path};
+    let mut d = Document::blank(60, 60, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (0.0, 0.0, 60.0, 60.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    let mut path = Path::default();
+    path.anchors.push(Anchor::corner((10.0, 10.0)));
+    path.anchors.push(Anchor { point: (50.0, 10.0), handle_in: Some((30.0, 30.0)), handle_out: None });
+    path.anchors.push(Anchor::corner((50.0, 50.0)));
+    path.anchors.push(Anchor::corner((10.0, 50.0)));
+    path.closed = true;
+    // Fill in red on the white layer.
+    d.fill_path(&path, [1.0, 0.0, 0.0]).unwrap();
+    assert_eq!(rgb_at(&mut d, 30, 40), [255, 0, 0, 255]);
+    assert_eq!(rgb_at(&mut d, 5, 5), [255, 255, 255, 255], "outside untouched");
+    assert_eq!(d.undo_name(), Some("Fill Path"));
+    d.undo();
+    // Stroke along it with a small black brush: paint lands on the path, not inside it.
+    let mut brush = compositor::brush::BrushSettings::default();
+    brush.diameter = 4.0;
+    brush.color = [0.0, 0.0, 0.0];
+    d.stroke_path(&path, &brush).unwrap();
+    assert!(rgb_at(&mut d, 30, 50)[0] < 60, "the bottom edge is painted: {:?}", rgb_at(&mut d, 30, 50));
+    assert_eq!(rgb_at(&mut d, 30, 40)[0], 255, "the inside is not");
+    d.undo();
+    // A selection from the path, and an open path closes itself for it.
+    d.select_path(&path, Mode::Replace).unwrap();
+    let sel = d.selection.clone().unwrap();
+    assert!(sel.contains(30.0, 40.0) && !sel.contains(5.0, 5.0));
+    assert_eq!(d.undo_name(), Some("Path Selection"));
+    let mut open = path.clone();
+    open.closed = false;
+    d.select_path(&open, Mode::Replace).unwrap();
+    assert!(d.selection.as_ref().unwrap().contains(30.0, 40.0));
+    let two = Path { anchors: path.anchors[..2].to_vec(), closed: false };
+    assert!(d.select_path(&two, Mode::Replace).is_err());
+    let _ = id;
+}

@@ -18,6 +18,7 @@ pub mod genfill;
 pub mod gbr;
 pub mod heic;
 pub mod matte;
+pub mod path;
 pub mod png_io;
 pub mod psd;
 pub mod raster;

@@ -7,10 +7,10 @@ use gtk::glib;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Type, Shape, Hand, Zoom }
+pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Pen, Type, Shape, Hand, Zoom }
 
 impl Tool {
-    pub const ALL: [Tool; 16] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Type, Tool::Shape, Tool::Hand, Tool::Zoom];
+    pub const ALL: [Tool; 17] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Pen, Tool::Type, Tool::Shape, Tool::Hand, Tool::Zoom];
     pub fn help(self) -> &'static str {
         match self {
             Tool::Move => "Move / Transform (V): drag to move; handles scale, the top handle rotates; Shift constrains; Alt scales from the center; Ctrl-click picks the layer under the pointer; arrow keys nudge",
@@ -25,6 +25,7 @@ impl Tool {
             Tool::Crop => "Crop (C): drag a frame, then Return crops the canvas to it; edges snap to layers; Alt keeps the center; Escape cancels",
             Tool::Eyedropper => "Eyedropper (I): click to pick the foreground color from the canvas; Alt-click sets the background color",
             Tool::Gradient => "Gradient (G): drag a line to fill the layer (or its mask) with a gradient inside the selection; Shift snaps the angle",
+            Tool::Pen => "Pen (P): click to place corner points, drag to pull out curve handles; click the first point to close; Return ends an open path, Backspace removes the last point, Escape clears; then Make Selection, Fill or Stroke with the brush",
             Tool::Type => "Type (T): click to set text on a new layer in the foreground color, or click existing text to edit it; the options set the font",
             Tool::Shape => "Shape (U): drag a rectangle or ellipse onto a new layer in the foreground color; Shift squares it, Alt grows from the center; Shift+U swaps the kind",
             Tool::Hand => "Hand (H): drag to pan",
@@ -33,7 +34,7 @@ impl Tool {
     }
     /// The tool's name with its key, as the rail's tooltip shows it: "Move (V)".
     pub fn name(self) -> &'static str { self.help().split(':').next().unwrap_or("") }
-    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
+    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Pen => 'p', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
     pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur) }
     pub fn is_selection(self) -> bool { matches!(self, Tool::Marquee | Tool::Lasso | Tool::Wand) }
 }
@@ -444,6 +445,15 @@ impl OptionsBar {
         let (type_row, type_page) = TypePage::build(&doc);
         stack.add_named(&type_row, Some("type"));
 
+        // Pen: what to do with the path.
+        let pen = row();
+        pen.append(&gtk::Button::builder().label("Make Selection").action_name("win.path-select").tooltip_text("Marching ants from the path (Ctrl+Return); an open path closes itself").build());
+        pen.append(&gtk::Button::builder().label("Fill Path").action_name("win.path-fill").tooltip_text("Fill the path on the active layer with the foreground color").build());
+        pen.append(&gtk::Button::builder().label("Stroke with Brush").action_name("win.path-stroke").tooltip_text("Paint along the path with the current brush and foreground color").build());
+        pen.append(&gtk::Button::builder().label("Clear").action_name("win.path-clear").tooltip_text("Drop the path (Escape)").build());
+        pen.append(&gtk::Label::builder().label("Click for corners, drag for curves, click the first point to close").css_classes(["dim-label"]).build());
+        stack.add_named(&pen, Some("pen"));
+
         // Shape.
         let shape_row = row();
         let skind = gtk::DropDown::from_strings(&["Rectangle", "Ellipse"]);
@@ -543,6 +553,7 @@ impl OptionsBar {
             }
             Tool::Gradient => self.widget.set_visible_child_name("gradient"),
             Tool::Type => self.widget.set_visible_child_name("type"),
+            Tool::Pen => self.widget.set_visible_child_name("pen"),
             Tool::Shape => self.widget.set_visible_child_name("shape"),
             Tool::Crop => self.widget.set_visible_child_name("crop"),
             Tool::Eyedropper => self.widget.set_visible_child_name("eyedropper"),

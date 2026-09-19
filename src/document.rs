@@ -1189,6 +1189,46 @@ impl Document {
         Ok(())
     }
 
+    /// Fills a Pen path on the active image layer in `color` (Fill Path).
+    pub fn fill_path(&mut self, path: &crate::path::Path, color: [f64; 3]) -> Result<()> {
+        if path.anchors.len() < 2 { bail!("Draw a path first."); }
+        let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
+        let transform = self.renderer.layer(id).transform;
+        let (w, h) = (image.width(), image.height());
+        let result = new_argb(w, h)?;
+        {
+            let cr = Context::new(&result)?;
+            cr.set_source_surface(&image, 0.0, 0.0)?;
+            cr.paint()?;
+            cr.transform(crate::selection::document_to_layer(&transform, w, h)?);
+            cr.set_source_rgb(color[0], color[1], color[2]);
+            let closed = crate::path::Path { anchors: path.anchors.clone(), closed: true };
+            closed.trace(&cr, |p| p);
+            cr.fill()?;
+        }
+        self.begin_edit("Fill Path");
+        self.renderer.set_image(id, result);
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Paints along a Pen path with the brush (Stroke Path with the Brush tool).
+    pub fn stroke_path(&mut self, path: &crate::path::Path, settings: &crate::brush::BrushSettings) -> Result<()> {
+        if path.anchors.len() < 2 { bail!("Draw a path first."); }
+        let step = (settings.diameter * settings.spacing.unwrap_or(0.25).max(0.02) / 2.0).clamp(0.5, 20.0);
+        let points = path.flatten(step);
+        self.replay_stroke(&points, settings, StrokeKind::Paint)
+    }
+
+    /// Marching ants from a Pen path (Make Selection, Ctrl+Return); an open path closes itself.
+    pub fn select_path(&mut self, path: &crate::path::Path, mode: Mode) -> Result<()> {
+        if path.anchors.len() < 3 { bail!("A selection needs at least three points."); }
+        let shape = path.selection(self.width(), self.height())?;
+        let combined = match (&self.selection, mode) { (Some(current), m) if m != Mode::Replace => current.combined(&shape, m)?, _ => shape };
+        self.set_selection(Some(combined), "Path Selection");
+        Ok(())
+    }
+
     /// Delete with a selection: the selected pixels become transparent; on a mask they take the background
     /// (hide) tone (`clearSelectedPixels`). Nothing happens without a selection.
     pub fn clear_selection(&mut self, mask_background_white: bool) -> Result<()> {

@@ -184,6 +184,24 @@ fn draw(tool: Tool, cr: &cairo::Context) {
             cr.close_path();
             cr.fill().ok();
         }
+        Tool::Pen => {
+            // A fountain pen nib pointing down and left, with its slit.
+            cr.move_to(4.0, 16.5);
+            cr.line_to(7.5, 8.0);
+            cr.curve_to(9.5, 4.0, 12.5, 3.5, 15.5, 4.5);
+            cr.curve_to(16.5, 7.5, 16.0, 10.5, 12.0, 12.5);
+            cr.close_path();
+            cr.fill().ok();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+            cr.set_operator(cairo::Operator::Clear);
+            cr.arc(11.5, 8.5, 1.3, 0.0, TAU);
+            cr.fill().ok();
+            cr.set_line_width(1.0);
+            cr.move_to(11.5, 8.5);
+            cr.line_to(5.5, 15.0);
+            cr.stroke().ok();
+            cr.set_operator(cairo::Operator::Over);
+        }
         Tool::Shape => {
             // A filled rounded square with a circle cut into its corner.
             cr.set_fill_rule(cairo::FillRule::EvenOdd);
