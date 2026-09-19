@@ -107,7 +107,7 @@ pub fn css(p: &Palette) -> String {
         headerbar {{ background-color: {dbg}; color: {fg}; box-shadow: none; border-bottom: 1px solid {ddbg}; }}
         headerbar button, .options button {{ background-color: transparent; color: {fg}; border: 1px solid {lbg}; box-shadow: none; text-shadow: none; }}
         .main-menu > item {{ color: {fg}; background-color: transparent; }}
-        .main-menu > item:hover, .main-menu > item:selected {{ background-color: {lbg}; }}
+        .main-menu > item:hover, .main-menu > item:selected {{ background-color: {sel}; color: {bfg}; }}
         headerbar button:hover, .options button:hover {{ background-color: {lbg}; border-color: {muted}; }}
         button {{ background-color: transparent; color: {fg}; border-color: {lbg}; }}
         button:hover {{ background-color: {lbg}; border-color: {muted}; }}
@@ -177,8 +177,7 @@ pub fn look_css(font: &str) -> String {
         window.csd {{ box-shadow: none; }}
         headerbar {{ min-height: 34px; padding: 0 6px; }}
         .main-menu {{ padding: 0; }}
-        .main-menu > item {{ padding: 4px 10px; border-radius: 0; border: 1px solid transparent; }}
-        .main-menu > item:hover, .main-menu > item:selected {{ border-color: alpha(currentColor, 0.4); }}
+        .main-menu > item {{ padding: 4px 10px; border-radius: 0; border: none; }}
         headerbar .dialog-title, .panel-tab, .heading, .layers-panel .heading {{ text-transform: uppercase; letter-spacing: 1.4px; font-size: 10.5px; font-weight: 600; }}
         headerbar .title {{ letter-spacing: 0; font-weight: 600; }}
         .panel-tab.current {{ border-bottom: 1px solid currentColor; }}
