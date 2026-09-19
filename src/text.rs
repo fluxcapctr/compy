@@ -68,8 +68,15 @@ fn layout_for(style: &TextStyle) -> pango::Layout {
 /// Where the layout's origin sits on the rendered surface: one pixel in from the ink or logical box,
 /// whichever reaches further, so glyph overhangs are kept.
 fn origin_offset(layout: &pango::Layout) -> (f64, f64) {
+    let (x0, y0, _, _) = union_extents(layout);
+    (-(x0 as f64) + 1.0, -(y0 as f64) + 1.0)
+}
+
+/// The box holding both the ink and the logical extents (left, top, right, bottom), so an overhanging
+/// glyph such as an italic F or a swash E is never cut at the layout's edge.
+fn union_extents(layout: &pango::Layout) -> (i32, i32, i32, i32) {
     let (ink, logical) = layout.pixel_extents();
-    (-(ink.x().min(logical.x()) as f64) + 1.0, -(ink.y().min(logical.y()) as f64) + 1.0)
+    (ink.x().min(logical.x()), ink.y().min(logical.y()), (ink.x() + ink.width()).max(logical.x() + logical.width()), (ink.y() + ink.height()).max(logical.y() + logical.height()))
 }
 
 /// The text rendered on a transparent surface just its size, and where the ink's top-left sits relative to
@@ -78,8 +85,8 @@ fn origin_offset(layout: &pango::Layout) -> (f64, f64) {
 pub fn render(style: &TextStyle) -> Result<(ImageSurface, i32, i32)> {
     let layout = layout_for(style);
     if style.text.is_empty() { layout.set_text(" "); }
-    let (ink, logical) = layout.pixel_extents();
-    let (w, h) = ((ink.width().max(logical.width()) + 2).max(1), (ink.height().max(logical.height()) + 2).max(1));
+    let (x0, y0, x1, y1) = union_extents(&layout);
+    let (w, h) = ((x1 - x0 + 2).max(1), (y1 - y0 + 2).max(1));
     if w > 30_000 || h > 30_000 || w as i64 * h as i64 > 100_000_000 { bail!("The text is larger than the 30,000-pixel side or 100-megapixel limit."); }
     let surface = crate::raster::new_argb(w, h)?;
     if !style.text.is_empty() {
@@ -89,7 +96,7 @@ pub fn render(style: &TextStyle) -> Result<(ImageSurface, i32, i32)> {
         cr.set_source_rgb(style.color[0], style.color[1], style.color[2]);
         pangocairo::functions::show_layout(&cr, &layout);
     }
-    Ok((surface, ink.x().min(logical.x()) - 1, ink.y().min(logical.y()) - 1))
+    Ok((surface, x0 - 1, y0 - 1))
 }
 
 /// The caret before byte `index` of the text: its left, top and height on the rendered surface.
@@ -166,6 +173,12 @@ mod tests {
         assert!(painted > 100, "{painted} pixels painted");
         let back = TextStyle::from_record(&style.to_record()).unwrap();
         assert_eq!(back, style);
+        // An italic overhang past the logical box is kept: the last column of the surface holds no ink.
+        let italic = TextStyle { text: "F".into(), italic: true, size: 60.0, ..Default::default() };
+        let (f, _, _) = render(&italic).unwrap();
+        let (w, h) = (f.width() as usize, f.height() as usize);
+        let last = crate::raster::with_bytes(&f, |d, stride| (0..h).map(|y| d[y * stride + (w - 1) * 4 + 3] as u32).sum::<u32>()).unwrap();
+        assert_eq!(last, 0, "nothing touches the right edge, so nothing was clipped");
         let (empty, _, _) = render(&TextStyle { text: String::new(), ..Default::default() }).unwrap();
         assert!(empty.height() > 10, "empty text still has a line's height");
         let (x0, _, h) = caret(&style, 0);

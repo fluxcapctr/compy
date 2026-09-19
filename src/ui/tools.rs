@@ -31,6 +31,8 @@ impl Tool {
             Tool::Zoom => "Zoom (Z): click to zoom in, Alt-click to zoom out",
         }
     }
+    /// The tool's name with its key, as the rail's tooltip shows it: "Move (V)".
+    pub fn name(self) -> &'static str { self.help().split(':').next().unwrap_or("") }
     pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
     pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur) }
     pub fn is_selection(self) -> bool { matches!(self, Tool::Marquee | Tool::Lasso | Tool::Wand) }
@@ -52,7 +54,7 @@ impl ToolRail {
         let current = doc.borrow().tool;
         let mut group: Option<gtk::ToggleButton> = None;
         for tool in Tool::ALL {
-            let button = gtk::ToggleButton::builder().tooltip_text(tool.help()).width_request(28).height_request(26).active(tool == current).css_classes(["tool"]).build();
+            let button = gtk::ToggleButton::builder().tooltip_text(tool.name()).width_request(28).height_request(26).active(tool == current).css_classes(["tool"]).build();
             button.set_child(Some(&super::icons::icon(tool)));
             if let Some(first) = &group { button.set_group(Some(first)); } else { group = Some(button.clone()); }
             let (doc, changed) = (doc.clone(), changed.clone());
@@ -259,7 +261,8 @@ fn mode_buttons(doc: &DocRef) -> gtk::Box {
 impl OptionsBar {
     pub fn new(doc: DocRef) -> OptionsBar {
         // Sized to the page showing, so a wide page (the brush controls) never forces the window wider.
-        let stack = gtk::Stack::builder().vhomogeneous(false).hhomogeneous(false).css_classes(["options"]).build();
+        // The same height on every page, so the bar never jumps when the tool changes.
+        let stack = gtk::Stack::builder().vhomogeneous(true).hhomogeneous(false).css_classes(["options"]).build();
         let hint = gtk::Label::builder().xalign(0.0).margin_start(12).margin_top(8).margin_bottom(8).css_classes(["dim-label"]).build();
         stack.add_named(&hint, Some("hint"));
 
