@@ -168,7 +168,7 @@ pub fn system_font() -> String {
 pub fn look_css(font: &str) -> String {
     let font = font.replace('"', "");
     format!(r#"
-        window, .background, popover, tooltip {{ font-family: "{font}", "JetBrains Mono", monospace; font-size: 12px; }}
+        window, .background, popover, tooltip {{ font-family: "{font}", "JetBrains Mono", monospace; font-size: 12.5px; }}
         button, entry, spinbutton, spinbutton text, spinbutton button, dropdown > button, menubutton > button, check, radio, popover > contents, popover > arrow, tooltip, tooltip > contents,
         notebook > header tab, list row, scale slider, scale trough, scale highlight, scrollbar slider, switch, switch slider, textview, scrolledwindow, frame, .frame, window.csd, decoration, .card, headerbar, entry > text, searchbar, listview > row, treeview {{ border-radius: 0; }}
         decoration {{ box-shadow: 0 0 0 1px alpha(currentColor, 0.28); margin: 0; }}
@@ -222,6 +222,12 @@ thread_local! {
 fn install_look(display: &gdk::Display) {
     LOOK.with(|slot| {
         if slot.borrow().is_some() { return; }
+        // Light hinting keeps the tops of small capitals round instead of snapping them flat, which
+        // read as clipped in a monospace face at 12 px.
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_xft_hintstyle(Some("hintslight"));
+            settings.set_gtk_xft_antialias(1);
+        }
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&look_css(&system_font()));
         gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);

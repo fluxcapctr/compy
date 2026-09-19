@@ -697,10 +697,10 @@ fn parse_preset(spec: &str) -> Option<(i32, i32, f64)> {
 const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
     ("Photo", "Default Photoshop Size", 2100, 1500, 300), ("Photo", "Landscape 4 x 6 in", 1800, 1200, 300), ("Photo", "Portrait 4 x 6 in", 1200, 1800, 300), ("Photo", "8 x 10 in", 3000, 2400, 300),
     ("Print", "Letter", 2550, 3300, 300), ("Print", "Legal", 2550, 4200, 300), ("Print", "Tabloid", 3300, 5100, 300), ("Print", "A4", 2480, 3508, 300), ("Print", "A3", 3508, 4961, 300),
-    ("Web", "Web Large 1920 x 1080", 1920, 1080, 72), ("Web", "Web Medium 1366 x 768", 1366, 768, 72), ("Web", "Web Small 1280 x 720", 1280, 720, 72), ("Web", "Common 1440 x 900", 1440, 900, 72),
-    ("Mobile", "iPhone 15 Pro", 1179, 2556, 72), ("Mobile", "iPhone SE", 750, 1334, 72), ("Mobile", "iPad Pro 13", 2064, 2752, 72), ("Mobile", "Android 1080 x 1920", 1080, 1920, 72),
-    ("Film and Video", "HDTV 1080p", 1920, 1080, 72), ("Film and Video", "UHD 4K", 3840, 2160, 72), ("Film and Video", "DCI 4K", 4096, 2160, 72), ("Film and Video", "Square 1080", 1080, 1080, 72),
-    ("Social", "Instagram Post", 1080, 1080, 72), ("Social", "Instagram Story", 1080, 1920, 72), ("Social", "YouTube Thumbnail", 1280, 720, 72), ("Social", "X Header", 1500, 500, 72), ("Social", "Icon 1024", 1024, 1024, 72),
+    ("Web", "Web Large", 1920, 1080, 72), ("Web", "Web Medium", 1366, 768, 72), ("Web", "Web Small", 1280, 720, 72), ("Web", "Common Laptop", 1440, 900, 72),
+    ("Mobile", "iPhone 15 Pro", 1179, 2556, 72), ("Mobile", "iPhone SE", 750, 1334, 72), ("Mobile", "iPad Pro 13", 2064, 2752, 72), ("Mobile", "Android Phone", 1080, 1920, 72),
+    ("Film and Video", "HDTV 1080p", 1920, 1080, 72), ("Film and Video", "UHD 4K", 3840, 2160, 72), ("Film and Video", "DCI 4K", 4096, 2160, 72), ("Film and Video", "Square", 1080, 1080, 72),
+    ("Social", "Instagram Post", 1080, 1080, 72), ("Social", "Instagram Story", 1080, 1920, 72), ("Social", "YouTube Thumbnail", 1280, 720, 72), ("Social", "X Header", 1500, 500, 72), ("Social", "App Icon", 1024, 1024, 72),
 ];
 
 /// What shows with nothing open: recent files, then Photoshop's New Document presets in their groups,
