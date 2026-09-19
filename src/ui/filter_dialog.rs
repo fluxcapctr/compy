@@ -32,7 +32,7 @@ impl FilterDialog {
     pub fn open(parent: &gtk::Window, doc: DocRef, kind: Kind, canvas: gtk::DrawingArea, finished: Rc<dyn Fn()>) {
         let mut settings = Settings::default();
         settings.seed = glib::random_int();
-        let histogram = if kind == Kind::Levels { doc.borrow().document.histogram().ok() } else { None };
+        let histogram = if matches!(kind, Kind::Levels | Kind::Curves) { doc.borrow().document.histogram().ok() } else { None };
         let this = Rc::new(FilterDialog {
             doc, kind, settings: RefCell::new(settings), preview: Cell::new(true), scheduled: Cell::new(false), canvas,
             status: gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build(), finished,
@@ -45,7 +45,7 @@ impl FilterDialog {
     /// preview sets them live, OK records one undo step, Cancel restores them.
     pub fn open_adjustment(parent: &gtk::Window, doc: DocRef, id: uuid::Uuid, adjustment: filters::Adjustment, finished: Rc<dyn Fn()>) {
         let (kind, mut settings) = (match &adjustment {
-            filters::Adjustment::Levels(_) => Kind::Levels, filters::Adjustment::Curves(_) => Kind::Levels, filters::Adjustment::Exposure(_) => Kind::Exposure,
+            filters::Adjustment::Levels(_) => Kind::Levels, filters::Adjustment::Curves(_) => Kind::Curves, filters::Adjustment::Exposure(_) => Kind::Exposure,
             filters::Adjustment::GradientMap(_) => Kind::GradientMap, filters::Adjustment::Grain { .. } => Kind::Grain, filters::Adjustment::HueSaturation(_) => Kind::HueSaturation,
         }, Settings::default());
         match &adjustment {
@@ -54,7 +54,7 @@ impl FilterDialog {
             filters::Adjustment::GradientMap(g) => settings.gradient = g.clone(),
             filters::Adjustment::Grain { grain, seed } => { settings.grain = grain.clone(); settings.seed = *seed; }
             filters::Adjustment::HueSaturation(h) => settings.hue_saturation = h.clone(),
-            filters::Adjustment::Curves(_) => {}
+            filters::Adjustment::Curves(c) => settings.curves = c.clone(),
         }
         let canvas = gtk::DrawingArea::new();
         let this = Rc::new(FilterDialog {
@@ -62,7 +62,6 @@ impl FilterDialog {
             status: gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build(), finished,
             histogram: RefCell::new(None), channel: Cell::new(0), histogram_area: RefCell::new(None), adjustment: Some((id, adjustment)), committed: Cell::new(false), model_button: RefCell::new(None),
         });
-        if matches!(this.adjustment, Some((_, filters::Adjustment::Curves(_)))) { this.status.set_label("Curves has no editor yet; its points are kept as saved."); }
         Self::present(this, parent);
     }
 
@@ -246,6 +245,51 @@ impl FilterDialog {
                 }
                 grid.attach(&auto, 2, 0, 1, 1);
             }
+            Kind::Curves => self.build_curves(&grid),
+            Kind::ColorBalance => {
+                let tone = gtk::DropDown::from_strings(&["Shadows", "Midtones", "Highlights"]);
+                tone.set_selected(1);
+                self.channel.set(1);
+                grid.attach(&gtk::Label::builder().label("Tone").xalign(0.0).build(), 0, 0, 1, 1);
+                grid.attach(&tone, 1, 0, 2, 1);
+                let rows: Rc<RefCell<Vec<(gtk::Scale, gtk::SpinButton)>>> = Rc::new(RefCell::new(Vec::new()));
+                for (i, label) in ["Cyan / Red", "Magenta / Green", "Yellow / Blue"].into_iter().enumerate() {
+                    let row = 1 + i as i32;
+                    grid.attach(&gtk::Label::builder().label(label).xalign(0.0).build(), 0, row, 1, 1);
+                    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, -100.0, 100.0, 1.0);
+                    scale.set_draw_value(false); scale.set_hexpand(true); scale.set_value(0.0);
+                    let spin = gtk::SpinButton::with_range(-100.0, 100.0, 1.0);
+                    let syncing = Rc::new(Cell::new(false));
+                    let set = move |this: &Rc<Self>, v: f64| {
+                        let mut st = this.settings.borrow_mut();
+                        let range = match this.channel.get() { 0 => &mut st.balance.shadows, 2 => &mut st.balance.highlights, _ => &mut st.balance.midtones };
+                        range[i] = v;
+                    };
+                    { let (this, spin, syncing) = (self.clone(), spin.clone(), syncing.clone()); scale.connect_value_changed(move |sc| { if syncing.get() { return; } syncing.set(true); spin.set_value(sc.value()); syncing.set(false); set(&this, sc.value()); this.schedule(); }); }
+                    { let (this, scale, syncing) = (self.clone(), scale.clone(), syncing.clone()); spin.connect_value_changed(move |sp| { if syncing.get() { return; } syncing.set(true); scale.set_value(sp.value()); syncing.set(false); set(&this, sp.value()); this.schedule(); }); }
+                    grid.attach(&scale, 1, row, 1, 1);
+                    grid.attach(&spin, 2, row, 1, 1);
+                    rows.borrow_mut().push((scale, spin));
+                }
+                {
+                    let (this, rows) = (self.clone(), rows.clone());
+                    tone.connect_selected_notify(move |d| {
+                        this.channel.set(d.selected() as usize);
+                        let st = this.settings.borrow();
+                        let range = match d.selected() { 0 => st.balance.shadows, 2 => st.balance.highlights, _ => st.balance.midtones };
+                        for (i, (scale, spin)) in rows.borrow().iter().enumerate() { scale.set_value(range[i]); spin.set_value(range[i]); }
+                    });
+                }
+                let keep = gtk::CheckButton::with_label("Preserve luminosity");
+                keep.set_active(s.balance.preserve_luminosity);
+                { let this = self.clone(); keep.connect_toggled(move |c| { this.settings.borrow_mut().balance.preserve_luminosity = c.is_active(); this.schedule(); }); }
+                grid.attach(&keep, 1, 4, 2, 1);
+            }
+            Kind::Fade => {
+                self.slider(&grid, 0, "Opacity %", 0.0, 100.0, 1.0, s.fade * 100.0, |s, v| s.fade = v / 100.0, self);
+                let name = self.doc.borrow().document.last_filter.as_ref().map(|f| f.3.clone()).unwrap_or_default();
+                grid.attach(&gtk::Label::builder().label(&format!("Blends {name} back toward the pixels it replaced.")).xalign(0.0).css_classes(["dim-label"]).build(), 0, 1, 3, 1);
+            }
             Kind::Exposure => {
                 self.slider(&grid, 0, "Exposure", -20.0, 20.0, 0.01, s.exposure.exposure, |s, v| s.exposure.exposure = v, self);
                 self.slider(&grid, 1, "Offset", -0.5, 0.5, 0.001, s.exposure.offset, |s, v| s.exposure.offset = v, self);
@@ -343,6 +387,122 @@ impl FilterDialog {
         content.append(&grid);
     }
 
+    /// The Curves editor (`CurvesControls`): the histogram behind a grid, the curve through its points,
+    /// click to add a point, drag to move one, the ends only up and down.
+    fn build_curves(self: &Rc<Self>, grid: &gtk::Grid) {
+        let channel = gtk::DropDown::from_strings(&["RGB", "Red", "Green", "Blue"]);
+        grid.attach(&gtk::Label::builder().label("Channel").xalign(0.0).build(), 0, 0, 1, 1);
+        grid.attach(&channel, 1, 0, 2, 1);
+        let area = gtk::DrawingArea::builder().content_height(260).content_width(300).hexpand(true).build();
+        let selected: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let dragging: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let readout = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "numeric"]).label("Click to add a point. Drag to adjust.").build();
+        {
+            let (this, selected) = (self.clone(), selected.clone());
+            area.set_draw_func(move |_, cr, w, h| {
+                let (w, h) = (w as f64, h as f64);
+                this.draw_histogram(cr, w, h);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+                cr.set_line_width(1.0);
+                for i in 0..=4 { let f = i as f64 / 4.0; cr.move_to((f * w).round() + 0.5, 0.0); cr.line_to((f * w).round() + 0.5, h); cr.move_to(0.0, (f * h).round() + 0.5); cr.line_to(w, (f * h).round() + 0.5); }
+                cr.stroke().ok();
+                let c = this.channel.get();
+                let curves = this.settings.borrow().curves.clone();
+                let pos = |x: f64, y: f64| (x / 255.0 * w, (1.0 - y / 255.0) * h);
+                cr.set_source_rgb(1.0, 1.0, 1.0);
+                cr.set_line_width(2.0);
+                for x in 0..=255 { let p = pos(x as f64, curves.value(x as f64, c)); if x == 0 { cr.move_to(p.0, p.1); } else { cr.line_to(p.0, p.1); } }
+                cr.stroke().ok();
+                let accent = super::theme::current().map(|p| p.accent).unwrap_or((0.2, 0.6, 1.0));
+                for (i, point) in curves.channels[c].iter().enumerate() {
+                    let p = pos(point.0, point.1);
+                    if selected.get() == Some(i) { cr.set_source_rgb(accent.0, accent.1, accent.2); } else { cr.set_source_rgb(1.0, 1.0, 1.0); }
+                    cr.arc(p.0, p.1, 4.0, 0.0, std::f64::consts::TAU);
+                    cr.fill().ok();
+                }
+            });
+        }
+        let drag = gtk::GestureDrag::new();
+        let start: Rc<Cell<(f64, f64)>> = Rc::new(Cell::new((0.0, 0.0)));
+        {
+            let (this, area, selected, dragging, start, readout) = (self.clone(), area.clone(), selected.clone(), dragging.clone(), start.clone(), readout.clone());
+            drag.connect_drag_begin(move |_, x, y| {
+                start.set((x, y));
+                let (w, h) = (area.width().max(1) as f64, area.height().max(1) as f64);
+                let (px, py) = ((x / w * 255.0).clamp(0.0, 255.0), (255.0 - y / h * 255.0).clamp(0.0, 255.0));
+                let c = this.channel.get();
+                let mut st = this.settings.borrow_mut();
+                let points = &mut st.curves.channels[c];
+                let nearest = (0..points.len()).min_by(|a, b| { let da = (points[*a].0 - px).hypot(points[*a].1 - py); let db = (points[*b].0 - px).hypot(points[*b].1 - py); da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal) });
+                let hit = nearest.filter(|i| (points[*i].0 - px).hypot(points[*i].1 - py) < 14.0);
+                let index = match hit {
+                    Some(i) => Some(i),
+                    None if points.len() < 32 && px > 1.0 && px < 254.0 && points.iter().all(|p| (p.0 - px).abs() > 1.0) => {
+                        points.push((px, py));
+                        points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                        points.iter().position(|p| p.0 == px)
+                    }
+                    None => None,
+                };
+                dragging.set(index);
+                selected.set(index);
+                if let Some(i) = index { readout.set_label(&format!("Input {}   Output {}", points[i].0.round(), points[i].1.round())); }
+                drop(st);
+                this.schedule();
+                area.queue_draw();
+            });
+        }
+        {
+            let (this, area, dragging, start, readout) = (self.clone(), area.clone(), dragging.clone(), start.clone(), readout.clone());
+            drag.connect_drag_update(move |_, dx, dy| {
+                let Some(i) = dragging.get() else { return };
+                let (w, h) = (area.width().max(1) as f64, area.height().max(1) as f64);
+                let (sx, sy) = start.get();
+                let (px, py) = (((sx + dx) / w * 255.0).clamp(0.0, 255.0), (255.0 - (sy + dy) / h * 255.0).clamp(0.0, 255.0));
+                let c = this.channel.get();
+                {
+                    let mut st = this.settings.borrow_mut();
+                    let points = &mut st.curves.channels[c];
+                    if i >= points.len() { return; }
+                    points[i].1 = py;
+                    if i > 0 && i < points.len() - 1 { points[i].0 = px.clamp(points[i - 1].0 + 1.0, points[i + 1].0 - 1.0); }
+                    readout.set_label(&format!("Input {}   Output {}", points[i].0.round(), points[i].1.round()));
+                }
+                this.schedule();
+                area.queue_draw();
+            });
+        }
+        { let dragging = dragging.clone(); drag.connect_drag_end(move |_, _, _| dragging.set(None)); }
+        area.add_controller(drag);
+        grid.attach(&area, 0, 1, 3, 1);
+        grid.attach(&readout, 0, 2, 2, 1);
+        let remove = gtk::Button::with_label("Remove point");
+        {
+            let (this, area, selected, readout) = (self.clone(), area.clone(), selected.clone(), readout.clone());
+            remove.connect_clicked(move |_| {
+                let c = this.channel.get();
+                if let Some(i) = selected.get() {
+                    let mut st = this.settings.borrow_mut();
+                    let points = &mut st.curves.channels[c];
+                    if i > 0 && i + 1 < points.len() { points.remove(i); selected.set(None); readout.set_label("Click to add a point. Drag to adjust."); }
+                }
+                this.schedule();
+                area.queue_draw();
+            });
+        }
+        grid.attach(&remove, 2, 2, 1, 1);
+        let reset = gtk::Button::with_label("Reset curve");
+        {
+            let (this, area, selected) = (self.clone(), area.clone(), selected.clone());
+            reset.connect_clicked(move |_| { let c = this.channel.get(); this.settings.borrow_mut().curves.channels[c] = vec![(0.0, 0.0), (255.0, 255.0)]; selected.set(None); this.schedule(); area.queue_draw(); });
+        }
+        grid.attach(&reset, 0, 3, 1, 1);
+        {
+            let (this, area, selected, dragging) = (self.clone(), area.clone(), selected.clone(), dragging.clone());
+            channel.connect_selected_notify(move |d| { this.channel.set(d.selected() as usize); selected.set(None); dragging.set(None); area.queue_draw(); });
+        }
+    }
+
     fn draw_histogram(&self, cr: &cairo::Context, w: f64, h: f64) {
         cr.set_source_rgb(0.12, 0.12, 0.12);
         cr.paint().ok();
@@ -377,7 +537,7 @@ impl FilterDialog {
         let s = self.settings.borrow();
         Some(match original {
             filters::Adjustment::Levels(_) => filters::Adjustment::Levels(s.levels.clone()),
-            filters::Adjustment::Curves(c) => filters::Adjustment::Curves(c.clone()),
+            filters::Adjustment::Curves(_) => filters::Adjustment::Curves(s.curves.clone()),
             filters::Adjustment::Exposure(_) => filters::Adjustment::Exposure(s.exposure.clone()),
             filters::Adjustment::GradientMap(_) => filters::Adjustment::GradientMap(s.gradient.clone()),
             filters::Adjustment::Grain { .. } => filters::Adjustment::Grain { grain: s.grain.clone(), seed: s.seed },

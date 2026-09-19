@@ -155,6 +155,16 @@ tracking on panel tabs and dialog titles, and a light filled primary button. Col
 active Omarchy theme and follow it live. `COMPOSITOR_FONT` overrides the font. The look lives in
 `theme::look_css` and can be reverted as one commit.
 
+**Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
+histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
+move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.
+Image > Color Balance (Ctrl+B) shifts cyan/red, magenta/green and yellow/blue for the shadows, midtones or
+highlights, keeping luminosity unless you untick it. Auto Tone (Ctrl+Shift+L) stretches each channel to
+its own black and white points, Auto Contrast (Ctrl+Alt+Shift+L) uses one shared pair, and Auto Color
+(Ctrl+Shift+B) also moves each channel's midtone to gray; all three clip 0.1% at each end and apply at
+once as a Levels step. Filter > Fade (Ctrl+Shift+F) blends the last filter or adjustment back toward the
+pixels it replaced, by an opacity, as long as the layer has not changed since.
+
 **Free Transform.** Ctrl+T (Edit > Free Transform, or right-click a selection) lifts the selected pixels
 onto a floating layer that the Move tool's handles move, scale (Shift keeps the ratio, Alt from the center)
 and rotate; Return lands them back on their layer and leaves them selected, Escape puts everything back.

@@ -214,3 +214,61 @@ fn merge_visible_keeps_hidden_children_of_merged_folders() {
     assert_eq!(d.renderer.layer(hidden).parent_id, None, "moved up out of the merged folder");
     assert_eq!(alpha_at(&mut d, 5, 5), 255);
 }
+
+fn rgb_at(d: &mut Document, x: usize, y: usize) -> [u8; 4] {
+    let s = d.renderer.render_flat().unwrap();
+    compositor::raster::with_bytes(&s, |b, stride| { let p = &b[y * stride + x * 4..][..4]; [p[2], p[1], p[0], p[3]] }).unwrap()
+}
+
+#[test]
+fn curves_color_balance_auto_levels_and_fade() {
+    use compositor::filters::{Kind, Settings};
+    let mut d = Document::blank(20, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.5, 0.5, 0.5], 0.0).unwrap();
+    assert_eq!(rgb_at(&mut d, 5, 5)[0], 128);
+    // A curve lifting the midpoint brightens a mid gray; the identity curve is a no-op that leaves no step.
+    let mut s = Settings::default();
+    d.apply_filter(Kind::Curves, &s).unwrap();
+    assert_ne!(d.undo_name(), Some("Curves"));
+    s.curves.channels[0] = vec![(0.0, 0.0), (128.0, 192.0), (255.0, 255.0)];
+    d.apply_filter(Kind::Curves, &s).unwrap();
+    assert_eq!(d.undo_name(), Some("Curves"));
+    let lifted = rgb_at(&mut d, 5, 5);
+    assert!(lifted[0] > 180 && lifted[1] == lifted[0] && lifted[2] == lifted[0], "{lifted:?}");
+    // Fade halves the change; a second fade is refused because the layer moved on.
+    let mut f = Settings::default();
+    f.fade = 0.5;
+    d.apply_filter(Kind::Fade, &f).unwrap();
+    let faded = rgb_at(&mut d, 5, 5)[0] as i32;
+    assert!((faded - (128 + lifted[0] as i32) / 2).abs() <= 2, "faded {faded} between 128 and {}", lifted[0]);
+    assert_eq!(d.undo_name(), Some("Fade"));
+    assert!(d.apply_filter(Kind::Fade, &f).is_err(), "nothing to fade twice");
+    d.undo(); d.undo();
+    assert_eq!(rgb_at(&mut d, 5, 5)[0], 128);
+    // Color Balance toward red in the midtones, preserving luminosity.
+    let mut b = Settings::default();
+    b.balance.midtones = [100.0, 0.0, 0.0];
+    d.apply_filter(Kind::ColorBalance, &b).unwrap();
+    let warm = rgb_at(&mut d, 5, 5);
+    assert!(warm[0] > warm[1] && warm[0] > warm[2], "red shifted: {warm:?}");
+    let luma = |c: [u8; 4]| 0.299 * c[0] as f64 + 0.587 * c[1] as f64 + 0.114 * c[2] as f64;
+    assert!((luma(warm) - 128.0).abs() < 4.0, "luminosity kept: {warm:?}");
+    d.undo();
+    // Auto Contrast on a low-contrast gradient spreads it to full range; Auto Tone works per channel.
+    let mut low = Document::blank(64, 1, 72.0).unwrap();
+    let id = low.add_shape_layer(false, (0.0, 0.0, 64.0, 1.0), [0.0, 0.0, 0.0], 0.0).unwrap();
+    let image = low.renderer.image(id).unwrap().clone();
+    compositor::raster::with_bytes_raw_mut(&image, |data, _| { for x in 0..64 { let v = 80 + x as u8; data[x * 4] = v; data[x * 4 + 1] = v; data[x * 4 + 2] = v; data[x * 4 + 3] = 255; } }).unwrap();
+    low.renderer.set_image(id, image);
+    low.auto_levels(compositor::document::AutoLevels::Contrast).unwrap();
+    let (dark, bright) = (rgb_at(&mut low, 0, 0)[0], rgb_at(&mut low, 63, 0)[0]);
+    assert!(dark < 10 && bright > 245, "stretched to the ends: {dark} {bright}");
+    assert_eq!(low.undo_name(), Some("Levels"));
+    low.undo();
+    low.auto_levels(compositor::document::AutoLevels::Tone).unwrap();
+    assert!(rgb_at(&mut low, 63, 0)[0] > 245);
+    low.undo();
+    low.auto_levels(compositor::document::AutoLevels::Color).unwrap();
+    let mid = rgb_at(&mut low, 32, 0)[0] as i32;
+    assert!((mid - 128).abs() < 20, "midtone pulled to gray: {mid}");
+}

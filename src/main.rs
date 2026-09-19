@@ -65,7 +65,7 @@ fn main() {
                     "--filter" => script.filter = text().and_then(|f| match f.as_str() {
                         "noise" => Some(compositor::filters::Kind::AddNoise), "grain" => Some(compositor::filters::Kind::Grain),
                         "lens" => Some(compositor::filters::Kind::LensCorrection), "gradient" => Some(compositor::filters::Kind::GradientMap),
-                        "levels" => Some(compositor::filters::Kind::Levels), "gaussian" => Some(compositor::filters::Kind::GaussianBlur), "background" => Some(compositor::filters::Kind::RemoveBackground),
+                        "levels" => Some(compositor::filters::Kind::Levels), "curves" => Some(compositor::filters::Kind::Curves), "balance" => Some(compositor::filters::Kind::ColorBalance), "gaussian" => Some(compositor::filters::Kind::GaussianBlur), "background" => Some(compositor::filters::Kind::RemoveBackground),
                         "motion" => Some(compositor::filters::Kind::MotionBlur), _ => None }),
                     _ => paths.push(PathBuf::from(arg)),
                 }

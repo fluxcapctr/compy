@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use cairo::ImageSurface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground }
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, Curves, ColorBalance, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground, Fade }
 
 impl Kind {
     pub fn name(self) -> &'static str {
@@ -18,6 +18,7 @@ impl Kind {
             Kind::GradientMap => "Gradient Map", Kind::Levels => "Levels", Kind::ContentAwareFill => "Content-Aware Fill",
             Kind::SpotHeal => "Heal Selection", Kind::Exposure => "Exposure", Kind::HueSaturation => "Hue/Saturation",
             Kind::GaussianBlur => "Gaussian Blur", Kind::MotionBlur => "Motion Blur", Kind::Invert => "Invert", Kind::RemoveBackground => "Remove Background",
+            Kind::Curves => "Curves", Kind::ColorBalance => "Color Balance", Kind::Fade => "Fade",
         }
     }
     /// Filters that work on the selection itself rather than the layer's colors, and need one.
@@ -45,6 +46,10 @@ pub struct Settings {
     pub seed: u32,
     pub exposure: Exposure,
     pub hue_saturation: HueSaturation,
+    pub curves: Curves,
+    pub balance: ColorBalance,
+    /// Fade: how much of the last filter's result stays, 0 to 1.
+    pub fade: f64,
     /// Gaussian Blur radius in layer pixels (the blur's standard deviation), 0.1 to 250.
     pub radius: f64,
     /// Motion Blur direction in degrees, counterclockwise from horizontal as in Photoshop, -90 to 90.
@@ -56,7 +61,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default() }
+        Settings { curves: Curves::default(), balance: ColorBalance::default(), fade: 1.0, amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default() }
     }
 }
 
@@ -71,6 +76,8 @@ impl Settings {
         s.grain = s.grain.normalized();
         s.levels = s.levels.normalized();
         s.matte = s.matte.normalized();
+        s.fade = clamp(s.fade, 0.0, 1.0, 1.0);
+        s.balance = s.balance.normalized();
         s
     }
 }
@@ -129,23 +136,87 @@ impl Levels {
     pub fn is_identity(&self) -> bool { self.ranges.iter().all(|r| r.normalized() == Range::default()) }
     /// Individual channels, followed by the composite RGB adjustment.
     pub fn apply(&self, value: f64, channel: usize) -> f64 { self.ranges[0].apply(self.ranges[channel].apply(value)) }
+    /// Auto Tone: each channel stretched to its own black and white point (`LevelsAuto.color`).
+    pub fn auto_tone(histogram: &[[f64; 256]; 4]) -> Levels {
+        let mut result = Levels::default();
+        for c in 1..4 {
+            if let Some((low, high)) = endpoints(&histogram[c]) { result.ranges[c] = Range { black: low, white: high, ..Range::default() }; }
+        }
+        result
+    }
+
+    /// Auto Color: Auto Tone with each channel's gamma set so its mean lands on middle gray
+    /// (`LevelsAuto.neutral`).
+    pub fn auto_color(histogram: &[[f64; 256]; 4]) -> Levels {
+        let mut result = Levels::auto_tone(histogram);
+        for c in 1..4 {
+            let bins = &histogram[c];
+            let total: f64 = bins.iter().sum();
+            if total <= 0.0 { continue; }
+            let range = result.ranges[c];
+            let mean = bins.iter().enumerate().map(|(i, b)| range.apply(i as f64 / 255.0) * b).sum::<f64>() / total;
+            if mean > 0.0 && mean < 1.0 { result.ranges[c].gamma = (mean.ln() / 0.5f64.ln()).clamp(0.1, 9.99); }
+        }
+        result
+    }
+
     /// Auto Contrast: a shared black and white point clipping 0.1% at each end of every channel.
     pub fn auto_contrast(histogram: &[[f64; 256]; 4]) -> Levels {
-        fn endpoints(bins: &[f64; 256]) -> Option<(f64, f64)> {
-            let total: f64 = bins.iter().sum();
-            if total <= 0.0 { return None; }
-            let (mut sum, mut low, mut high) = (0.0, 0usize, 255usize);
-            for (i, b) in bins.iter().enumerate() { sum += b; if sum > total * 0.001 { low = i; break; } }
-            sum = 0.0;
-            for (i, b) in bins.iter().enumerate().rev() { sum += b; if sum > total * 0.001 { high = i; break; } }
-            (low < high).then_some((low as f64, high as f64))
-        }
         let mut result = Levels::default();
         let limits: Vec<(f64, f64)> = histogram[1..].iter().filter_map(endpoints).collect();
         if let (Some(low), Some(high)) = (limits.iter().map(|l| l.0).reduce(f64::min), limits.iter().map(|l| l.1).reduce(f64::max)) {
             if low < high { result.ranges[0] = Range { black: low, white: high, ..Range::default() }; }
         }
         result
+    }
+}
+
+/// A histogram's black and white points, clipping 0.1% of the pixels at each end.
+fn endpoints(bins: &[f64; 256]) -> Option<(f64, f64)> {
+    let total: f64 = bins.iter().sum();
+    if total <= 0.0 { return None; }
+    let (mut sum, mut low, mut high) = (0.0, 0usize, 255usize);
+    for (i, b) in bins.iter().enumerate() { sum += b; if sum > total * 0.001 { low = i; break; } }
+    sum = 0.0;
+    for (i, b) in bins.iter().enumerate().rev() { sum += b; if sum > total * 0.001 { high = i; break; } }
+    (low < high).then_some((low as f64, high as f64))
+}
+
+/// Color Balance: cyan/red, magenta/green and yellow/blue shifts (-100 to 100) for the shadows, midtones
+/// and highlights, weighted by each pixel's tone, optionally keeping its luminosity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorBalance { pub shadows: [f64; 3], pub midtones: [f64; 3], pub highlights: [f64; 3], pub preserve_luminosity: bool }
+impl Default for ColorBalance { fn default() -> Self { ColorBalance { shadows: [0.0; 3], midtones: [0.0; 3], highlights: [0.0; 3], preserve_luminosity: true } } }
+impl ColorBalance {
+    pub fn normalized(&self) -> ColorBalance {
+        let c = |v: [f64; 3]| v.map(|x| clamp(x, -100.0, 100.0, 0.0));
+        ColorBalance { shadows: c(self.shadows), midtones: c(self.midtones), highlights: c(self.highlights), preserve_luminosity: self.preserve_luminosity }
+    }
+    pub fn is_identity(&self) -> bool { self.shadows == [0.0; 3] && self.midtones == [0.0; 3] && self.highlights == [0.0; 3] }
+    /// One channel's shift for a value from 0 to 1: the three ranges' sliders weighted by how much of
+    /// a shadow, midtone or highlight the value is (a full slider moves a midtone by a quarter).
+    fn shift(&self, channel: usize, v: f64) -> f64 {
+        let shadow = (1.0 - v * 2.0).clamp(0.0, 1.0);
+        let highlight = (v * 2.0 - 1.0).clamp(0.0, 1.0);
+        let midtone = 1.0 - (v * 2.0 - 1.0).abs();
+        (self.shadows[channel] * shadow + self.midtones[channel] * midtone + self.highlights[channel] * highlight) / 100.0 * 0.25
+    }
+    /// Applies to packed BGRA premultiplied pixels.
+    pub fn apply(&self, pixels: &mut [u8]) {
+        if self.is_identity() { return; }
+        unpremultiply_partial(pixels);
+        for px in pixels.chunks_exact_mut(4) {
+            if px[3] == 0 { continue; }
+            let (b, g, r) = (px[0] as f64 / 255.0, px[1] as f64 / 255.0, px[2] as f64 / 255.0);
+            let mut out = [r + self.shift(0, r), g + self.shift(1, g), b + self.shift(2, b)].map(|c| c.clamp(0.0, 1.0));
+            if self.preserve_luminosity {
+                let luma = |c: [f64; 3]| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                let delta = luma([r, g, b]) - luma(out);
+                out = out.map(|c| (c + delta).clamp(0.0, 1.0));
+            }
+            px[2] = (out[0] * 255.0).round() as u8; px[1] = (out[1] * 255.0).round() as u8; px[0] = (out[2] * 255.0).round() as u8;
+        }
+        premultiply_partial(pixels);
     }
 }
 
@@ -226,6 +297,9 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
         Kind::GaussianBlur => crate::blur::gaussian(&mut pixels, w, h, 4, settings.radius),
         Kind::MotionBlur => motion_blur(&mut pixels, w, h, settings.angle, settings.distance),
         Kind::Exposure => Adjustment::Exposure(settings.exposure.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::Curves => Adjustment::Curves(settings.curves.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::ColorBalance => settings.balance.apply(&mut pixels),
+        Kind::Fade => bail!("Fade runs through the document, not as a pixel filter."),
         Kind::HueSaturation => Adjustment::HueSaturation(settings.hue_saturation.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
     }
     if let Some(mask) = &coverage {

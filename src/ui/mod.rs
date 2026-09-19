@@ -351,7 +351,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 88] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 91] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -426,6 +426,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("reselect", &["<Control><Shift>d"], |s| s.edit(|d| { d.reselect(); Ok(()) })),
         ("feather-selection", &["<Shift>F6", "<Control><Alt>d"], |s| { let state = s.clone(); dialogs::amount(s.window.upcast_ref(), "Feather Selection", "Feather radius (px)", move |n| state.edit(|d| d.feather_selection(n as f64))); }),
         ("desaturate", &["<Control><Shift>u"], |s| s.edit(|d| d.desaturate())),
+        ("auto-tone", &["<Control><Shift>l"], |s| s.edit(|d| d.auto_levels(crate::document::AutoLevels::Tone))),
+        ("auto-contrast", &["<Control><Alt><Shift>l"], |s| s.edit(|d| d.auto_levels(crate::document::AutoLevels::Contrast))),
+        ("auto-color", &["<Control><Shift>b"], |s| s.edit(|d| d.auto_levels(crate::document::AutoLevels::Color))),
         ("liquify", &["<Control><Shift>x"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().blur_mode = 0; p.canvas.set_tool(Tool::Blur); })),
         ("toggle-extras", &["<Control>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.hide_extras = !d.hide_extras; } p.canvas.area.queue_draw(); })),
         ("toggle-panels", &[], |s| s.toggle_panels()),
@@ -456,13 +459,16 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
             let Some(name) = parameter.and_then(|v| v.get::<String>()) else { return };
             let kind = match name.as_str() {
                 "noise" => Kind::AddNoise, "grain" => Kind::Grain, "lens" => Kind::LensCorrection,
-                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground, _ => return,
+                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "curves" => Kind::Curves, "balance" => Kind::ColorBalance, "fade" => Kind::Fade, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground, _ => return,
             };
             state.open_filter(kind);
         });
         window.add_action(&action);
         app.set_accels_for_action("win.filter::levels", &["<Control>l"]);
         app.set_accels_for_action("win.filter::hsv", &["<Control>u"]);
+        app.set_accels_for_action("win.filter::curves", &["<Control>m"]);
+        app.set_accels_for_action("win.filter::balance", &["<Control>b"]);
+        app.set_accels_for_action("win.filter::fade", &["<Control><Shift>f"]);
     }
     {
         // Parameterized: a layer by id (the canvas menu lists the layers under the pointer) and a guide.
@@ -624,6 +630,11 @@ fn menu() -> gio::Menu {
     image.append(Some("Desaturate"), Some("win.desaturate"));
     image.append(Some("Exposure…"), Some("win.filter::exposure"));
     image.append(Some("Levels…"), Some("win.filter::levels"));
+    image.append(Some("Curves…"), Some("win.filter::curves"));
+    image.append(Some("Color Balance…"), Some("win.filter::balance"));
+    image.append(Some("Auto Tone"), Some("win.auto-tone"));
+    image.append(Some("Auto Contrast"), Some("win.auto-contrast"));
+    image.append(Some("Auto Color"), Some("win.auto-color"));
     image.append(Some("Gradient Map…"), Some("win.filter::gradient"));
     image.append(Some("Grain…"), Some("win.filter::grain"));
     image.append(Some("Invert"), Some("win.invert"));
@@ -650,6 +661,7 @@ fn menu() -> gio::Menu {
     filter.append(Some("Add Noise…"), Some("win.filter::noise"));
     filter.append(Some("Lens Correction…"), Some("win.filter::lens"));
     filter.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));
+    filter.append(Some("Fade…"), Some("win.filter::fade"));
     filter.append(Some("Heal Selection"), Some("win.heal-selection"));
     menu.append_submenu(Some("Filter"), &filter);
     let help = gio::Menu::new();
@@ -686,8 +698,10 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Select", "Shift+F6, Ctrl+Alt+D", "Feather"),
     ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
     ("Select", "Shift, Alt while selecting", "Add to, subtract from the selection"),
-    ("Image", "Ctrl+L, Ctrl+U, Ctrl+I", "Levels, Hue/Saturation, Invert"),
-    ("Image", "Ctrl+Shift+U", "Desaturate"),
+    ("Image", "Ctrl+L, Ctrl+M, Ctrl+B", "Levels, Curves, Color Balance"),
+    ("Image", "Ctrl+U, Ctrl+I, Ctrl+Shift+U", "Hue/Saturation, Invert, Desaturate"),
+    ("Image", "Ctrl+Shift+L, Ctrl+Alt+Shift+L, Ctrl+Shift+B", "Auto Tone, Auto Contrast, Auto Color"),
+    ("Image", "Ctrl+Shift+F", "Fade the last filter"),
     ("Image", "Ctrl+Alt+I, Ctrl+Alt+C", "Image Size, Canvas Size"),
     ("Image", "Ctrl+Shift+X", "Liquify (the Smear tool)"),
     ("Layer", "Ctrl+Shift+N, Ctrl+G", "New layer, new folder"),

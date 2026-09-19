@@ -43,6 +43,8 @@ pub struct Document {
     pub last_selection: Option<Selection>,
     /// Free Transform in progress: the floating layer holding the selected pixels, and the layer they came from.
     pub floating: Option<(Uuid, Uuid)>,
+    /// The last filter, for Fade: the layer, its pixels before, its pixels after, and the filter's name.
+    pub last_filter: Option<(Uuid, ImageSurface, ImageSurface, String)>,
     /// View > Show Grid: (spacing of the major lines, subdivisions per spacing), or None when hidden.
     pub grid: Option<(f64, u32)>,
 }
@@ -105,7 +107,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -324,6 +326,21 @@ impl Document {
 
     fn filtered(&self, kind: Kind, settings: &Settings) -> Result<(Uuid, ImageSurface, Option<Transform>)> {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
+        if kind == Kind::Fade {
+            // The last filter's before and after, mixed; only while its result is still what the layer shows.
+            let Some((fid, before, after, _)) = &self.last_filter else { bail!("Nothing to fade: run a filter or adjustment first.") };
+            if *fid != id || after.to_raw_none() != image.to_raw_none() { bail!("Nothing to fade: the layer has changed since its last filter."); }
+            let (w, h) = (image.width(), image.height());
+            let keep = settings.normalized().fade;
+            let b = crate::raster::with_bytes(before, |d, _| d.to_vec())?;
+            let out = new_argb(w, h)?;
+            crate::raster::with_bytes_raw_mut(&out, |o, stride| {
+                crate::raster::with_bytes(&image, |a, astride| {
+                    for y in 0..h as usize { for x in 0..(w as usize) * 4 { let i = y * stride + x; let j = y * astride + x; o[i] = (a[j] as f64 * keep + b[j] as f64 * (1.0 - keep)).round() as u8; } }
+                }).ok();
+            })?;
+            return Ok((id, out, None));
+        }
         if kind.needs_selection() && self.selection.as_ref().is_none_or(|s| s.is_empty()) { bail!("{} needs a selection.", kind.name()); }
         let transform = self.renderer.layer(id).transform;
         let (iw, ih) = (image.width(), image.height());
@@ -389,6 +406,9 @@ impl Document {
             Kind::LensCorrection => s.distortion == 0.0,
             Kind::Grain => s.grain.amount == 0.0,
             Kind::Levels => s.levels.is_identity(),
+            Kind::Curves => s.curves.is_identity(),
+            Kind::ColorBalance => s.balance.is_identity(),
+            Kind::Fade => s.fade >= 1.0,
             Kind::Exposure => s.exposure.is_identity(),
             Kind::HueSaturation => s.hue_saturation.is_identity(),
             _ => false,
@@ -405,7 +425,10 @@ impl Document {
         }
         let (id, result, placed) = self.filtered(kind, settings)?;
         self.renderer.set_preview(id, None);
-        self.begin_edit(kind.name());
+        // Fade can blend this result back toward what was there, as long as the grid did not change.
+        let before = self.renderer.image(id).cloned();
+        self.last_filter = match (placed.is_none(), before, kind) { (true, Some(b), k) if k != Kind::Fade => Some((id, b, result.clone(), kind.name().to_string())), _ => None };
+        self.begin_edit(if kind == Kind::Fade { "Fade" } else { kind.name() });
         if let Some(placed) = placed {
             // The layer's mask, covering the old grid, is carried onto the new one with its edge tone beyond.
             let layer = self.renderer.layer(id).clone();
@@ -445,6 +468,15 @@ impl Document {
 
     /// Ctrl+I: inverts the active layer's colors (transparency kept) or its mask, inside the selection.
     pub fn invert(&mut self) -> Result<()> { self.apply_filter(Kind::Invert, &Settings::default()) }
+
+    /// Auto Tone, Auto Contrast and Auto Color (Ctrl+Shift+L, Ctrl+Alt+Shift+L, Ctrl+Shift+B): Levels set
+    /// from the layer's histogram, applied at once.
+    pub fn auto_levels(&mut self, mode: AutoLevels) -> Result<()> {
+        let histogram = self.histogram()?;
+        let mut settings = Settings::default();
+        settings.levels = match mode { AutoLevels::Tone => filters::Levels::auto_tone(&histogram), AutoLevels::Contrast => filters::Levels::auto_contrast(&histogram), AutoLevels::Color => filters::Levels::auto_color(&histogram) };
+        self.apply_filter(Kind::Levels, &settings)
+    }
 
     // MARK: Remove Background
 
@@ -2409,7 +2441,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None };
         self.copy_layers(&snapshot, ids, place)
     }
 
@@ -2755,6 +2787,9 @@ fn shape_image(ellipse: bool, w: i32, h: i32, color: [f64; 3], radius: f64) -> R
     drop(cr);
     Ok(out)
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AutoLevels { Tone, Contrast, Color }
 
 /// A type layer is named after its first line, as Photoshop names them.
 fn text_layer_name(text: &str) -> String {
