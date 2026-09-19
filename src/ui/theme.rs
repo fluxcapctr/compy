@@ -188,7 +188,7 @@ pub fn look_css(font: &str) -> String {
         button.flat, button.tool, .layers-footer button, .layers-panel row button, notebook > header tab button, spinbutton button, button.swatch, menubutton > button.flat {{ border: none; }}
         button.tool {{ padding: 3px; min-width: 0; min-height: 0; }}
         button.tool.mark {{ padding: 1px; }}
-        button.swatch {{ padding: 0; min-width: 0; min-height: 0; }}
+        button.swatch, .swatch > button, menubutton.swatch > button {{ padding: 0; min-width: 0; min-height: 0; border: none; background: none; box-shadow: none; }}
         .layers-footer button, .layers-panel row button {{ padding: 3px 5px; min-width: 0; min-height: 0; }}
         spinbutton button, notebook > header tab button, menubutton > button.flat {{ min-height: 0; }}
         button.suggested-action {{ border: 1px solid transparent; }}
@@ -201,7 +201,7 @@ pub fn look_css(font: &str) -> String {
         scale {{ min-height: 16px; }}
         scale trough {{ min-height: 2px; }}
         scale highlight {{ min-height: 2px; }}
-        scale slider {{ min-width: 8px; min-height: 16px; margin: -7px; box-shadow: none; }}
+        scale slider {{ min-width: 12px; min-height: 18px; margin: -8px -4px; box-shadow: none; }}
         check, radio {{ min-width: 13px; min-height: 13px; -gtk-icon-size: 11px; }}
         popover > contents {{ box-shadow: none; padding: 4px; }}
         popover.menu modelbutton {{ min-height: 24px; padding: 2px 10px; }}

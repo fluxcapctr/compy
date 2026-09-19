@@ -74,6 +74,14 @@ impl FilterDialog {
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).halign(gtk::Align::End).build();
         let preview = gtk::CheckButton::builder().label("Preview").active(true).hexpand(true).halign(gtk::Align::Start).build();
         { let this = this.clone(); preview.connect_toggled(move |c| { this.preview.set(c.is_active()); this.schedule(); }); }
+        if let Some((id, _)) = &this.adjustment {
+            // An adjustment layer works on everything below it unless clipped to the layer directly below.
+            let clipped = this.doc.borrow().document.renderer.layer(*id).mask_source_id.is_some();
+            let clip = gtk::CheckButton::builder().label("Only the layer below").active(clipped).tooltip_text("Clip the adjustment to the layer directly below it (Alt+G); off, it affects every layer below").build();
+            let (this2, id) = (this.clone(), *id);
+            clip.connect_toggled(move |_| { { let mut d = this2.doc.borrow_mut(); if d.document.has_layer(id) { d.document.toggle_clipping(id); } } (this2.finished)(); });
+            content.append(&clip);
+        }
         let cancel = gtk::Button::with_label("Cancel");
         let ok = gtk::Button::builder().label("OK").css_classes(["suggested-action"]).build();
         buttons.append(&preview);
@@ -171,6 +179,7 @@ impl FilterDialog {
             }
             Kind::Levels => {
                 let channel = gtk::DropDown::from_strings(&["RGB", "Red", "Green", "Blue"]);
+                channel.set_tooltip_text(Some("Which channel the sliders and histogram show; RGB moves all three together"));
                 grid.attach(&gtk::Label::builder().label("Channel").xalign(0.0).build(), 0, 0, 1, 1);
                 grid.attach(&channel, 1, 0, 2, 1);
                 let area = gtk::DrawingArea::builder().content_height(110).hexpand(true).build();
@@ -275,8 +284,8 @@ impl FilterDialog {
                     let (this, rows) = (self.clone(), rows.clone());
                     tone.connect_selected_notify(move |d| {
                         this.channel.set(d.selected() as usize);
-                        let st = this.settings.borrow();
-                        let range = match d.selected() { 0 => st.balance.shadows, 2 => st.balance.highlights, _ => st.balance.midtones };
+                        // Copy the range out first: setting the sliders runs their handlers, which borrow the settings.
+                        let range = { let st = this.settings.borrow(); match d.selected() { 0 => st.balance.shadows, 2 => st.balance.highlights, _ => st.balance.midtones } };
                         for (i, (scale, spin)) in rows.borrow().iter().enumerate() { scale.set_value(range[i]); spin.set_value(range[i]); }
                     });
                 }
@@ -396,7 +405,7 @@ impl FilterDialog {
         let area = gtk::DrawingArea::builder().content_height(260).content_width(300).hexpand(true).build();
         let selected: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         let dragging: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
-        let readout = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "numeric"]).label("Click to add a point. Drag to adjust.").build();
+        let readout = gtk::Label::builder().xalign(0.0).css_classes(["dim-label", "numeric"]).label("Click to add a point. Drag to adjust.").width_chars(34).max_width_chars(34).ellipsize(gtk::pango::EllipsizeMode::End).build();
         {
             let (this, selected) = (self.clone(), selected.clone());
             area.set_draw_func(move |_, cr, w, h| {
@@ -426,7 +435,9 @@ impl FilterDialog {
         let start: Rc<Cell<(f64, f64)>> = Rc::new(Cell::new((0.0, 0.0)));
         {
             let (this, area, selected, dragging, start, readout) = (self.clone(), area.clone(), selected.clone(), dragging.clone(), start.clone(), readout.clone());
-            drag.connect_drag_begin(move |_, x, y| {
+            drag.connect_drag_begin(move |g, x, y| {
+                // Ours, not the window handle's: a point drag must not move the dialog.
+                g.set_state(gtk::EventSequenceState::Claimed);
                 start.set((x, y));
                 let (w, h) = (area.width().max(1) as f64, area.height().max(1) as f64);
                 let (px, py) = ((x / w * 255.0).clamp(0.0, 255.0), (255.0 - y / h * 255.0).clamp(0.0, 255.0));

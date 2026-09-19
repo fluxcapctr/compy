@@ -17,7 +17,7 @@ pub struct Document {
     pub selection: Option<Selection>,
     /// The active layer, which edits apply to.
     pub active: Option<Uuid>,
-    history: History<State>,
+    pub history: History<State>,
     stroke: Option<crate::brush::Stroke>,
     warp: Option<crate::warp::Warp>,
     stroke_mask: bool,
@@ -2273,6 +2273,18 @@ impl Document {
     }
 
     /// The manifest as it stands, for saving.
+    /// What an autosave writes, copied out so a thread can write it (`autosave::Snapshot::write`).
+    pub fn autosave_snapshot(&self, title: &str) -> Result<crate::autosave::Snapshot> {
+        let manifest = self.manifest();
+        let mut images = std::collections::HashMap::new();
+        let mut masks = std::collections::HashMap::new();
+        for layer in &manifest.layers {
+            if layer.image_file.is_some() { if let Some(s) = self.renderer.image(layer.id) { images.insert(layer.id, crate::autosave::pack(s)?); } }
+            if layer.mask_file.is_some() { if let Some(s) = self.renderer.mask(layer.id) { masks.insert(layer.id, crate::autosave::pack(s)?); } }
+        }
+        Ok(crate::autosave::Snapshot { id: self.document_id, title: title.to_string(), manifest, images, masks })
+    }
+
     pub fn manifest(&self) -> crate::format::Manifest {
         crate::format::Manifest {
             format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(),

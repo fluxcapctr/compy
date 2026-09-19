@@ -92,6 +92,8 @@ pub struct Doc {
     pub needs_redraw: bool,
     /// Rulers along the top and left of the canvas in document pixels (Ctrl+R), as Photoshop's.
     pub rulers: bool,
+    /// The edit serial the last autosave captured.
+    pub autosave_serial: Option<u64>,
     /// Ctrl+H: the selection edges and guides stay out of the way.
     pub hide_extras: bool,
     /// Ctrl+Shift+H: the Move tool's transform handles (Photoshop's Show Transform Controls).
@@ -137,7 +139,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave_serial: None, hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -160,7 +162,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave_serial: None, hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -379,8 +381,13 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         });
     }
     window.add_controller(keys);
+    {
+        // Autosave: a modified document's pixels are copied (milliseconds) and written on a thread.
+        let state = state.clone();
+        glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
+    }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 96] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 97] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -465,6 +472,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("path-fill", &[], |s| s.with_current(|p| p.canvas.path_fill())),
         ("path-stroke", &[], |s| s.with_current(|p| p.canvas.path_stroke())),
         ("path-clear", &[], |s| s.with_current(|p| p.canvas.path_clear())),
+        ("discard-recovered", &[], |s| { crate::autosave::discard_all(); s.show_tabs(s.notebook.current_page().is_some()); }),
         ("toggle-handles", &["<Control><Shift>h"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.show_handles = !d.show_handles; } p.canvas.unpark_handles(); })),
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
         ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
@@ -739,6 +747,23 @@ const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
 /// each drawn as a box in its own aspect ratio, a custom size, and Open.
 fn start_page() -> gtk::Widget {
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
+    let recovered = crate::autosave::recoverable();
+    if !recovered.is_empty() {
+        page.append(&gtk::Label::builder().label("Recovered").xalign(0.0).css_classes(["heading"]).build());
+        page.append(&gtk::Label::builder().label("Autosaved while Compy was running and not saved since. Open one to continue from it, then Save; Discard removes them all.").xalign(0.0).wrap(true).max_width_chars(90).css_classes(["dim-label", "caption"]).build());
+        let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(8).row_spacing(8).max_children_per_line(4).min_children_per_line(1).homogeneous(true).build();
+        for r in &recovered {
+            let when = r.written.elapsed().map(|e| { let m = e.as_secs() / 60; if m < 60 { format!("{m} min ago") } else if m < 60 * 48 { format!("{} h ago", m / 60) } else { format!("{} days ago", m / 60 / 24) } }).unwrap_or_default();
+            let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+            content.append(&gtk::Label::builder().label(&r.title).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Middle).max_width_chars(28).build());
+            content.append(&gtk::Label::builder().label(&format!("autosaved {when}")).xalign(0.0).css_classes(["dim-label", "caption"]).build());
+            let button = gtk::Button::builder().child(&content).action_name("win.open-path").width_request(230).build();
+            button.set_action_target_value(Some(&r.path.display().to_string().to_variant()));
+            flow.insert(&button, -1);
+        }
+        page.append(&flow);
+        page.append(&gtk::Button::builder().label("Discard recovered").action_name("win.discard-recovered").halign(gtk::Align::Start).build());
+    }
     let recent = recent::list();
     if !recent.is_empty() {
         page.append(&gtk::Label::builder().label("Recent").xalign(0.0).css_classes(["heading"]).build());
@@ -867,8 +892,14 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
 impl App {
     fn open_path(self: &Rc<Self>, path: &Path) {
         match open_document(path) {
-            Ok((doc, notes)) => {
-                recent::remember(path);
+            Ok((mut doc, notes)) => {
+                if crate::autosave::is_autosave(path) {
+                    // Recovered: untitled again, so Save asks where; the autosave stays until it is saved.
+                    let title = crate::autosave::recoverable().into_iter().find(|r| r.path == path).map(|r| r.title).unwrap_or_else(|| "Recovered".into());
+                    doc.title = format!("{title} (recovered)");
+                    doc.document.path = None;
+                    doc.document.history.mark_unsaved();
+                } else { recent::remember(path); }
                 self.add_page(doc);
                 if !notes.is_empty() { self.alert("Opened with changes", &format!("{}\n\nSave keeps it as a .comp project; use Export PSD to write a Photoshop file.", notes.join("\n"))); }
             }
@@ -923,10 +954,13 @@ impl App {
     fn close_page(self: &Rc<Self>, index: u32, then: Rc<dyn Fn()>) {
         self.notebook.set_current_page(Some(index));
         let (modified, title) = { let mut m = false; let mut t = String::new(); self.with_current(|p| { let d = p.canvas.doc().borrow(); m = d.document.is_modified(); t = d.title.clone(); }); (m, t) };
-        if !modified { self.notebook.remove_page(Some(index)); then(); return; }
+        let id = { let mut id = None; self.with_current(|p| id = Some(p.canvas.doc().borrow().document.document_id)); id };
+        if !modified { if let Some(id) = id { crate::autosave::discard(id); } self.notebook.remove_page(Some(index)); then(); return; }
         let state = self.clone();
         dialogs::unsaved(self.window.upcast_ref(), &title, move |choice| {
             if choice == 0 { state.save_current(false); if state.current_modified() { return; } }
+            // Saved, or the changes were given up on purpose: either way the autosave has done its job.
+            if let Some(id) = id { crate::autosave::discard(id); }
             if let Some(index) = state.notebook.current_page() { state.notebook.remove_page(Some(index)); }
             then();
         });
@@ -981,6 +1015,19 @@ impl App {
     }
 
     /// Ctrl+F: the picture alone on black, full screen; again brings everything back.
+    /// Writes an autosave for every document changed since its last one.
+    fn autosave_all(&self) {
+        for page in self.pages.borrow().iter() {
+            let snapshot = {
+                let mut d = page.canvas.doc().borrow_mut();
+                if !d.document.is_modified() || d.autosave_serial == Some(d.document.edit_serial) { continue; }
+                let title = d.title.clone();
+                match d.document.autosave_snapshot(&title) { Ok(s) => { d.autosave_serial = Some(d.document.edit_serial); s } Err(e) => { eprintln!("autosave: {e:#}"); continue; } }
+            };
+            std::thread::spawn(move || { if let Err(e) = snapshot.write() { eprintln!("autosave: {e:#}"); } });
+        }
+    }
+
     /// Tab: the tool rail, options and layers panel come and go; the picture stays where it is.
     /// Ctrl+T: with a selection, floats it for the Move tool's handles; without one, the handles already on
     /// the active layer are the transform.
@@ -1154,6 +1201,8 @@ impl App {
             match d.document.save(path) {
                 Ok(()) => {
                     recent::remember(path);
+                    crate::autosave::discard(d.document.document_id);
+                    d.autosave_serial = Some(d.document.edit_serial);
                     saved = Some(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                     d.document.path = Some(path.to_path_buf());
                     d.title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());

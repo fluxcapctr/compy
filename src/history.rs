@@ -38,6 +38,8 @@ impl<S: Clone + PartialEq> History<S> {
     pub fn redo_name(&self) -> Option<&str> { self.future.last().map(|e| e.name.as_str()) }
     pub fn is_modified(&self) -> bool { self.revision != self.saved }
     pub fn mark_saved(&mut self) { self.saved = self.revision; }
+    /// A recovered document is unsaved work even before its first edit.
+    pub fn mark_unsaved(&mut self) { self.saved = u64::MAX; }
     /// An edit is open (its changes are on screen but not yet a step).
     pub fn is_editing(&self) -> bool { self.depth > 0 }
 

@@ -1505,7 +1505,8 @@ impl Canvas {
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
         let head = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
         let this = self.clone();
-        let picker = super::brushes::BrushPicker::new(self.doc.clone(), Rc::new(move || this.sync_brush_options()));
+        let chosen = popover.clone();
+        let picker = super::brushes::BrushPicker::new(self.doc.clone(), Rc::new(move || { this.sync_brush_options(); chosen.popdown(); }));
         head.append(&picker.widget);
         head.append(&gtk::Label::builder().label("Brush").css_classes(["heading"]).build());
         content.append(&head);

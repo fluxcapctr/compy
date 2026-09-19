@@ -4,6 +4,7 @@
 //! everything else is rebuilt here on Cairo. Phase 1 reads a `.comp` package and renders it flat.
 
 pub mod abr;
+pub mod autosave;
 pub mod blur;
 pub mod brush;
 pub mod brush_set;

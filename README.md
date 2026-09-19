@@ -176,6 +176,14 @@ agree. Both modes are off by default: the readback costs about what the composit
 path, though it ran at 3 to 4 ms per 7 megapixel frame, has hung the GPU (a gfx ring reset) on RADV during
 testing and is not yet safe to leave on. `COMPOSITOR_TRACE=1` prints the adapter and frame times.
 
+**Autosave.** Every two minutes each document changed since its last autosave is written to
+`~/.local/share/compositor/autosave/` on another thread: the pixels are copied out first (milliseconds on
+a 12 megapixel file), so editing never waits on the disk. Saving a document, or closing it and choosing to
+keep or drop the changes, removes its autosave. Anything still there at the next start shows on the start
+page under Recovered; opening one gives an untitled document to continue from, Save asks where to put it,
+and Discard recovered clears them. Adjustment layers affect every layer below them; the adjustment dialog's
+"Only the layer below" (Alt+G) clips one to the layer directly beneath it.
+
 **Menu bar and feedback.** File, Edit, Select, Layer, View, Image, Filter and Help run along the top as
 in Photoshop. Ctrl+S reports "Saved name" in the status line. Right-click below the rows in the layers
 panel for New Layer, New Folder, Paste, Import, Stamp Visible and Select All Layers. Return in an options
