@@ -28,10 +28,22 @@ pub fn presets() -> Vec<Rc<Preset>> {
     if first {
         PRESETS.with(|p| p.borrow_mut().extend(crate::brush_set::presets()));
         let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share"));
+        let is_brush = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("abr") || e.eq_ignore_ascii_case("gbr") || e.eq_ignore_ascii_case("gih"));
         if let Ok(entries) = std::fs::read_dir(base.join("compositor/brushes")) {
-            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("abr"))).collect();
-            files.sort();
-            for f in files { let _ = add_file(&f, false); }
+            let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            paths.sort();
+            for p in paths {
+                if p.is_dir() {
+                    // A folder is one set, named after it.
+                    let set = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let mut files: Vec<PathBuf> = std::fs::read_dir(&p).map(|d| d.flatten().map(|e| e.path()).filter(|f| is_brush(f)).collect()).unwrap_or_default();
+                    files.sort();
+                    for f in files { let _ = add_file_in_set(&f, Some(&set), false); }
+                } else if is_brush(&p) && p.file_stem().is_none_or(|s| s != "Compositor Basics") {
+                    // The bundled set is already in memory (with its jitter, which the file cannot carry).
+                    let _ = add_file(&p, false);
+                }
+            }
         }
         if let Ok(text) = std::fs::read_to_string(list_path()) {
             for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) { let _ = add_file(Path::new(line), false); }
@@ -41,8 +53,13 @@ pub fn presets() -> Vec<Rc<Preset>> {
 }
 
 /// Loads a brush file's tips into the list (and remembers the file). Returns how many were added.
-pub fn add_file(path: &Path, remember: bool) -> anyhow::Result<usize> {
-    let loaded = crate::abr::load(path)?;
+pub fn add_file(path: &Path, remember: bool) -> anyhow::Result<usize> { add_file_in_set(path, None, remember) }
+
+/// `set` names the group the tips show under (a folder's name); otherwise the file's own.
+pub fn add_file_in_set(path: &Path, set: Option<&str>, remember: bool) -> anyhow::Result<usize> {
+    let gimp = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gbr") || e.eq_ignore_ascii_case("gih"));
+    let mut loaded = if gimp { crate::gbr::load(path)? } else { crate::abr::load(path)? };
+    if let Some(set) = set { for p in loaded.iter_mut() { let mut owned = (**p).clone(); owned.set = set.to_string(); *p = Rc::new(owned); } }
     let count = loaded.len();
     PRESETS.with(|p| { let mut p = p.borrow_mut(); p.retain(|existing| !loaded.iter().any(|n| n.name == existing.name)); p.extend(loaded); });
     if remember {
@@ -103,6 +120,7 @@ pub struct BrushPicker {
     doc: DocRef,
     swatch: gtk::Box,
     flow: gtk::FlowBox,
+    sets: gtk::DropDown,
     changed: Rc<dyn Fn()>,
 }
 
@@ -113,19 +131,23 @@ impl BrushPicker {
         let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(6).min_children_per_line(4).column_spacing(4).row_spacing(4).homogeneous(true).build();
         let scroller = gtk::ScrolledWindow::builder().child(&flow).min_content_height(160).max_content_height(320).propagate_natural_height(true).min_content_width(300).hscrollbar_policy(gtk::PolicyType::Never).build();
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
+        let sets = gtk::DropDown::from_strings(&["All sets"]);
+        sets.set_tooltip_text(Some("Show one set of brushes, or all of them"));
+        content.append(&sets);
         content.append(&scroller);
         let load = gtk::Button::with_label("Load Brushes…");
         load.set_tooltip_text(Some("Add the sampled tips from a Photoshop .abr file; they are remembered for next time"));
         content.append(&load);
         let popover = gtk::Popover::builder().child(&content).build();
         widget.set_popover(Some(&popover));
-        let picker = Rc::new(BrushPicker { widget, doc, swatch, flow, changed });
+        let picker = Rc::new(BrushPicker { widget, doc, swatch, flow, sets, changed });
+        { let p = picker.clone(); picker.sets.connect_selected_notify(move |_| p.fill_grid()); }
         {
             let p = picker.clone();
             load.connect_clicked(move |b| {
                 let filter = gtk::FileFilter::new();
-                filter.set_name(Some("Photoshop brushes (.abr)"));
-                filter.add_pattern("*.abr"); filter.add_pattern("*.ABR");
+                filter.set_name(Some("Brushes (.abr, .gbr, .gih)"));
+                for p in ["*.abr", "*.ABR", "*.gbr", "*.GBR", "*.gih", "*.GIH"] { filter.add_pattern(p); }
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
                 let dialog = gtk::FileDialog::builder().title("Load Brushes").modal(true).filters(&filters).build();
@@ -146,11 +168,25 @@ impl BrushPicker {
         picker
     }
 
-    /// Rebuilds the grid: the two round tips, then the loaded presets.
+    /// Rebuilds the set list and the grid.
     pub fn fill(self: &Rc<Self>) {
+        let mut names: Vec<String> = vec!["All sets".into(), "Round".into()];
+        for p in presets() { if !names.contains(&p.set) { names.push(p.set.clone()); } }
+        let current = self.sets.selected();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        self.sets.set_model(Some(&gtk::StringList::new(&refs)));
+        self.sets.set_selected(current.min(names.len() as u32 - 1));
+        self.fill_grid();
+    }
+
+    /// The grid: the round tips and the loaded presets, or just the chosen set.
+    fn fill_grid(self: &Rc<Self>) {
         while let Some(c) = self.flow.first_child() { self.flow.remove(&c); }
-        let mut entries: Vec<(Option<Rc<Preset>>, f64, String)> = vec![(None, 1.0, "Hard Round".into()), (None, 0.0, "Soft Round".into())];
-        for p in presets() { let name = p.name.clone(); entries.push((Some(p), 1.0, name)); }
+        let chosen = self.sets.selected_item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string()).unwrap_or_else(|| "All sets".into());
+        let all = chosen == "All sets";
+        let mut entries: Vec<(Option<Rc<Preset>>, f64, String)> = Vec::new();
+        if all || chosen == "Round" { entries.push((None, 1.0, "Hard Round".into())); entries.push((None, 0.0, "Soft Round".into())); }
+        for p in presets() { if all || p.set == chosen { let name = p.name.clone(); entries.push((Some(p), 1.0, name)); } }
         for (preset, hardness, name) in entries {
             let button = gtk::Button::builder().has_frame(false).tooltip_text(&name).build();
             button.set_child(Some(&thumbnail(preset.as_ref(), hardness, 44)));

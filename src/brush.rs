@@ -238,9 +238,25 @@ impl Stroke {
         }
         let (tip_size, tip) = shaped_tip(grid_diameter, settings);
         let tip = std::rc::Rc::new(tip);
-        // With jitter, a handful of turned copies of the tip are made once and picked per dab.
-        let variants: Vec<(usize, std::rc::Rc<Vec<u8>>)> = if settings.angle_jitter > 0.0 {
-            (0..12).map(|i| { let mut turned = settings.clone(); turned.angle += (i as f64 / 12.0 - 0.5) * 360.0 * settings.angle_jitter.clamp(0.0, 1.0); let (s, p) = shaped_tip(grid_diameter, &turned); (s, std::rc::Rc::new(p)) }).collect()
+        // A preset's frames, each turned by the jitter, made once and picked per dab.
+        let frames = settings.preset.as_ref().map_or(0, |p| p.frames.len());
+        let variants: Vec<(usize, std::rc::Rc<Vec<u8>>)> = if settings.angle_jitter > 0.0 || frames > 0 {
+            let turns = if settings.angle_jitter > 0.0 { 12usize.div_ceil(frames + 1).max(1) } else { 1 };
+            let mut out = Vec::new();
+            for frame in 0..=frames {
+                for i in 0..turns {
+                    let mut turned = settings.clone();
+                    if let (Some(p), true) = (settings.preset.as_ref(), frame > 0) {
+                        let mut alt = (**p).clone();
+                        alt.pixels = p.frames[frame - 1].clone();
+                        turned.preset = Some(std::rc::Rc::new(alt));
+                    }
+                    if turns > 1 { turned.angle += (i as f64 / turns as f64 - 0.5) * 360.0 * settings.angle_jitter.clamp(0.0, 1.0); }
+                    let (s, px) = shaped_tip(grid_diameter, &turned);
+                    out.push((s, std::rc::Rc::new(px)));
+                }
+            }
+            out
         } else { Vec::new() };
         let spacing = match settings.spacing {
             Some(fraction) => (settings.diameter * fraction.clamp(0.01, 10.0)).max(0.25),

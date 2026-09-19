@@ -44,7 +44,7 @@ fn make_jittered(name: &str, spacing: f64, jitter: f64, f: impl Fn(f64, f64) -> 
         let (u, v) = ((x as f64 + 0.5) / SIDE as f64 * 2.0 - 1.0, (y as f64 + 0.5) / SIDE as f64 * 2.0 - 1.0);
         pixels[y * SIDE + x] = (f(u, v).clamp(0.0, 1.0) * 255.0).round() as u8;
     } }
-    Rc::new(Preset { name: name.to_string(), width: SIDE, height: SIDE, pixels, spacing, jitter })
+    Rc::new(Preset { name: name.to_string(), width: SIDE, height: SIDE, pixels, spacing, jitter, set: "Compositor Basics".into(), frames: Vec::new() })
 }
 
 fn px(u: f64) -> f64 { (u + 1.0) / 2.0 * SIDE as f64 }

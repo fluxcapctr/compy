@@ -14,6 +14,16 @@ fn main() {
         Some("info") if args.len() == 3 => info(Path::new(&args[2])),
         Some("render") if args.len() == 4 => render_to(Path::new(&args[2]), Path::new(&args[3])),
         Some("psd") if args.len() == 4 => convert_psd(Path::new(&args[2]), Path::new(&args[3])),
+        Some("convert-brushes") if args.len() >= 4 => {
+            // Every .gbr, .gih and .abr given, written as one Photoshop brush file.
+            let mut set = Vec::new();
+            for path in &args[3..] {
+                let p = Path::new(path);
+                let gimp = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gbr") || e.eq_ignore_ascii_case("gih"));
+                match if gimp { compositor::gbr::load(p) } else { compositor::abr::load(p) } { Ok(tips) => set.extend(tips), Err(e) => eprintln!("skipped {}: {e:#}", p.display()) }
+            }
+            std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes to {}", set.len(), Path::new(&args[2]).display()))
+        }
         Some("brushes") if args.len() == 3 => {
             let set = compositor::brush_set::presets();
             std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes", set.len()))
@@ -59,7 +69,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way\n  compositor brushes <out.abr>             write the bundled brush set as a Photoshop brush file";
+const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way\n  compositor brushes <out.abr>             write the bundled brush set as a Photoshop brush file\n  compositor convert-brushes <out.abr> <tips...>   GIMP .gbr/.gih (or .abr) tips as one Photoshop brush file";
 
 fn info(path: &Path) -> Result<()> {
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;

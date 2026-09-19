@@ -19,6 +19,10 @@ pub struct Preset {
     /// How much each dab turns at random, 0 to 1 of a full turn: what keeps a textured tip from stamping the
     /// same mark along a stroke. Not stored in the file; the bundled set sets it.
     pub jitter: f64,
+    /// The set it came from (the file's name), which the picker groups by.
+    pub set: String,
+    /// Further frames of the same size (a GIMP hose's cells), cycled at random per dab.
+    pub frames: Vec<Vec<u8>>,
 }
 
 impl Preset {
@@ -38,6 +42,13 @@ impl<'a> Reader<'a> {
     fn skip(&mut self, n: usize) -> Result<()> { self.need(n)?; self.pos += n; Ok(()) }
 }
 
+/// Loaded tips that are about as wide as they are tall turn at random per dab, so a texture does not stamp
+/// the same mark along a stroke; a clearly elongated tip (a flat, a rake) keeps its direction.
+pub fn default_jitter(width: usize, height: usize) -> f64 {
+    let ratio = width as f64 / height.max(1) as f64;
+    if (0.7..=1.43).contains(&ratio) { 1.0 } else { 0.0 }
+}
+
 /// Loads every sampled brush in the file.
 pub fn load(path: &Path) -> Result<Vec<Rc<Preset>>> {
     let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -47,6 +58,7 @@ pub fn load(path: &Path) -> Result<Vec<Rc<Preset>>> {
 
 pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
     let mut r = Reader { data, pos: 0 };
+    let set = stem.to_string();
     let version = r.u16()?;
     let mut presets = Vec::new();
     match version {
@@ -75,7 +87,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                     let compression = r.u8()?;
                     if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
                         if name.is_empty() { name = format!("{stem} {}", index + 1); }
-                        presets.push(Rc::new(Preset { name, width: p.0, height: p.1, pixels: p.2, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 25.0 }, jitter: 0.0 }));
+                        presets.push(Rc::new(Preset { name, width: p.0, height: p.1, pixels: p.2, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 25.0 }, jitter: default_jitter(p.0, p.1), set: set.clone(), frames: Vec::new() }));
                     }
                 }
                 r.pos = start + size;
@@ -108,7 +120,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                 let compression = r.u8()?;
                 index += 1;
                 if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
-                    presets.push(Rc::new(Preset { name: format!("{stem} {index}"), width: p.0, height: p.1, pixels: p.2, spacing: 25.0, jitter: 0.0 }));
+                    presets.push(Rc::new(Preset { name: format!("{stem} {index}"), width: p.0, height: p.1, pixels: p.2, spacing: 25.0, jitter: default_jitter(p.0, p.1), set: set.clone(), frames: Vec::new() }));
                 }
                 r.pos = start + padded;
             }

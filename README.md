@@ -146,7 +146,13 @@ brushes and the dynamics in the file are not read. Spacing (percent of the size,
 spacing), Angle, Roundness and Jitter (a random turn per dab, what keeps a textured tip from repeating) shape
 any tip as Photoshop's Brush Tip Shape does; the cursor shows the shaped outline. Sampled and shaped tips
 accumulate by the strongest dab under each pixel, so their texture survives along a stroke.
-`compositor brushes out.abr` writes the bundled set for other apps.
+Four more sets ship in `assets/brushes/` and install into the brushes folder: GIMP's Texture, Splatters, Media
+and Sketch tips (CC0; chalk, charcoal, pencil, acrylic, oils, bristles, sponges, grunge, splats, cells, smoke,
+vegetation) as their original `.gbr` and `.gih` files, a folder per set; the picker's dropdown shows one set
+at a time or all of them. A GIMP hose (`.gih`) is one brush whose cells cycle at random per dab, and loaded
+tips that are about as wide as tall turn at random by default. GIMP brush files load directly too. `compositor brushes out.abr` writes
+the bundled set for other apps, and `compositor convert-brushes out.abr tips...` packs GIMP tips into one
+Photoshop brush file.
 
 **Remove Background.** Filter > Remove Background finds the subject with a segmentation model (ISNet,
 through ONNX Runtime) and lays down a layer mask that hides the rest, with the Mac app's refinements:

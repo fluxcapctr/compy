@@ -13,6 +13,7 @@ pub mod ffi;
 pub mod filters;
 pub mod history;
 pub mod format;
+pub mod gbr;
 pub mod heic;
 pub mod matte;
 pub mod png_io;

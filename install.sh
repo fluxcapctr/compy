@@ -29,6 +29,10 @@ Keywords=image;photo;layers;compositor;photoshop;psd;
 MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/tiff;image/gif;image/webp;image/bmp;image/heic;image/heif;
 DESKTOP
 
+mkdir -p "$HOME/.local/share/compositor/brushes"
+for f in assets/brushes/*.abr; do [ -f "$f" ] && install -Dm644 "$f" "$HOME/.local/share/compositor/brushes/$(basename "$f")"; done
+for d in assets/brushes/*/; do [ -d "$d" ] && mkdir -p "$HOME/.local/share/compositor/brushes/$(basename "$d")" && cp "$d"/* "$HOME/.local/share/compositor/brushes/$(basename "$d")/"; done
+
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 echo "installed: $HOME/.local/bin/compositor and ~/.local/share/applications/compositor.desktop"
