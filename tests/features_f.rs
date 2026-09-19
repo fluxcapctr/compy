@@ -86,3 +86,62 @@ fn google_font_fetch_installs_a_family() {
     assert!(n >= 1, "fetched {n} files");
     assert!(compositor::text::families().iter().any(|f| f == "Lobster"));
 }
+
+fn pixels(d: &mut Document) -> (Vec<[u8; 4]>, u32) {
+    let s = d.renderer.render_flat().unwrap();
+    let (w, h) = (s.width() as usize, s.height() as usize);
+    let px = compositor::raster::with_bytes(&s, |b, stride| (0..w * h).map(|i| { let p = &b[(i / w) * stride + (i % w) * 4..][..4]; [p[2], p[1], p[0], p[3]] }).collect()).unwrap();
+    (px, w as u32)
+}
+
+#[test]
+fn layer_effects_render_around_the_layer_and_survive_saving() {
+    use compositor::effects::{Effects, Shadow, Stroke, Overlay};
+    let mut d = Document::blank(60, 60, 72.0).unwrap();
+    let id = d.add_shape_layer(false, (20.0, 20.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    assert!(d.effects(id).is_none());
+    let (px, w) = pixels(&mut d);
+    assert_eq!(px[(45 * w + 45) as usize][3], 0, "nothing outside the square yet");
+
+    // A hard drop shadow lower right, knocked out under the square.
+    let mut e = Effects::default();
+    e.drop_shadow = Some(Shadow { size: 0.0, distance: 6.0, opacity: 1.0, ..Shadow::drop_default() });
+    d.set_effects(id, Some(&e)).unwrap();
+    assert_eq!(d.undo_name(), Some("Layer Style"));
+    let (px, w) = pixels(&mut d);
+    let at = |x: u32, y: u32| px[(y * w + x) as usize];
+    assert_eq!(at(30, 30), [0, 0, 255, 255], "the square is untouched");
+    assert!(at(42, 43)[3] > 200 && at(42, 43)[0] < 20 && at(42, 43)[2] < 20, "black shadow lower right: {:?}", at(42, 43));
+    assert_eq!(at(15, 15)[3], 0, "no shadow upper left");
+
+    // A stroke outside and a color overlay, merged into the same undo step.
+    e.stroke = Some(Stroke { size: 2.0, position: 0, color: [1.0, 0.0, 0.0], opacity: 1.0, enabled: true });
+    e.color_overlay = Some(Overlay { color: [0.0, 1.0, 0.0], opacity: 1.0, enabled: true });
+    d.set_effects(id, Some(&e)).unwrap();
+    let (px, w) = pixels(&mut d);
+    let at = |x: u32, y: u32| px[(y * w + x) as usize];
+    assert_eq!(at(30, 30), [0, 255, 0, 255], "overlay recolors the square");
+    assert_eq!(at(18, 30), [255, 0, 0, 255], "red stroke two pixels outside");
+    assert_eq!(at(17, 30)[3], 0, "nothing three pixels out");
+    d.undo();
+    assert!(d.effects(id).is_none(), "all changes undo as one step");
+    d.redo();
+    assert_eq!(d.effects(id), Some(e.clone()));
+
+    // Half opacity applies to the whole styled layer, and the record survives a save.
+    d.set_opacity(id, 0.5);
+    let (px, w) = pixels(&mut d);
+    assert!((px[(30 * w + 30) as usize][3] as i32 - 128).abs() <= 2, "{:?}", px[(30 * w + 30) as usize]);
+    let path = std::env::temp_dir().join(format!("compositor-test-{}-effects.comp", std::process::id()));
+    d.save(&path).unwrap();
+    let reopened = Document::new(compositor::format::load(&path).unwrap()).unwrap();
+    assert_eq!(reopened.effects(id), Some(e));
+    // Effects are for pixel layers; clearing takes the record off.
+    let base = d.renderer.layers()[0].id;
+    d.set_effects(id, None).unwrap();
+    assert!(d.effects(id).is_none());
+    let mut folder = Document::blank(10, 10, 72.0).unwrap();
+    let f = folder.add_folder();
+    assert!(folder.set_effects(f, Some(&Effects { stroke: Some(Stroke::default()), ..Effects::default() })).is_err());
+    let _ = base;
+}

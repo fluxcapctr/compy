@@ -796,6 +796,25 @@ impl Document {
         crate::format::entries_ordered(layers, true).into_iter().filter(|e| e.visible && e.layer.text.is_some() && e.layer.transform.contains(point)).map(|e| e.layer.id).next()
     }
 
+    // MARK: Layer effects
+
+    /// The layer's effects, or None when it has none.
+    pub fn effects(&self, id: Uuid) -> Option<crate::effects::Effects> {
+        self.renderer.layer(id).effects.as_ref().and_then(crate::effects::Effects::from_record)
+    }
+
+    /// Sets (or with None clears) a layer's effects; consecutive changes merge into one "Layer Style" step.
+    pub fn set_effects(&mut self, id: Uuid, effects: Option<&crate::effects::Effects>) -> Result<()> {
+        let layer = self.renderer.layer(id);
+        if layer.is_group() || layer.adjustment.is_some() { bail!("Layer effects go on pixel layers."); }
+        let record = effects.filter(|e| **e != crate::effects::Effects::default()).map(|e| e.to_record());
+        if layer.effects == record { return Ok(()); }
+        self.begin_edit("Layer Style");
+        self.renderer.set_effects(id, record);
+        self.end_edit_merging();
+        Ok(())
+    }
+
     // MARK: Crop
 
     /// Crops the canvas to `rect` (document pixels), as one undo step (`commitCrop`).
@@ -1857,7 +1876,7 @@ impl Document {
         let layer = crate::format::Layer {
             id, name: "Layer 1".into(), is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None,
+            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None,
         };
         let manifest = crate::format::Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: Some(id), layers: vec![layer] };
         let json = serde_json::to_vec(&manifest)?;
@@ -1907,7 +1926,7 @@ impl Document {
         crate::format::Layer {
             id: Uuid::new_v4(), name, is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(self.width() as f64, self.height() as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None,
+            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None,
         }
     }
 

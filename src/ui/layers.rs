@@ -77,7 +77,7 @@ impl LayersPanel {
         // The footer, right-aligned as Photoshop's: link, mask, adjustment, folder, new layer, trash.
         let footer = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(0).margin_start(6).margin_end(6).margin_top(2).margin_bottom(2).css_classes(["layers-footer"]).build();
         footer.append(&gtk::Box::builder().hexpand(true).build());
-        for (glyph, action, tip) in [("link", "win.toggle-clipping", "Clip to the layer below (Alt+G)"), ("mask", "win.mask-reveal", "Add a layer mask (from the selection, if any)")] {
+        for (glyph, action, tip) in [("fx", "win.layer-style", "Layer Style: drop shadow, glow, bevel, stroke, overlay"), ("link", "win.toggle-clipping", "Clip to the layer below (Alt+G)"), ("mask", "win.mask-reveal", "Add a layer mask (from the selection, if any)")] {
             let b = gtk::Button::builder().has_frame(false).action_name(action).tooltip_text(tip).build();
             b.set_child(Some(&super::icons::glyph(glyph, 16)));
             footer.append(&b);
@@ -460,6 +460,7 @@ fn detail_text(renderer: &crate::render::Renderer, id: Uuid) -> String {
     if layer.blend_mode() != BlendMode::Normal { parts.push(layer.blend_mode().name().into()); }
     if layer.opacity() != 1.0 { parts.push(format!("{:.0}%", layer.opacity() * 100.0)); }
     if layer.mask_file.is_some() { parts.push(if layer.mask_enabled() { "Mask".into() } else { "Mask off".into() }); }
+    if layer.effects.as_ref().and_then(crate::effects::Effects::from_record).is_some_and(|e| e.is_active()) { parts.push("fx".into()); }
     if layer.mask_source_id.is_some() { parts.push("Clipped".into()); }
     parts.join(" · ")
 }

@@ -5,6 +5,7 @@ pub mod brushes;
 mod canvas;
 pub mod color_wheel;
 mod dialogs;
+mod effects;
 mod filter_dialog;
 mod genfill;
 mod icons;
@@ -197,6 +198,9 @@ pub struct Script {
     pub guides: (Vec<f64>, Vec<f64>),
     /// Adds a type layer with this text at (40, 40) in the current style.
     pub text: Option<String>,
+    /// Puts a drop shadow, stroke and bevel on the active layer; opens the Layer Style dialog.
+    pub effects: bool,
+    pub layer_style: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -210,7 +214,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -221,6 +225,8 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if let Some(tool) = script.tool { p.canvas.set_tool(tool); }
                     if script.rulers { p.canvas.doc().borrow_mut().rulers = true; p.canvas.area.queue_draw(); }
                     if let Some(text) = &script.text { let mut d = p.canvas.doc().borrow_mut(); let mut style = d.text_style.clone(); style.text = text.clone(); style.size = 72.0; if let Err(e) = d.document.add_text_layer(&style, 40.0, 40.0) { eprintln!("text: {e:#}"); } drop(d); p.refresh(); }
+                    if script.effects { let mut d = p.canvas.doc().borrow_mut(); if let Some(id) = d.document.active { let e = crate::effects::Effects { drop_shadow: Some(crate::effects::Shadow::drop_default()), stroke: Some(crate::effects::Stroke::default()), bevel: Some(crate::effects::Bevel::default()), ..Default::default() }; if let Err(e) = d.document.set_effects(id, Some(&e)) { eprintln!("effects: {e:#}"); } } drop(d); p.refresh(); }
+                    if script.layer_style { state.open_layer_style(); }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }
                     if script.pick_color { p.canvas.options.show_color_picker(); }
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
@@ -244,10 +250,14 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
             // is left with a redraw pending, which a snapshot would skip), then save every window.
             glib::timeout_add_local_once(Duration::from_millis(2500), move || {
                 let Some(clock) = main.frame_clock() else { app.quit(); return };
-                let done = Rc::new(Cell::new(false));
-                let (main2, app2, done2) = (main.clone(), app.clone(), done.clone());
+                // Two paints: the first hands a fresh frame to the picture, the second shows it.
+                let paints = Rc::new(Cell::new(0));
+                let (main2, app2, paints2) = (main.clone(), app.clone(), paints.clone());
                 clock.connect_after_paint(move |_| {
-                    if done2.replace(true) { return; }
+                    let n = paints2.get() + 1;
+                    paints2.set(n);
+                    if n == 1 { main2.queue_draw(); return; }
+                    if n != 2 { return; }
                     let (main, app, target) = (main2.clone(), app2.clone(), target.clone());
                     glib::idle_add_local_once(move || {
                         for (i, window) in std::iter::once(main.clone().upcast::<gtk::Window>()).chain(app.windows().into_iter().filter(|w| *w != main)).enumerate() {
@@ -324,7 +334,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 68] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 70] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -343,6 +353,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("nudge-pixels-up", &["<Control>Up"], |s| s.edit(|d| d.nudge_pixels(0.0, -1.0))),
         ("nudge-pixels-down", &["<Control>Down"], |s| s.edit(|d| d.nudge_pixels(0.0, 1.0))),
         ("merge", &["<Control>e"], |s| s.edit(|d| d.merge_layers())),
+        ("layer-style", &[], |s| s.open_layer_style()),
+        ("clear-layer-style", &[], |s| s.edit(|d| { let Some(id) = d.active else { return Ok(()) }; d.set_effects(id, None) })),
         ("invert", &["<Control>i"], |s| s.edit(|d| d.invert())),
         ("flip-canvas-horizontal", &[], |s| s.edit(|d| d.flip_canvas(true))),
         ("flip-canvas-vertical", &[], |s| s.edit(|d| d.flip_canvas(false))),
@@ -517,6 +529,8 @@ fn menu() -> gio::Menu {
     layer.append_submenu(Some("New Adjustment Layer"), &adjustments);
     layer.append(Some("Edit Adjustment…"), Some("win.edit-adjustment"));
     layer.append(Some("Duplicate Layer"), Some("win.duplicate-layer"));
+    layer.append(Some("Layer Style…"), Some("win.layer-style"));
+    layer.append(Some("Clear Layer Style"), Some("win.clear-layer-style"));
     layer.append(Some("Delete Layer"), Some("win.delete-layer"));
     layer.append(Some("Rename Layer…"), Some("win.rename-layer"));
     layer.append(Some("Move Up"), Some("win.layer-up"));
@@ -701,6 +715,21 @@ impl App {
     }
 
     /// The Generative Fill panel over the current selection.
+    /// The Layer Style dialog for the active pixel layer.
+    fn open_layer_style(self: &Rc<Self>) {
+        let mut opened = false;
+        self.with_current(|p| {
+            let doc = p.canvas.doc().clone();
+            let id = { let d = doc.borrow(); d.document.active.filter(|id| { let l = d.document.renderer.layer(*id); !l.is_group() && l.adjustment.is_none() }) };
+            let Some(id) = id else { return };
+            let (panel, area) = (p.panel.clone(), p.canvas.area.clone());
+            let finished: Rc<dyn Fn()> = Rc::new(move || { panel.rebuild(); area.queue_draw(); });
+            effects::open(self.window.upcast_ref(), doc, id, finished);
+            opened = true;
+        });
+        if !opened && self.notebook.current_page().is_some() { self.alert("Select a pixel layer first", "Layer effects go on image, shape and type layers, not folders or adjustments."); }
+    }
+
     fn open_genfill(self: &Rc<Self>, expand: bool) {
         let mut opened = false;
         self.with_current(|p| {
@@ -923,6 +952,10 @@ impl App {
 fn snapshot_window(window: &gtk::Window, target: &Path) -> Result<()> {
     // Snapshotting the children (title bar and content) renders them fresh; a WidgetPaintable of the whole
     // window comes back empty whenever a redraw is queued, which the marching ants keep doing.
+    // Every widget is asked to draw again, so a picture whose texture changed on the last frame is not
+    // captured from the render node it cached before that.
+    fn queue_all(widget: &gtk::Widget) { widget.queue_draw(); let mut c = widget.first_child(); while let Some(w) = c { queue_all(&w); c = w.next_sibling(); } }
+    queue_all(window.upcast_ref());
     let snapshot = gtk::Snapshot::new();
     let mut child = window.first_child();
     while let Some(widget) = child {

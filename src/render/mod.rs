@@ -53,6 +53,8 @@ pub struct Renderer {
     /// Masks moved apart from their layers, resampled into the layer's own pixel grid, by (layer, preview).
     placed: HashMap<(Uuid, bool), ImageSurface>,
     thumbnails: HashMap<(Uuid, i32), ImageSurface>,
+    /// Rendered layer effects by layer, with what they were built from.
+    styled: HashMap<Uuid, Styled>,
     live: live::LiveMasks,
     warnings: Vec<String>,
     /// Counts every change to what a draw would show, so a canvas can keep the last frame until it changes.
@@ -62,6 +64,16 @@ pub struct Renderer {
 /// Which of a layer's pixel buffers a halved copy came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Source { Image, Mask, Preview, MaskPreview }
+
+/// A layer's rendered effects in document pixels: what draws under the layer and over it, their top-left
+/// corner, and the key of what they were built from.
+struct Styled {
+    key: String,
+    x: i32,
+    y: i32,
+    below: Option<ImageSurface>,
+    above: Option<ImageSurface>,
+}
 
 /// The layers, pixels and masks at one moment, shared by reference: what undo history holds.
 #[derive(Clone)]
@@ -154,6 +166,7 @@ impl Renderer {
             halved: HashMap::new(),
             placed: HashMap::new(),
             thumbnails: HashMap::new(),
+            styled: HashMap::new(),
             live: live::LiveMasks::default(),
             warnings: Vec::new(),
             revision: 1,
@@ -419,6 +432,45 @@ impl Renderer {
     pub fn set_mask_linked(&mut self, id: Uuid, linked: bool) { self.touch(); let i = self.index[&id]; self.layers[i].mask_linked = Some(linked); }
     pub fn set_mask_source(&mut self, id: Uuid, source: Option<Uuid>) { self.touch(); let i = self.index[&id]; self.layers[i].mask_source_id = source; }
 
+    pub fn set_effects(&mut self, id: Uuid, effects: Option<serde_json::Value>) { self.touch(); let i = self.index[&id]; self.layers[i].effects = effects; }
+
+    /// The layer's effects, rendered from its committed pixels through its own mask, cached until the pixels,
+    /// mask, placement or effects change. A stroke in progress draws over the effects as they were.
+    fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<(i32, i32, Option<ImageSurface>, Option<ImageSurface>)>> {
+        let Some(effects) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) else { return Ok(None) };
+        let Some(image) = self.images.get(&id) else { return Ok(None) };
+        let mask_ptr = self.masks.get(&id).map(|m| m.to_raw_none() as usize).unwrap_or(0);
+        let key = format!("{:?}|{:?}|{:?}|{}|{}|{}", layer.transform, layer.mask_placement, layer.mask_enabled, image.to_raw_none() as usize, mask_ptr, layer.effects.as_ref().map(|e| e.to_string()).unwrap_or_default());
+        if let Some(s) = self.styled.get(&id) { if s.key == key { return Ok(Some((s.x, s.y, s.below.clone(), s.above.clone()))); } }
+        let reach = effects.reach();
+        let (bx, by, bw, bh) = layer.transform.bounds();
+        // The layer's bounds padded by the effects' reach, kept within the canvas padded the same way.
+        let x0 = (bx.floor() as i64 - reach as i64).max(-(reach as i64));
+        let y0 = (by.floor() as i64 - reach as i64).max(-(reach as i64));
+        let x1 = ((bx + bw).ceil() as i64 + reach as i64).min(self.width as i64 + reach as i64);
+        let y1 = ((by + bh).ceil() as i64 + reach as i64).min(self.height as i64 + reach as i64);
+        let (w, h) = ((x1 - x0).max(1) as i32, (y1 - y0).max(1) as i32);
+        if w as i64 * h as i64 > 120_000_000 { return Ok(None); }
+        let surface = new_argb(w, h)?;
+        {
+            let cr = Context::new(&surface)?;
+            cr.translate(-x0 as f64, -y0 as f64);
+            let had_preview = self.previews.remove(&id);
+            let result = self.paint_own(id, &cr, Operator::Over);
+            if let Some(p) = had_preview { self.previews.insert(id, p); }
+            result?;
+        }
+        let (wu, hu) = (w as usize, h as usize);
+        let mut alpha = vec![0u8; wu * hu];
+        with_bytes(&surface, |data, stride| crate::ffi::extract_alpha(data, stride, &mut alpha, wu, wu, hu))?;
+        drop(surface);
+        let rendered = effects.render(&alpha, wu, hu);
+        let below = rendered.below.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
+        let above = rendered.above.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
+        self.styled.insert(id, Styled { key, x: x0 as i32, y: y0 as i32, below: below.clone(), above: above.clone() });
+        Ok(Some((x0 as i32, y0 as i32, below, above)))
+    }
+
     pub fn set_layer_transform(&mut self, id: Uuid, transform: Transform) { self.touch();
         let i = self.index[&id];
         self.layers[i].transform = transform;
@@ -529,6 +581,7 @@ impl Renderer {
     }
 
     fn invalidate(&mut self, id: Uuid) {
+        self.styled.remove(&id);
         self.halved.retain(|(l, _, _), _| *l != id);
         self.thumbnails.retain(|(l, _), _| *l != id);
         self.placed.retain(|(l, _), _| *l != id);
@@ -707,6 +760,30 @@ impl Renderer {
     /// mask in `folders` and `clip` (a device-space coverage), composited with its opacity and blend mode.
     /// `LayerRenderer.draw` plus the clips `FolderMaskClip` and `LiveMaskRenderer.draw` put around it.
     pub(crate) fn draw_own(&mut self, id: Uuid, cr: &Context, clip: Option<(&ImageSurface, Region)>, folders: &[FolderMask]) -> Result<()> {
+        let layer = self.layer(id).clone();
+        if !self.images.contains_key(&id) && !self.previews.contains_key(&id) { return Ok(()); }
+        let styled = self.styled(id, &layer)?;
+        // A layer with nothing but its own mask (or nothing at all) at full opacity paints straight onto the
+        // canvas; anything more goes through a group so the alpha masks and opacity apply once, together.
+        let direct = folders.is_empty() && clip.is_none() && layer.opacity() >= 1.0 && styled.is_none();
+        cr.save()?;
+        if !direct { cr.push_group(); }
+        if let Some((x, y, Some(below), _)) = &styled { cr.set_source_surface(below, *x as f64, *y as f64)?; cr.paint()?; }
+        self.paint_own(id, cr, if direct { operator(layer.blend_mode()) } else { Operator::Over })?;
+        if let Some((x, y, _, Some(above))) = &styled { cr.set_source_surface(above, *x as f64, *y as f64)?; cr.paint()?; }
+        if !direct {
+            cr.pop_group_to_source()?;
+            self.through_masks(cr, folders, clip)?;
+            cr.set_operator(operator(layer.blend_mode()));
+            cr.paint_with_alpha(layer.opacity())?;
+        }
+        cr.restore()?;
+        Ok(())
+    }
+
+    /// The layer's pixels (or the stroke preview standing in for them) placed by its transform through its
+    /// own mask, painted with `op` and nothing else applied.
+    fn paint_own(&mut self, id: Uuid, cr: &Context, op: Operator) -> Result<()> {
         let kind = if self.previews.contains_key(&id) { Source::Preview } else { Source::Image };
         let Some(image) = self.store(kind).get(&id).cloned() else { return Ok(()) };
         let layer = self.layer(id).clone();
@@ -724,38 +801,24 @@ impl Renderer {
             Some(MaskSource::Placed(surface)) => Some((surface, 0, 1.0, 1.0)),
             None => None,
         };
-        // A layer with nothing but its own mask (or nothing at all) at full opacity paints straight onto the
-        // canvas; anything more goes through a group so the alpha masks and opacity apply once, together.
-        let direct = folders.is_empty() && clip.is_none() && layer.opacity() >= 1.0;
         cr.save()?;
-        if !direct { cr.push_group(); }
-        {
-            cr.save()?;
-            place(cr, &t);
-            cr.set_antialias(if t.sampling == Sampling::Nearest { Antialias::None } else { Antialias::Default });
-            let rect = (-w / 2.0, -h / 2.0, w * ws, h * hs);
-            let pattern = pattern_over(&source, rect, filter);
-            cr.set_source(&pattern)?;
-            cr.rectangle(rect.0, rect.1, rect.2, rect.3);
-            cr.clip();
-            if direct { cr.set_operator(operator(layer.blend_mode())); }
-            match clip_mask {
-                Some((mask, _, mws, mhs)) => {
-                    let mrect = (-w / 2.0, -h / 2.0, w * mws, h * mhs);
-                    let mpattern = pattern_over(&mask, mrect, filter);
-                    cr.rectangle(mrect.0, mrect.1, mrect.2, mrect.3);
-                    cr.clip();
-                    cr.mask(&mpattern)?;
-                }
-                None => cr.paint()?,
+        place(cr, &t);
+        cr.set_antialias(if t.sampling == Sampling::Nearest { Antialias::None } else { Antialias::Default });
+        let rect = (-w / 2.0, -h / 2.0, w * ws, h * hs);
+        let pattern = pattern_over(&source, rect, filter);
+        cr.set_source(&pattern)?;
+        cr.rectangle(rect.0, rect.1, rect.2, rect.3);
+        cr.clip();
+        cr.set_operator(op);
+        match clip_mask {
+            Some((mask, _, mws, mhs)) => {
+                let mrect = (-w / 2.0, -h / 2.0, w * mws, h * mhs);
+                let mpattern = pattern_over(&mask, mrect, filter);
+                cr.rectangle(mrect.0, mrect.1, mrect.2, mrect.3);
+                cr.clip();
+                cr.mask(&mpattern)?;
             }
-            cr.restore()?;
-        }
-        if !direct {
-            cr.pop_group_to_source()?;
-            self.through_masks(cr, folders, clip)?;
-            cr.set_operator(operator(layer.blend_mode()));
-            cr.paint_with_alpha(layer.opacity())?;
+            None => cr.paint()?,
         }
         cr.restore()?;
         Ok(())

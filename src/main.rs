@@ -49,6 +49,8 @@ fn main() {
                     "--brush-popover" => script.brush_popover = true,
                     "--preview" => script.preview = true,
                     "--text" => script.text = text(),
+                    "--effects" => script.effects = true,
+                    "--layer-style" => script.layer_style = true,
                     "--guides" => { if let Some(spec) = text() { for part in spec.split(',') { if let Some(v) = part.strip_prefix('x').and_then(|v| v.parse().ok()) { script.guides.0.push(v); } else if let Some(v) = part.strip_prefix('y').and_then(|v| v.parse().ok()) { script.guides.1.push(v); } } } }
                     "--brush" => script.brush = text(),
                     "--window" => script.window = text().and_then(|v| { let (w, h) = v.split_once('x')?; Some((w.parse().ok()?, h.parse().ok()?)) }),

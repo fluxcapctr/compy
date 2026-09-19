@@ -145,6 +145,18 @@ scaled with the Move tool without redrawing, and turns into plain pixels once pa
 adds a type layer from a script. The palette at the bottom of the rail holds the foreground and background
 colors; X swaps them, D resets them.
 
+**Layer effects.** Layer > Layer Style (or the fx button under the layers panel) opens a floating, draggable
+Layer Style dialog for the selected image, shape or type layer: Drop Shadow, Inner Shadow, Outer Glow, Inner
+Glow, Bevel & Emboss (inner, outer or emboss, with depth, size, angle, altitude and highlight and shadow
+strengths), Stroke (outside, inside or center) and Color Overlay, each with its color, opacity and sizes in
+document pixels. Tick an effect to switch it on, and every change shows on the canvas as you make it; the
+whole session is one "Layer Style" undo step, Cancel puts the layer back, Clear All takes everything off
+(so does Layer > Clear Layer Style). Effects are non-destructive: they are computed from the layer's
+pixels through its mask, cached until the pixels, mask, placement or settings change, drawn under and over
+the layer inside its opacity and blend mode, and saved with the layer (`effects` on the record; other
+readers ignore it). Styled layers show "fx" in their row. `--effects` puts a drop shadow, stroke and bevel
+on the active layer from a script and `--layer-style` opens the dialog.
+
 **Brushes.** The tip button at the left of the brush options opens the presets: Hard Round and Soft Round,
 the bundled set (Chalk, Charcoal, Dry Brush, Sponge, Spatter, Stipple, Grain, Soft Grain, Watercolor, Splat,
 Flat, Angled Flat, Rake, Scatter Dots, Soft Splotch, Cross Hatch: textured tips made by `src/brush_set.rs`,

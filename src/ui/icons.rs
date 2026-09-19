@@ -286,6 +286,13 @@ fn draw_glyph(name: &str, cr: &cairo::Context) {
             cr.arc(10.0, 10.0, 6.5, 0.0, TAU); cr.stroke().ok();
             cr.arc(10.0, 10.0, 6.5, PI / 2.0, 3.0 * PI / 2.0); cr.close_path(); cr.fill().ok();
         }
+        "fx" => {
+            // The letters fx, as Photoshop marks styled layers.
+            cr.select_font_face("Sans", cairo::FontSlant::Italic, cairo::FontWeight::Bold);
+            cr.set_font_size(13.0);
+            cr.move_to(2.0, 15.0);
+            cr.show_text("fx").ok();
+        }
         "trash" => {
             cr.rectangle(4.0, 5.0, 12.0, 1.8); cr.fill().ok();
             cr.rectangle(8.0, 3.0, 4.0, 1.8); cr.fill().ok();

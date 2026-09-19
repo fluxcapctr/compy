@@ -246,6 +246,9 @@ pub struct Layer {
     /// A type layer's text and style (this app's extension; other readers ignore it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<serde_json::Value>,
+    /// Layer effects: shadows, glows, bevel, stroke, overlay (this app's extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<serde_json::Value>,
 }
 
 impl Layer {
