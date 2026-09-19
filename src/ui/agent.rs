@@ -419,7 +419,8 @@ impl Assistant {
             "that is open in front of the user, as an undoable step they watch happen. When the user says 'this' or 'the thing I selected', they mean ",
             "the current selection (its bounds are in the state; call snapshot to see the canvas, the selection is outlined in red). Prefer native tools ",
             "(select, layers, adjustments, styles, type) over generation; generative tools cost money, so state the estimated cost before running one ",
-            "unless the user already asked for it plainly. Talk like a colleague at the next desk: short, plain sentences about the picture, never about tools, ",
+            "unless the user already asked for it plainly. You have taste: before any layout, type, color, effect or 'make it look good' decision, load the ",
+            "compy-design skill and follow it; when the user asks for options, offer two or three, each in its own tab. Talk like a colleague at the next desk: short, plain sentences about the picture, never about tools, ",
             "JSON, ids or code. Say what changed in a line or two. Current state of the document:\n{}"),
             serde_json::to_string(&state).unwrap_or_default())
     }
@@ -440,12 +441,19 @@ impl Assistant {
         let _ = std::fs::create_dir_all(&config_dir);
         let config = config_dir.join("mcp.json");
         let _ = std::fs::write(&config, json!({"mcpServers": {"compy": {"command": exe.display().to_string(), "args": ["mcp"]}}}).to_string());
+        // Compy's own design skill lives in a folder of its own, which the session runs in so Claude Code
+        // finds it as a project skill.
+        let agent_dir = config_dir.join("agent");
+        let skill_dir = agent_dir.join(".claude/skills/compy-design");
+        let _ = std::fs::create_dir_all(&skill_dir);
+        let _ = std::fs::write(skill_dir.join("SKILL.md"), include_str!("../../assets/compy-design.md"));
         let (resume, session_id) = match self.session.borrow().clone() { Some(id) => (true, id), None => (false, uuid::Uuid::new_v4().to_string()) };
         *self.session.borrow_mut() = Some(session_id.clone());
         let context = self.context();
         let mut command = std::process::Command::new(claude);
-        command.arg("-p").arg(&message).arg("--output-format").arg("stream-json").arg("--verbose").arg("--mcp-config").arg(&config).arg("--strict-mcp-config").arg("--allowedTools").arg("mcp__compy").arg("--append-system-prompt").arg(&context).arg("--max-turns").arg("30");
+        command.arg("-p").arg(&message).arg("--output-format").arg("stream-json").arg("--verbose").arg("--mcp-config").arg(&config).arg("--strict-mcp-config").arg("--allowedTools").arg("mcp__compy").arg("Skill").arg("--append-system-prompt").arg(&context).arg("--max-turns").arg("30");
         if resume { command.arg("--resume").arg(&session_id); } else { command.arg("--session-id").arg(&session_id); }
+        command.current_dir(&agent_dir);
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let (tx, rx) = mpsc::channel::<(String, String)>();
         match command.spawn() {
