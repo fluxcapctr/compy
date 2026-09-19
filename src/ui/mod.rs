@@ -176,6 +176,8 @@ pub struct Script {
     pub pick_color: bool,
     /// Opens the brush preset picker before the screenshot.
     pub pick_brush: bool,
+    /// A brush preset to paint the scripted stroke with, by name.
+    pub brush: Option<String>,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -202,6 +204,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.pick_brush { p.canvas.options.show_brush_picker(); }
                     if script.ellipse { p.canvas.doc().borrow_mut().marquee_ellipse = true; }
                     if let Some(size) = script.brush_size { p.canvas.doc().borrow_mut().brush.diameter = size; p.canvas.sync_brush_options(); }
+                    if let Some(name) = &script.brush { let preset = brushes::presets().into_iter().find(|b| b.name.eq_ignore_ascii_case(name)); let mut d = p.canvas.doc().borrow_mut(); match preset { Some(pr) => { eprintln!("script: brush {} ({}x{}, spacing {})", pr.name, pr.width, pr.height, pr.spacing); d.brush.spacing = Some(pr.spacing / 100.0); d.brush.angle_jitter = pr.jitter; d.brush.preset = Some(pr); } None => eprintln!("script: no brush named {name}") } }
                     if let Some(mode) = script.blur_mode { p.canvas.doc().borrow_mut().blur_mode = mode; }
                     if !script.stroke.is_empty() { p.canvas.scripted_stroke(&script.stroke); }
                 });

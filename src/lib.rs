@@ -6,6 +6,7 @@
 pub mod abr;
 pub mod blur;
 pub mod brush;
+pub mod brush_set;
 pub mod distort;
 pub mod document;
 pub mod ffi;

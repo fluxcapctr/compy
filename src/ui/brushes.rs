@@ -21,10 +21,18 @@ fn list_path() -> PathBuf {
     base.join("compositor/brushes.list")
 }
 
-/// The presets loaded so far, reading the remembered files the first time.
+/// The presets loaded so far. The first time: the bundled set, every `.abr` in the user's brushes folder
+/// (`~/.local/share/compositor/brushes`), then the files remembered from Load Brushes.
 pub fn presets() -> Vec<Rc<Preset>> {
     let first = LOADED.with(|l| !l.replace(true));
     if first {
+        PRESETS.with(|p| p.borrow_mut().extend(crate::brush_set::presets()));
+        let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share"));
+        if let Ok(entries) = std::fs::read_dir(base.join("compositor/brushes")) {
+            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("abr"))).collect();
+            files.sort();
+            for f in files { let _ = add_file(&f, false); }
+        }
         if let Ok(text) = std::fs::read_to_string(list_path()) {
             for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) { let _ = add_file(Path::new(line), false); }
         }
@@ -148,7 +156,7 @@ impl BrushPicker {
             button.set_child(Some(&thumbnail(preset.as_ref(), hardness, 44)));
             let this = self.clone();
             button.connect_clicked(move |b| {
-                { let mut d = this.doc.borrow_mut(); d.brush.preset = preset.clone(); if preset.is_none() { d.brush.hardness = hardness; } else if let Some(p) = &preset { d.brush.spacing = Some(p.spacing / 100.0); } }
+                { let mut d = this.doc.borrow_mut(); d.brush.preset = preset.clone(); match &preset { None => { d.brush.hardness = hardness; d.brush.angle_jitter = 0.0; } Some(p) => { d.brush.spacing = Some(p.spacing / 100.0); d.brush.angle_jitter = p.jitter; } } }
                 this.sync();
                 (this.changed)();
                 if let Some(popover) = b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() { popover.popdown(); }

@@ -106,6 +106,7 @@ pub struct OptionsBar {
     spacing: gtk::SpinButton,
     angle: gtk::SpinButton,
     roundness: gtk::SpinButton,
+    jitter: gtk::SpinButton,
     syncing: std::cell::Cell<bool>,
 }
 
@@ -232,6 +233,12 @@ impl OptionsBar {
         roundness.set_tooltip_text(Some("Percent: 100 is the tip as it is, less squashes it across its angle"));
         { let doc = doc.clone(); roundness.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.roundness = s.value() / 100.0; } }); }
         brushes.append(&roundness);
+        brushes.append(&gtk::Label::new(Some("Jitter")));
+        let jitter = gtk::SpinButton::with_range(0.0, 100.0, 5.0);
+        jitter.set_value((settings.angle_jitter * 100.0).round());
+        jitter.set_tooltip_text(Some("Angle jitter, percent: each dab turns by a random share of a full turn, so a textured tip does not repeat"));
+        { let doc = doc.clone(); jitter.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.brush.angle_jitter = s.value() / 100.0; } }); }
+        brushes.append(&jitter);
         brushes.append(&gtk::Label::new(Some("Opacity")));
         let opacity = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
         opacity.set_value(settings.opacity * 100.0);
@@ -326,7 +333,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -405,6 +412,7 @@ impl OptionsBar {
         self.spacing.set_value(settings.spacing.map_or(0.0, |s| (s * 100.0).round()));
         self.angle.set_value(settings.angle);
         self.roundness.set_value((settings.roundness * 100.0).round());
+        self.jitter.set_value((settings.angle_jitter * 100.0).round());
         self.picker.sync();
     }
 

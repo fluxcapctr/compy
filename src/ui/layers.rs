@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use uuid::Uuid;
 
-pub const WIDTH: i32 = 264;
+pub const WIDTH: i32 = 317;
 const ROW_HEIGHT: i32 = 44;
 const THUMBNAIL: i32 = 34;
 const MASK_THUMBNAIL: i32 = 26;

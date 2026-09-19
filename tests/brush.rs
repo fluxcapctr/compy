@@ -187,7 +187,7 @@ fn the_live_preview_matches_the_commit() {
 fn shaped_tips_paint_their_shape() {
     use compositor::brush::{BrushSettings, shaped_tip};
     // A 4 x 1 bar preset at diameter 8 lands as an 8 x 2 mark.
-    let bar = std::rc::Rc::new(compositor::abr::Preset { name: "bar".into(), width: 4, height: 1, pixels: vec![255; 4], spacing: 25.0 });
+    let bar = std::rc::Rc::new(compositor::abr::Preset { name: "bar".into(), width: 4, height: 1, pixels: vec![255; 4], spacing: 25.0, jitter: 0.0 });
     let settings = BrushSettings { diameter: 8.0, preset: Some(bar), ..Default::default() };
     let (size, pixels) = shaped_tip(8.0, &settings);
     assert!(size >= 8, "{size}");

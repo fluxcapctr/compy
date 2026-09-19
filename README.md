@@ -136,12 +136,17 @@ Shape (U): rectangles with rounded corners and ellipses in the foreground color 
 crisp when scaled (Shift+U swaps the kind). The palette at the bottom of the rail holds the foreground and
 background colors; X swaps them, D resets them.
 
-**Brushes.** The tip button at the left of the brush options opens the presets: the app's Hard Round and
-Soft Round tips and every sampled tip loaded from Photoshop brush files with Load Brushes (`.abr`, versions
-1, 2 and 6; computed round brushes and the dynamics in the file are not read). Loaded files are remembered
-in `~/.config/compositor/brushes.list`. Spacing (percent of the size, 0 for the automatic dense spacing),
-Angle and Roundness shape any tip, sampled or round, as Photoshop's Brush Tip Shape does; the cursor shows
-the shaped outline.
+**Brushes.** The tip button at the left of the brush options opens the presets: Hard Round and Soft Round,
+the bundled set (Chalk, Charcoal, Dry Brush, Sponge, Spatter, Stipple, Grain, Soft Grain, Watercolor, Splat,
+Flat, Angled Flat, Rake, Scatter Dots, Soft Splotch, Cross Hatch: textured tips made by `src/brush_set.rs`,
+also written out as `assets/brushes/Compositor Basics.abr`), every `.abr` dropped into
+`~/.local/share/compositor/brushes/`, and files added with Load Brushes (remembered in
+`~/.config/compositor/brushes.list`). Photoshop brush files load at versions 1, 2 and 6; computed round
+brushes and the dynamics in the file are not read. Spacing (percent of the size, 0 for the automatic dense
+spacing), Angle, Roundness and Jitter (a random turn per dab, what keeps a textured tip from repeating) shape
+any tip as Photoshop's Brush Tip Shape does; the cursor shows the shaped outline. Sampled and shaped tips
+accumulate by the strongest dab under each pixel, so their texture survives along a stroke.
+`compositor brushes out.abr` writes the bundled set for other apps.
 
 **Remove Background.** Filter > Remove Background finds the subject with a segmentation model (ISNet,
 through ONNX Runtime) and lays down a layer mask that hides the rest, with the Mac app's refinements:

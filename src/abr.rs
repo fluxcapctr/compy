@@ -16,6 +16,9 @@ pub struct Preset {
     pub height: usize,
     pub pixels: Vec<u8>,
     pub spacing: f64,
+    /// How much each dab turns at random, 0 to 1 of a full turn: what keeps a textured tip from stamping the
+    /// same mark along a stroke. Not stored in the file; the bundled set sets it.
+    pub jitter: f64,
 }
 
 impl Preset {
@@ -72,7 +75,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                     let compression = r.u8()?;
                     if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
                         if name.is_empty() { name = format!("{stem} {}", index + 1); }
-                        presets.push(Rc::new(Preset { name, width: p.0, height: p.1, pixels: p.2, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 25.0 } }));
+                        presets.push(Rc::new(Preset { name, width: p.0, height: p.1, pixels: p.2, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 25.0 }, jitter: 0.0 }));
                     }
                 }
                 r.pos = start + size;
@@ -105,7 +108,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                 let compression = r.u8()?;
                 index += 1;
                 if let Some(p) = read_tip(&mut r, top, left, bottom, right, depth, compression)? {
-                    presets.push(Rc::new(Preset { name: format!("{stem} {index}"), width: p.0, height: p.1, pixels: p.2, spacing: 25.0 }));
+                    presets.push(Rc::new(Preset { name: format!("{stem} {index}"), width: p.0, height: p.1, pixels: p.2, spacing: 25.0, jitter: 0.0 }));
                 }
                 r.pos = start + padded;
             }

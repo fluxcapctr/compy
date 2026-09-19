@@ -14,6 +14,10 @@ fn main() {
         Some("info") if args.len() == 3 => info(Path::new(&args[2])),
         Some("render") if args.len() == 4 => render_to(Path::new(&args[2]), Path::new(&args[3])),
         Some("psd") if args.len() == 4 => convert_psd(Path::new(&args[2]), Path::new(&args[3])),
+        Some("brushes") if args.len() == 3 => {
+            let set = compositor::brush_set::presets();
+            std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes", set.len()))
+        }
         Some("info") | Some("render") | Some("psd") | Some("--help") | Some("-h") => Err(anyhow::anyhow!(USAGE)),
         _ => {
             let mut paths = Vec::new();
@@ -30,6 +34,7 @@ fn main() {
                     "--ellipse" => script.ellipse = true,
                     "--pick-color" => script.pick_color = true,
                     "--pick-brush" => script.pick_brush = true,
+                    "--brush" => script.brush = text(),
                     "--window" => script.window = text().and_then(|v| { let (w, h) = v.split_once('x')?; Some((w.parse().ok()?, h.parse().ok()?)) }),
                     "--blur-mode" => script.blur_mode = text().and_then(|m| m.parse().ok()),
                     "--layer" => script.layer = text(),
@@ -53,7 +58,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way";
+const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way\n  compositor brushes <out.abr>             write the bundled brush set as a Photoshop brush file";
 
 fn info(path: &Path) -> Result<()> {
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;

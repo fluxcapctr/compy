@@ -38,15 +38,17 @@ pub struct BrushSettings {
     pub roundness: f64,
     /// A sampled tip from a Photoshop brush file, scaled to the diameter, in place of the round tip.
     pub preset: Option<std::rc::Rc<crate::abr::Preset>>,
+    /// Angle jitter, 0 to 1 of a full turn: each dab turns by a random share of it.
+    pub angle_jitter: f64,
 }
 
 impl Default for BrushSettings {
-    fn default() -> Self { BrushSettings { diameter: 40.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0, spacing: None, angle: 0.0, roundness: 1.0, preset: None } }
+    fn default() -> Self { BrushSettings { diameter: 40.0, hardness: 1.0, color: [0.0; 3], opacity: 1.0, spacing: None, angle: 0.0, roundness: 1.0, preset: None, angle_jitter: 0.0 } }
 }
 
 impl BrushSettings {
     /// A tip other than the plain round one: a preset, a squashed or turned round tip.
-    pub fn shaped(&self) -> bool { self.preset.is_some() || self.roundness < 0.999 || self.angle % 360.0 != 0.0 }
+    pub fn shaped(&self) -> bool { self.preset.is_some() || self.roundness < 0.999 || self.angle % 360.0 != 0.0 || self.angle_jitter > 0.0 }
 }
 
 /// A document-size image a stroke copies from, premultiplied 4 bytes per pixel.
@@ -179,8 +181,11 @@ pub struct Stroke {
     pub preview: ImageSurface,
     selection: Option<Selection>,
     tip_size: usize,
-    tip: Vec<u8>,
+    tip: std::rc::Rc<Vec<u8>>,
     spacing: f64,
+    /// Turned copies of the tip for angle jitter, and how many dabs have landed (which picks one).
+    variants: Vec<(usize, std::rc::Rc<Vec<u8>>)>,
+    dabs: u64,
     tiles: HashMap<usize, Tile>,
     columns: usize,
     samples: Vec<(f64, f64)>,
@@ -232,13 +237,18 @@ impl Stroke {
             bail!("The brush would be {} pixels wide on this layer's own pixels; the limit is {}. Use a smaller brush, or resample the layer with Image Size.", grid_diameter.round(), GRID_TIP_LIMIT);
         }
         let (tip_size, tip) = shaped_tip(grid_diameter, settings);
+        let tip = std::rc::Rc::new(tip);
+        // With jitter, a handful of turned copies of the tip are made once and picked per dab.
+        let variants: Vec<(usize, std::rc::Rc<Vec<u8>>)> = if settings.angle_jitter > 0.0 {
+            (0..12).map(|i| { let mut turned = settings.clone(); turned.angle += (i as f64 / 12.0 - 0.5) * 360.0 * settings.angle_jitter.clamp(0.0, 1.0); let (s, p) = shaped_tip(grid_diameter, &turned); (s, std::rc::Rc::new(p)) }).collect()
+        } else { Vec::new() };
         let spacing = match settings.spacing {
             Some(fraction) => (settings.diameter * fraction.clamp(0.01, 10.0)).max(0.25),
             None => (settings.diameter * if settings.hardness >= 1.0 && !settings.shaped() { 0.015 } else { 0.025 }).max(0.25),
         };
         Ok(Stroke {
             settings: settings.clone(), kind, width, height, source, has_image, to_document, from_document, transform: expanded, canvas, preview,
-            selection, tip_size, tip, spacing, tiles: HashMap::new(), columns: width.div_ceil(TILE),
+            selection, tip_size, tip, variants, dabs: 0, spacing, tiles: HashMap::new(), columns: width.div_ceil(TILE),
             samples: Vec::new(), previous: None, distance_to_next: 0.0, tail_backup: HashMap::new(), changed: None, replaying: false, pending: HashSet::new(),
         })
     }
@@ -381,12 +391,18 @@ impl Stroke {
     fn dab(&mut self, point: (f64, f64), changed: &mut HashSet<usize>) {
         if point.0 < -self.settings.diameter || point.1 < -self.settings.diameter || point.0 > self.canvas.0 + self.settings.diameter || point.1 > self.canvas.1 + self.settings.diameter { return; }
         let (cx, cy) = self.from_document.transform_point(point.0, point.1);
-        let size = self.tip_size as f64;
+        // The tip, or one of its turned copies chosen by a hash of the dab count (the same on replay).
+        let pick = if self.variants.is_empty() { None } else { let h = self.dabs.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40; Some((h % self.variants.len() as u64) as usize) };
+        self.dabs += 1;
+        let (tip_size, tip): (usize, std::rc::Rc<Vec<u8>>) = match pick { Some(i) => (self.variants[i].0, self.variants[i].1.clone()), None => (self.tip_size, self.tip.clone()) };
+        let size = tip_size as f64;
         let (bx, by) = ((cx - size / 2.0).round() as i64, (cy - size / 2.0).round() as i64);
         let (gx0, gy0) = (bx.max(0) as usize, by.max(0) as usize);
         let (gx1, gy1) = (((bx + size as i64).max(0) as usize).min(self.width), ((by + size as i64).max(0) as usize).min(self.height));
         if gx1 <= gx0 || gy1 <= gy0 { return; }
-        let hard = self.settings.hardness >= 1.0 && !self.settings.shaped();
+        // Round tips accumulate softly (dabs screen over each other); a sampled or shaped tip keeps to the
+        // strongest dab under each pixel, so its holes survive along the stroke as a dry medium's do.
+        let hard = self.settings.hardness >= 1.0 || self.settings.shaped();
         for ty in gy0 / TILE..=(gy1 - 1) / TILE {
             for tx in gx0 / TILE..=(gx1 - 1) / TILE {
                 let key = ty * self.columns + tx;
@@ -399,7 +415,7 @@ impl Stroke {
                     let ty_ = (tile.y + ly) as i64 - by;
                     for lx in lx0..lx1 {
                         let tx_ = (tile.x + lx) as i64 - bx;
-                        let t = self.tip[ty_ as usize * self.tip_size + tx_ as usize] as u32;
+                        let t = tip[ty_ as usize * tip_size + tx_ as usize] as u32;
                         if t == 0 { continue; }
                         let c = &mut tile.coverage[ly * tile.w + lx];
                         let current = *c as u32;
