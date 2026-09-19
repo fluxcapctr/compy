@@ -1,4 +1,7 @@
-# Compositor on Linux
+# Compy
+
+Compy is the app's name on the desktop and in its window; the binary and the crate are still `compositor`, so every
+command below keeps working.
 
 A Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a layer-based image editor for
 macOS. The original app's C pixel core (`csrc/`) is compiled unchanged; the rest is rebuilt in Rust on Cairo,
@@ -161,6 +164,11 @@ and handles can be dragged afterwards. Then Make Selection (Ctrl+Return) turns t
 (an open path closes itself), Fill Path fills it on the active layer in the foreground color, and Stroke
 with Brush paints along it with the current brush, all from the options bar or a right-click on the path.
 `--path "10,10 50,10:30,40 50,50 close"` draws one from a script.
+
+**Menu bar and feedback.** File, Edit, Select, Layer, View, Image, Filter and Help run along the top as
+in Photoshop. Ctrl+S reports "Saved name" in the status line. Right-click below the rows in the layers
+panel for New Layer, New Folder, Paste, Import, Stamp Visible and Select All Layers. Return in an options
+field commits the value and puts the transform handles away, as Return on the canvas does.
 
 **Start page.** With nothing open the window shows the recent files (the last twelve opened or saved,
 kept in `~/.config/compositor/recent.list`), then Photoshop's New Document presets by group (Photo,

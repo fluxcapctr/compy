@@ -70,6 +70,29 @@ impl LayersPanel {
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
+        {
+            // Right-click below the rows: what can be added.
+            let context = gtk::GestureClick::new();
+            context.set_button(3);
+            let list_ref = list.clone();
+            context.connect_pressed(move |g, _, x, y| {
+                if list_ref.row_at_y(y as i32).is_some() { return; }
+                g.set_state(gtk::EventSequenceState::Claimed);
+                let menu = gtk::gio::Menu::new();
+                menu.append(Some("New Layer"), Some("win.new-layer"));
+                menu.append(Some("New Folder"), Some("win.new-folder"));
+                menu.append(Some("Paste as New Layer"), Some("win.paste"));
+                menu.append(Some("Import Image…"), Some("win.import"));
+                menu.append(Some("Stamp Visible"), Some("win.stamp-visible"));
+                menu.append(Some("Select All Layers"), Some("win.select-all-layers"));
+                let popover = gtk::PopoverMenu::from_model(Some(&menu));
+                popover.set_parent(&list_ref);
+                popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover.connect_closed(move |p| { let p = p.clone(); gtk::glib::idle_add_local_once(move || p.unparent()); });
+                popover.popup();
+            });
+            list.add_controller(context);
+        }
         let scroller = gtk::ScrolledWindow::builder().child(&list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         widget.append(&scroller);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));

@@ -313,11 +313,12 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     css.load_from_string("button.tool, .layers-panel row button, .layers-footer button, .layers-panel menubutton > button { background-image: none; background-color: transparent; border: none; box-shadow: none; outline: none; } button.tool:hover, .layers-panel row button:hover, .layers-footer button:hover { background-color: alpha(currentColor, 0.12); } button.tool { min-width: 0; min-height: 0; padding: 3px; border-radius: 3px; } button.tool.mark { padding: 1px; } button.swatch { min-width: 0; min-height: 0; padding: 0; border-radius: 0; border: 1px solid alpha(currentColor, 0.5); } .panel-tab { padding: 5px 12px; } .panel-tab.current { background-color: alpha(@window_bg_color, 1); border-bottom: 2px solid @accent_bg_color; } .layers-footer button { min-width: 0; min-height: 0; padding: 3px 5px; } .type-bold { font-weight: bold; } .type-italic { font-style: italic; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
 
-    let window = gtk::ApplicationWindow::builder().application(app).title("Compositor").default_width(1280).default_height(820).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("Compy").default_width(1280).default_height(820).build();
     let header = gtk::HeaderBar::new();
-    let open = gtk::Button::builder().label("Open").tooltip_text("Open a .comp project (Ctrl+O)").action_name("win.open").build();
-    header.pack_start(&open);
-    header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu()).tooltip_text("Edit, Select, Image and Filter").build());
+    // File, Edit, Select, Layer, View, Image, Filter and Help along the top, as Photoshop lays them out.
+    let bar = gtk::PopoverMenuBar::from_model(Some(&menu()));
+    bar.add_css_class("main-menu");
+    header.pack_start(&bar);
     window.set_titlebar(Some(&header));
 
     let notebook = gtk::Notebook::builder().scrollable(true).show_border(false).build();
@@ -342,7 +343,14 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         let released = state.clone();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
             let state = &pressed;
-            if gtk::prelude::GtkWindowExt::focus(&state.window).is_some_and(|w| w.is::<gtk::Editable>() || w.is::<gtk::Text>()) { return glib::Propagation::Proceed; }
+            if gtk::prelude::GtkWindowExt::focus(&state.window).is_some_and(|w| w.is::<gtk::Editable>() || w.is::<gtk::Text>()) {
+                // Return in an options field commits the value; the handles then go away as on the canvas.
+                if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+                    let state = state.clone();
+                    glib::idle_add_local_once(move || state.with_current(|p| { p.canvas.park_handles(); }));
+                }
+                return glib::Propagation::Proceed;
+            }
             // Text being typed on the canvas takes every key first.
             let mut typed = false;
             state.with_current(|p| { if p.canvas.text_editing() { typed = p.canvas.text_key(key, modifiers); } });
@@ -1140,11 +1148,13 @@ impl App {
 
     fn save_to(&self, path: &Path) {
         let mut failure = None;
+        let mut saved: Option<String> = None;
         self.with_current(|p| {
             let mut d = p.canvas.doc().borrow_mut();
             match d.document.save(path) {
                 Ok(()) => {
                     recent::remember(path);
+                    saved = Some(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
                     d.document.path = Some(path.to_path_buf());
                     d.title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
                 }
@@ -1152,6 +1162,7 @@ impl App {
             }
         });
         self.update_tab_titles();
+        if let Some(name) = saved { self.with_current(|p| p.canvas.notify(&format!("Saved {name}"))); }
         if let Some(detail) = failure { self.alert("Could not save", &detail); }
     }
 

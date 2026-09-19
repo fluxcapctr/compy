@@ -106,6 +106,8 @@ pub fn css(p: &Palette) -> String {
         .start-page button {{ color: {fg}; }}
         headerbar {{ background-color: {dbg}; color: {fg}; box-shadow: none; border-bottom: 1px solid {ddbg}; }}
         headerbar button, .options button {{ background-color: transparent; color: {fg}; border: 1px solid {lbg}; box-shadow: none; text-shadow: none; }}
+        .main-menu > item {{ color: {fg}; background-color: transparent; }}
+        .main-menu > item:hover, .main-menu > item:selected {{ background-color: {lbg}; }}
         headerbar button:hover, .options button:hover {{ background-color: {lbg}; border-color: {muted}; }}
         button {{ background-color: transparent; color: {fg}; border-color: {lbg}; }}
         button:hover {{ background-color: {lbg}; border-color: {muted}; }}
@@ -174,8 +176,11 @@ pub fn look_css(font: &str) -> String {
         decoration {{ box-shadow: 0 0 0 1px alpha(currentColor, 0.28); margin: 0; }}
         window.csd {{ box-shadow: none; }}
         headerbar {{ min-height: 34px; padding: 0 6px; }}
+        .main-menu {{ padding: 0; }}
+        .main-menu > item {{ padding: 4px 10px; border-radius: 0; border: 1px solid transparent; }}
+        .main-menu > item:hover, .main-menu > item:selected {{ border-color: alpha(currentColor, 0.4); }}
         headerbar .dialog-title, .panel-tab, .heading, .layers-panel .heading {{ text-transform: uppercase; letter-spacing: 1.4px; font-size: 10.5px; font-weight: 600; }}
-        headerbar .title {{ letter-spacing: 0.6px; font-weight: 600; }}
+        headerbar .title {{ letter-spacing: 0; font-weight: 600; }}
         .panel-tab.current {{ border-bottom: 1px solid currentColor; }}
         button {{ background-image: none; box-shadow: none; text-shadow: none; padding: 3px 10px; min-height: 22px; border: 1px solid alpha(currentColor, 0.22); }}
         button:hover {{ border-color: alpha(currentColor, 0.5); }}

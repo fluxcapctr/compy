@@ -1217,6 +1217,9 @@ impl Canvas {
         self.area.queue_draw();
     }
 
+    /// Puts the active layer's handles away, as Return does.
+    pub fn park_handles(&self) { self.handles_parked.set(self.doc.borrow().document.active); self.update_cursor(); self.area.queue_draw(); }
+
     /// Handles come back: a new transform, or Transform Controls switched on.
     pub fn unpark_handles(&self) { self.handles_parked.set(None); self.update_cursor(); self.area.queue_draw(); }
 

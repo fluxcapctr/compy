@@ -16,16 +16,16 @@ install -Dm644 /dev/stdin "$HOME/.local/share/applications/compositor.desktop" <
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Compositor
+Name=Compy
 GenericName=Image Editor
-Comment=Layered image editing with masks, adjustments and filters
+Comment=Compy: layered image editing with masks, adjustments and filters
 Exec=compositor %F
 Icon=compositor
 Terminal=false
 StartupNotify=true
 StartupWMClass=co.ericstevens.compositor
 Categories=Graphics;2DGraphics;RasterGraphics;Photography;
-Keywords=image;photo;layers;compositor;photoshop;psd;
+Keywords=image;photo;layers;compy;compositor;photoshop;psd;
 MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/tiff;image/gif;image/webp;image/bmp;image/heic;image/heif;
 DESKTOP
 
