@@ -246,8 +246,8 @@ impl Canvas {
                             this.picture.set_paintable(Some(&texture));
                             // The picture is changed from inside a draw, when GTK has already decided what this
                             // frame shows; ask for the next frame too, or a fresh document waits for the mouse.
-                            let picture = this.picture.clone();
-                            glib::idle_add_local_once(move || picture.queue_draw());
+                            let area = area.clone();
+                            glib::idle_add_local_once(move || area.queue_draw());
                         }
                     }
                 }
