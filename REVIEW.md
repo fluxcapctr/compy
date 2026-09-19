@@ -128,3 +128,62 @@ needs a downloaded model) and report anything that fails. If you can only read f
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_3.md. No em dashes in your output.
+
+# Round 4 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 3 are fixed (see REVIEW_RESULTS.md,
+REVIEW_RESULTS_2.md and REVIEW_RESULTS_3.md); this round covers the code written since, commits 52f83ad
+through 904e58f.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, fourth pass.
+
+Context: a Linux rebuild of a macOS image editor. The Swift source in reference/ is the spec (read-only);
+the C pixel core in csrc/ is compiled unchanged (do not edit it). Read CLAUDE.md and README.md first.
+REVIEW_RESULTS.md, REVIEW_RESULTS_2.md and REVIEW_RESULTS_3.md hold the earlier findings, all fixed; do
+not re-report them.
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there. A partial report that says where it ended is worth more than an unfinished one.
+
+Cover only what is new since round 3 (git log 52f83ad^..904e58f). Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (141 tests should pass; two are
+ignored because they need the network or a downloaded model) and report anything that fails. If you can
+only read files, skip that.
+
+1. Type layers: src/text.rs (Pango rendering, caret and index_at on empty and multi-line text, the Google
+   Fonts fetch: bad family names, network failures, the 64 MB limit, the fc-cache call), and
+   Document::add_text_layer, set_text (the scale kept across edits, the mask placement), text_layer_at.
+   The on-canvas editor in src/ui/canvas.rs (type_at, text_key, finish_text_edit, raster_point): byte
+   indices on multi-byte characters, a layer deleted or undone while being edited, rotated or flipped
+   layers, keys while an entry has focus, the empty layer dropped on finish.
+2. Layer effects: src/effects.rs (blur, shift, the distance transform, the bevel lighting, the paint
+   compositing, reach) on degenerate sizes (1 by 1, 0 opacity, size 0, 30,000 px wide layers, layers
+   mostly off canvas), Renderer::styled and its cache key (surface pointer reuse after a free, previews
+   during a stroke, masks), draw_own and paint_own after the refactor (the direct path, blend modes,
+   folders, clips), and the Layer Style dialog in src/ui/effects.rs (state shared between pages, Cancel
+   after the layer was deleted, the merged undo step).
+3. Guides, snapping and the grid: Document::snapped_guide, guide_snap_targets, grid_lines, snap_targets,
+   snapped_move; the ruler press and guide drag in src/ui/canvas.rs; the grid drawing at extreme zoom.
+4. New commands in src/document.rs: layer_via (copy and cut, with masks and rotated layers),
+   merge_visible (hidden children of visible folders, adjustment layers, clipping masks), stamp_visible,
+   move_layer_to_end, select_all_layers, reselect after a canvas resize, feather_selection, desaturate,
+   begin_free_transform, commit_free_transform, cancel_free_transform (the open edit if the user saves,
+   switches documents or closes while floating; undo during a float).
+5. Shortcuts and menus in src/ui/mod.rs: the actions table, the parameterized select-layer-id and
+   delete-guide actions (stale ids and indices), the window key controller (Tab and F while a dialog is
+   open, keys during a canvas text edit), toggle_panels, the shortcuts window, the context menus in
+   src/ui/canvas.rs and src/ui/layers.rs (RefCell borrow_mut while borrowed, popovers unparented twice,
+   track_popover and close_popover).
+6. The look in src/ui/theme.rs: system_font when omarchy is missing or slow, CSS that fails to parse on
+   GTK 4.22 (warnings on stderr), providers installed twice, the screenshot harness change in
+   snapshot_window.
+7. Preview mode, the picture and overlay split, the Move tool letting go of the layer on empty canvas,
+   the free transform floating layer interacting with multi-selection and folders.
+8. Anything in tests/features_f.rs, tests/features_g.rs and the unit tests in src/text.rs and
+   src/effects.rs that asserts the wrong value or passes for the wrong reason.
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_4.md. No em dashes in your output.
