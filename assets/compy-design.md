@@ -12,6 +12,14 @@ before you say a job is done.
 ## One focal point
 
 - Decide what the eye lands on first, and make everything else support it. One hero, one message.
+- Decide the one thing a viewer will remember (the picture, the headline, a color) and build that first.
+  Everything else is placed around it, quieter.
+- Emphasize with one lever at a time: bigger, or bolder, or darker. All three at once shouts. Save the
+  combination for the single most important element in the layout.
+- Balance off center on purpose: offset the subject, let the photo run to the edge, leave one side open.
+  Centered everything is safe and reads as a template.
+- Space between groups must be larger than space within a group. Elements that belong together sit close;
+  a caption hugs its picture, the next block stands off.
 - Place the subject on a third or centered on purpose, never slightly off center by accident.
 - Leave room. Crowded edges and elements touching the frame look like mistakes.
 - Keep a safe margin of about 5 percent of the shorter side on all sides; put nothing important in it.
@@ -28,6 +36,10 @@ before you say a job is done.
 - Build sizes on a scale. Pick a ratio from 1.25 to 1.5 and step every size from the body size: body,
   then body x ratio, then that x ratio, and so on. Use only sizes from the scale.
 - Sizes should differ clearly: a headline at least twice the body size. Small steps look like errors.
+  For a poster or a single ad the headline can be ten times the body size or more; that contrast is
+  what makes it read across a room.
+- A headline is one statement of three to seven words. Break its lines by sense, and never leave one
+  short word alone on the last line.
 - Running text (more than two lines) wants 45 to 75 characters per line. Shorter reads choppy, longer
   loses the eye at the line break; set the block's width from the size, not the other way round.
 - Legibility on a photo: a face with a large x-height and open letters holds up small; thin hairlines
@@ -45,7 +57,10 @@ before you say a job is done.
 ## Color
 
 - Take colors from the picture. Sample the image for accents rather than inventing them.
-- Three colors do a lot: a dominant, a secondary, one accent. More looks noisy.
+- Three colors do a lot: a dominant, a secondary, one accent. More looks noisy. The accent goes on one
+  thing (the call to action, a price, one word), not sprinkled.
+- Grays and blacks carry a hint of the picture's hue: a cool gray in a blue scene, a warm one in a sunset.
+  Neutral gray and pure black and white look pasted in.
 - Pure black text on a photo looks pasted; a very dark tone from the image looks placed.
 - Contrast for legibility first. If small text is hard to read in the snapshot at 1024 px, it is unreadable
   on a phone.
@@ -67,6 +82,12 @@ before you say a job is done.
 - Contact shadows where the object meets a surface. An object with no shadow floats.
 - Scale by the scene: compare with something of known size in the picture.
 
+## If you write the words
+
+- One idea per line. Concrete beats abstract: a thing you can picture, a number at human scale, a
+  named place. "Save four hours a week" over "save time".
+- Lead with the surprising fact or the feeling, not the product name. Say it the way a person says it.
+
 ## Offering options
 
 - When asked for options or layouts, make two or three, each in its own tab, named for what differs
@@ -77,4 +98,8 @@ before you say a job is done.
 
 - Look at the snapshot once more. Check: one focal point, nothing touching the edges, type aligned to
   something, contrast readable, shadows quiet, colors from the picture.
+- Squint test: does the hierarchy still read when blurred, and would it read in grayscale? If color is
+  doing the work that size and space should, fix the size and space.
+- Remove one thing. If the layout is no worse without it, leave it out. Done means nothing left to take
+  away, not nothing left to add.
 - Say what changed in one or two lines, as a colleague would, without tool names or numbers unless they matter.
