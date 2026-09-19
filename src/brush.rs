@@ -408,7 +408,11 @@ impl Stroke {
                             let (dx, dy) = (m.xx() * gx + m.xy() * gy + m.x0(), m.yx() * gx + m.yy() * gy + m.y0());
                             let p = sample.pixel(dx + offset.0, dy + offset.1);
                             if *replaces { for k in 0..4 { o[k] = (p[k] as f64 * a + base[k] as f64 * (1.0 - a)).round().clamp(0.0, 255.0) as u8; } }
-                            else { over([p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64], a, o); }
+                            else {
+                                // Source-over of the premultiplied sample: a transparent sample leaves the layer alone.
+                                let keep = 1.0 - a * p[3] as f64 / 255.0;
+                                for k in 0..4 { o[k] = (p[k] as f64 * a + base[k] as f64 * keep).round().clamp(0.0, 255.0) as u8; }
+                            }
                         }
                         Kind::Blur { .. } => {
                             // Filled below from the blurred region, one block per tile rather than per pixel.

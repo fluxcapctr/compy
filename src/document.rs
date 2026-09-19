@@ -79,6 +79,11 @@ impl Document {
     }
 
     pub fn begin_edit(&mut self, name: &str) { let state = self.state(); self.history.begin(name, state); }
+    /// Abandons the edit in progress and puts the document back as it was when the edit began.
+    pub fn abort_edit(&mut self) {
+        if let Some(before) = self.history.cancel() { self.apply(&before); }
+    }
+
     pub fn end_edit(&mut self) {
         let state = self.state();
         self.history.end(state, |held, current| {
@@ -1059,7 +1064,8 @@ impl Document {
     }
 
     /// Imports an image file (PNG, JPEG or TIFF) as a new layer centered on the canvas at its own size.
-    pub fn import_image(&mut self, path: &std::path::Path) -> Result<Uuid> {
+    /// Decodes an image file (PNG, JPEG, TIFF, GIF's first frame, WebP, BMP) with EXIF orientation applied.
+    pub fn decode_image(path: &std::path::Path) -> Result<(ImageSurface, usize, usize)> {
         use image::ImageDecoder;
         let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
         let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -1068,7 +1074,23 @@ impl Document {
         let rgba = decoded.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         if w == 0 || h == 0 || w > 30_000 || h > 30_000 || w * h > 100_000_000 { bail!("This image is larger than the 30,000-pixel side or 100-megapixel limit."); }
-        let surface = crate::png_io::from_straight_rgba(rgba.as_raw(), w, h)?;
+        Ok((crate::png_io::from_straight_rgba(rgba.as_raw(), w, h)?, w, h))
+    }
+
+    /// Opens an image file as a new document of its size, the image as the only layer.
+    pub fn open_image(path: &std::path::Path) -> Result<Document> {
+        let (surface, w, h) = Self::decode_image(path)?;
+        let mut document = Document::blank(w as i32, h as i32, 72.0)?;
+        let id = document.active.ok_or_else(|| anyhow::anyhow!("blank document has a layer"))?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Image".into());
+        document.renderer.set_layer_name(id, name);
+        document.renderer.set_image(id, surface);
+        document.history.mark_saved();
+        Ok(document)
+    }
+
+    pub fn import_image(&mut self, path: &std::path::Path) -> Result<Uuid> {
+        let (surface, w, h) = Self::decode_image(path)?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Image".into());
         let (index, parent) = self.insertion();
         let mut record = self.blank_record(name, parent);
@@ -1140,8 +1162,15 @@ impl Document {
     /// (baking its rotation), masks likewise, and the resolution changes (`ImageResizer`).
     pub fn image_size(&mut self, width: i32, height: i32, resolution: f64, sampling: crate::format::Sampling) -> Result<()> {
         if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) || !(1.0..=9600.0).contains(&resolution) { bail!("Image sizes run from 1 to 30,000 pixels per side, at 1 to 9600 pixels per inch."); }
-        let (ow, oh) = (self.width(), self.height());
         self.begin_edit("Image Size");
+        match self.resample(width, height, resolution, sampling) {
+            Ok(()) => { self.end_edit(); Ok(()) }
+            Err(error) => { self.abort_edit(); Err(error) }
+        }
+    }
+
+    fn resample(&mut self, width: i32, height: i32, resolution: f64, sampling: crate::format::Sampling) -> Result<()> {
+        let (ow, oh) = (self.width(), self.height());
         if width != ow || height != oh {
             let (sx, sy) = (width as f64 / ow as f64, height as f64 / oh as f64);
             for layer in self.renderer.layers().to_vec() {
@@ -1184,7 +1213,6 @@ impl Document {
             }
         }
         self.renderer.set_resolution(resolution);
-        self.end_edit();
         Ok(())
     }
 

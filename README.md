@@ -29,8 +29,8 @@ cargo test
 
 `install.sh` builds the release binary and installs it for the current user only: `~/.local/bin/compositor`,
 the app icon under `~/.local/share/icons/hicolor/`, and `~/.local/share/applications/compositor.desktop`,
-which is what makes the app show up in launchers (Omarchy's included) and lets `.psd` files open with it
-from a file manager. Nothing is written outside your home directory; run it again after pulling changes.
+which is what makes the app show up in launchers (Omarchy's included) and lets `.psd` and image files open
+with it from a file manager. Nothing is written outside your home directory; run it again after pulling changes.
 
 ## Use
 
@@ -40,6 +40,7 @@ compositor info  project.comp            # the layer tree, with what each layer 
 compositor render project.comp out.png   # flatten to a straight-alpha PNG at the document's resolution
 compositor psd    project.comp out.psd   # write a layered Photoshop file (or in.psd out.comp to convert back)
 compositor file.psd                      # open a Photoshop file in the viewer
+compositor photo.jpg                     # open an image as a new document of its size
 ```
 
 In the viewer: scroll to pan, Ctrl+scroll or pinch to zoom around the pointer, middle-drag or Space+drag
@@ -87,7 +88,7 @@ put when unlinked, as in the reference.
 
 **Files, sizes and adjustment layers (phase 6).** The File menu has New Canvas (Ctrl+N), Save (Ctrl+S) and
 Save As, which write a `.comp` package staged beside the destination and swapped in whole, Import Image
-(PNG, JPEG, TIFF, with EXIF orientation applied) as a new layer, Export PNG, and Export JPEG with a quality
+(PNG, JPEG, TIFF, GIF, WebP, BMP, with EXIF orientation applied) as a new layer, Export PNG, and Export JPEG with a quality
 slider, a background color, the encoded size and a preview. Dropping a `.comp` on the window opens it and
 dropping an image imports it; closing a tab with unsaved changes asks first, and a dot marks unsaved tabs.
 Edit has Copy Merged (Ctrl+Shift+C) to the system clipboard. Layer has New Layer, New Folder, Duplicate,
@@ -100,8 +101,14 @@ Image Size (layers are resampled in place at the new size, rotation baked, masks
 Selection, and Hue/Saturation and Exposure as filters. Select has Expand and Contract, computed with a
 Euclidean distance transform so corners round as Photoshop's do.
 
-**Photoshop files.** File has Open PSD (Ctrl+Alt+O) and Export PSD, and a `.psd` dropped on the window or
-passed on the command line opens too. The reader and writer are in `src/psd.rs`, with no outside library:
+**Opening things.** Open (Ctrl+O) takes an image (PNG, JPEG, TIFF, GIF's first frame, WebP, BMP), a
+Photoshop file, or a `.comp` package picked by its `manifest.json`; Open Project Folder (Ctrl+Shift+O) is
+the folder chooser for packages. An image opens as a new document of its size with the image as its only
+layer, or imports as a layer when dropped on a document that is already open. Anything openable also
+works dropped on the empty window, passed on the command line, or opened from a file manager once
+`install.sh` has registered the types.
+
+**Photoshop files.** File has Export PSD, and a `.psd` opens through Open, a drop or the command line. The reader and writer are in `src/psd.rs`, with no outside library:
 8-bit RGB with layers, folders (nested), layer and folder masks, opacity, the thirteen blend modes, hidden
 layers, clipping and the document resolution all carry across. Export bakes each layer's position, scale,
 rotation and flips into pixels at its document placement (PSD has no live transforms), so a round trip

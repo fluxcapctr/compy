@@ -18,6 +18,9 @@ struct Entry<S> {
     name: String,
     before: S,
     after: S,
+    /// The revisions the two states carried, so returning to a saved state reads as unmodified.
+    revision_before: u64,
+    revision_after: u64,
 }
 
 impl<S: Clone + PartialEq> History<S> {
@@ -38,6 +41,14 @@ impl<S: Clone + PartialEq> History<S> {
         self.depth += 1;
     }
 
+    /// Abandons the edit in progress, returning the state it started from when the outermost edit ends.
+    pub fn cancel(&mut self) -> Option<S> {
+        if self.depth == 0 { return None; }
+        self.depth -= 1;
+        if self.depth > 0 { return None; }
+        self.pending.take().map(|(_, before)| before)
+    }
+
     /// Ends an edit. An edit that changed nothing leaves history (and redo) alone. `bytes` measures what a
     /// list of states retains beyond `current`, for the byte budget.
     pub fn end(&mut self, state: S, bytes: impl Fn(&[&S], &S) -> usize) {
@@ -46,9 +57,10 @@ impl<S: Clone + PartialEq> History<S> {
         if self.depth > 0 { return; }
         let Some((name, before)) = self.pending.take() else { return };
         if before == state { return; }
+        let revision_before = self.revision;
         self.revision = self.next;
         self.next += 1;
-        self.past.push(Entry { name, before, after: state.clone() });
+        self.past.push(Entry { name, before, after: state.clone(), revision_before, revision_after: self.revision });
         self.future.clear();
         self.trim(&state, bytes);
     }
@@ -57,9 +69,8 @@ impl<S: Clone + PartialEq> History<S> {
         if !self.can_undo() { return None; }
         let entry = self.past.pop()?;
         let state = entry.before.clone();
+        self.revision = entry.revision_before;
         self.future.push(entry);
-        self.revision = self.next;
-        self.next += 1;
         Some(state)
     }
 
@@ -67,9 +78,8 @@ impl<S: Clone + PartialEq> History<S> {
         if !self.can_redo() { return None; }
         let entry = self.future.pop()?;
         let state = entry.after.clone();
+        self.revision = entry.revision_after;
         self.past.push(entry);
-        self.revision = self.next;
-        self.next += 1;
         Some(state)
     }
 

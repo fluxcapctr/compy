@@ -18,7 +18,8 @@ pub fn manifest(m: &Manifest) -> Result<(), ProjectError> {
     for layer in &m.layers {
         if let Some(adjustment) = &layer.adjustment {
             if m.version < 7 || layer.is_group() || layer.image_file.is_some()
-                || !ADJUSTMENT_KINDS.contains(&adjustment.kind.as_str()) {
+                || !ADJUSTMENT_KINDS.contains(&adjustment.kind.as_str())
+                || !crate::filters::Adjustment::record_is_valid(adjustment) {
                 return Err(ProjectError::Invalid);
             }
         }

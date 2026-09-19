@@ -386,16 +386,28 @@ pub fn default_band(range: &str) -> HueBand {
 
 /// Hue/Saturation as Photoshop's Cmd+U: per-range hue shift, saturation and lightness, weighted by how
 /// strongly each range's band claims a pixel's hue, or Colorize (`HueSaturationSettings`).
+/// A Swift `[ColorRange: T]` dictionary: encoded as a flat array of alternating keys and values (the enum is
+/// not `CodingKeyRepresentable`), though a JSON object is accepted too.
+fn keyed_entries(value: Option<&serde_json::Value>) -> Vec<(String, serde_json::Value)> {
+    match value {
+        Some(serde_json::Value::Array(items)) => items.chunks_exact(2).filter_map(|pair| pair[0].as_str().map(|k| (k.to_string(), pair[1].clone()))).collect(),
+        Some(serde_json::Value::Object(map)) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HueSaturation {
     /// Which range the sliders edit (and Colorize reads).
     pub range: String,
     pub colorize: bool,
+    /// Applies the selected range to everything outside its band instead.
+    pub invert_range: bool,
     /// (hue, saturation, lightness) per range name.
     pub adjustments: Vec<(String, [f64; 3])>,
     pub bands: Vec<(String, HueBand)>,
 }
-impl Default for HueSaturation { fn default() -> Self { HueSaturation { range: "Master".into(), colorize: false, adjustments: Vec::new(), bands: Vec::new() } } }
+impl Default for HueSaturation { fn default() -> Self { HueSaturation { range: "Master".into(), colorize: false, invert_range: false, adjustments: Vec::new(), bands: Vec::new() } } }
 impl HueSaturation {
     pub fn adjustment(&self, range: &str) -> [f64; 3] { self.adjustments.iter().find(|(r, _)| r == range).map(|(_, a)| *a).unwrap_or([0.0; 3]) }
     pub fn set_adjustment(&mut self, range: &str, value: [f64; 3]) {
@@ -403,7 +415,11 @@ impl HueSaturation {
     }
     pub fn band(&self, range: &str) -> HueBand { self.bands.iter().find(|(r, _)| r == range).map(|(_, b)| *b).unwrap_or_else(|| default_band(range)) }
     pub fn is_identity(&self) -> bool { !self.colorize && self.adjustments.iter().all(|(_, a)| *a == [0.0; 3]) }
-    fn weight(&self, range: &str, hue: f64) -> f64 { self.band(range).weight(hue) }
+    fn weight(&self, range: &str, hue: f64) -> f64 {
+        if range == "Master" { return 1.0; }
+        let weight = self.band(range).weight(hue);
+        if self.invert_range && range == self.range { 1.0 - weight } else { weight }
+    }
     /// How much every range shifts a given hue, sampled once per degree.
     fn response(&self) -> Vec<[f64; 3]> {
         (0..=360).map(|degree| {
@@ -579,12 +595,9 @@ impl Adjustment {
                     Some(v) => {
                         hs.range = v.get("range").and_then(Value::as_str).unwrap_or("Master").to_string();
                         hs.colorize = v.get("colorize").and_then(Value::as_bool).unwrap_or(hs.colorize);
-                        if let Some(adj) = v.get("adjustments").and_then(Value::as_object) {
-                            for (range, a) in adj { hs.adjustments.push((range.clone(), [num(a.get("hue"), 0.0), num(a.get("saturation"), 0.0), num(a.get("lightness"), 0.0)])); }
-                        }
-                        if let Some(bands) = v.get("bands").and_then(Value::as_object) {
-                            for (range, b) in bands { hs.bands.push((range.clone(), HueBand { falloff_start: num(b.get("falloffStart"), 0.0), range_start: num(b.get("rangeStart"), 0.0), range_end: num(b.get("rangeEnd"), 360.0), falloff_end: num(b.get("falloffEnd"), 360.0) })); }
-                        }
+                        hs.invert_range = v.get("invertRange").and_then(Value::as_bool).unwrap_or(false);
+                        for (range, a) in keyed_entries(v.get("adjustments")) { hs.adjustments.push((range, [num(a.get("hue"), 0.0), num(a.get("saturation"), 0.0), num(a.get("lightness"), 0.0)])); }
+                        for (range, b) in keyed_entries(v.get("bands")) { hs.bands.push((range, HueBand { falloff_start: num(b.get("falloffStart"), 0.0), range_start: num(b.get("rangeStart"), 0.0), range_end: num(b.get("rangeEnd"), 360.0), falloff_end: num(b.get("falloffEnd"), 360.0) })); }
                     }
                     None => hs.adjustments.push(("Master".into(), [num(s.get("hue"), 0.0), num(s.get("saturation"), 0.0), num(s.get("lightness"), 0.0)])),
                 }
@@ -592,6 +605,44 @@ impl Adjustment {
             }
             _ => return None,
         })
+    }
+
+    /// Every setting the record carries is within the reference's `LayerAdjustment.isValid` bounds. Missing
+    /// fields pass (they take defaults); present ones must be in range.
+    pub fn record_is_valid(record: &crate::format::Adjustment) -> bool {
+        use serde_json::Value;
+        let s = &record.settings;
+        let finite = |v: Option<&Value>| v.is_none_or(|v| v.as_f64().is_some_and(f64::is_finite));
+        let within = |v: Option<&Value>, lo: f64, hi: f64| v.is_none_or(|v| v.as_f64().is_some_and(|n| n.is_finite() && (lo..=hi).contains(&n)));
+        let mut ok = within(s.get("hue"), -360.0, 360.0) && within(s.get("saturation"), -100.0, 100.0) && within(s.get("lightness"), -100.0, 100.0);
+        if let Some(v) = s.get("hsvSettings") {
+            ok &= keyed_entries(v.get("adjustments")).into_iter().all(|(_, a)| within(a.get("hue"), -360.0, 360.0) && within(a.get("saturation"), -100.0, 100.0) && within(a.get("lightness"), -100.0, 100.0));
+            ok &= keyed_entries(v.get("bands")).into_iter().all(|(_, b)| ["falloffStart", "rangeStart", "rangeEnd", "falloffEnd"].iter().all(|k| finite(b.get(*k))));
+        }
+        if let Some(ranges) = s.get("levels").and_then(|l| l.get("ranges")) {
+            let Some(ranges) = ranges.as_array() else { return false };
+            ok &= ranges.len() == 4 && ranges.iter().all(|r| {
+                let n = |k: &str, d: f64| r.get(k).and_then(Value::as_f64).unwrap_or(d);
+                let range = Range { black: n("black", 0.0), gamma: n("gamma", 1.0), white: n("white", 255.0), output_black: n("outputBlack", 0.0), output_white: n("outputWhite", 255.0) };
+                range == range.normalized()
+            });
+        }
+        if let Some(channels) = s.get("curves").and_then(|c| c.get("channels")) {
+            let Some(channels) = channels.as_array() else { return false };
+            ok &= channels.len() == 4 && channels.iter().all(|ch| {
+                let Some(points) = ch.as_array() else { return false };
+                let pts: Vec<(f64, f64)> = points.iter().map(|p| (p.get("x").and_then(Value::as_f64).unwrap_or(f64::NAN), p.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN))).collect();
+                (2..=32).contains(&pts.len()) && pts[0].0 == 0.0 && pts[pts.len() - 1].0 == 255.0
+                    && pts.iter().all(|p| p.0.is_finite() && p.1.is_finite() && (0.0..=255.0).contains(&p.0) && (0.0..=255.0).contains(&p.1))
+                    && pts.windows(2).all(|w| w[0].0 < w[1].0)
+            });
+        }
+        if let Some(e) = s.get("exposureSettings") { ok &= within(e.get("exposure"), -20.0, 20.0) && within(e.get("offset"), -0.5, 0.5) && within(e.get("gamma"), 0.01, 9.99); }
+        if let Some(g) = s.get("gradientMapSettings") {
+            for key in ["shadows", "highlights"] { if let Some(c) = g.get(key) { ok &= ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0)); } }
+        }
+        if let Some(g) = s.get("grainSettings") { ok &= within(g.get("amount"), 0.0, 100.0) && within(g.get("size"), 0.5, 20.0) && within(g.get("roughness"), 0.0, 100.0); }
+        ok
     }
 
     /// The file record: the kind and every setting, in the reference app's field names.
@@ -611,9 +662,10 @@ impl Adjustment {
             Adjustment::HueSaturation(h) => {
                 let master = h.adjustment("Master");
                 settings.insert("hue".into(), json!(master[0])); settings.insert("saturation".into(), json!(master[1])); settings.insert("lightness".into(), json!(master[2])); settings.insert("colorize".into(), json!(h.colorize));
-                let adjustments: Map<String, Value> = h.adjustments.iter().map(|(r, a)| (r.clone(), json!({"hue": a[0], "saturation": a[1], "lightness": a[2]}))).collect();
-                let bands: Map<String, Value> = COLOR_RANGES.iter().map(|r| { let b = h.band(r); (r.to_string(), json!({"falloffStart": b.falloff_start, "rangeStart": b.range_start, "rangeEnd": b.range_end, "falloffEnd": b.falloff_end})) }).collect();
-                settings.insert("hsvSettings".into(), json!({"range": h.range, "colorize": h.colorize, "invertRange": false, "adjustments": adjustments, "bands": bands}));
+                // Swift encodes a dictionary keyed by the ColorRange enum as a flat array of key, value, key, value.
+                let adjustments: Vec<Value> = h.adjustments.iter().flat_map(|(r, a)| [json!(r), json!({"hue": a[0], "saturation": a[1], "lightness": a[2]})]).collect();
+                let bands: Vec<Value> = COLOR_RANGES.iter().flat_map(|r| { let b = h.band(r); [json!(r), json!({"falloffStart": b.falloff_start, "rangeStart": b.range_start, "rangeEnd": b.range_end, "falloffEnd": b.falloff_end})] }).collect();
+                settings.insert("hsvSettings".into(), json!({"range": h.range, "colorize": h.colorize, "invertRange": h.invert_range, "adjustments": adjustments, "bands": bands}));
             }
         }
         crate::format::Adjustment { kind: self.kind_name().to_string(), settings }

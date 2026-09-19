@@ -178,7 +178,14 @@ impl Renderer {
     /// Replaces a layer's pixels. The old surface stays valid for anyone (undo history) still holding it.
     pub fn set_image(&mut self, id: Uuid, surface: ImageSurface) { self.touch();
         self.images.insert(id, surface);
+        self.ensure_image_record(id);
         self.invalidate(id);
+    }
+
+    /// A layer that has pixels saves them: the record names the image file whenever a surface exists.
+    fn ensure_image_record(&mut self, id: Uuid) {
+        let i = self.index[&id];
+        if self.layers[i].image_file.is_none() { self.layers[i].image_file = Some(format!("{}.png", crate::format::upper(id))); }
     }
 
     /// Shows `surface` instead of the layer's pixels until cleared; the same size as they are, ideally.
@@ -264,6 +271,7 @@ impl Renderer {
         self.halved.retain(|(l, source, _), _| !(*l == id && *source == Source::Preview));
         for (k, s) in moved { self.halved.insert((id, Source::Image, k), s); }
         self.images.insert(id, surface);
+        self.ensure_image_record(id);
         self.thumbnails.retain(|(l, _), _| *l != id);
         self.placed.retain(|(l, _), _| *l != id);
         true
@@ -296,6 +304,7 @@ impl Renderer {
         }
         self.set_preview(id, None);
         self.images.insert(id, image);
+        self.ensure_image_record(id);
         self.invalidate(id);
         for (k, s) in levels { self.halved.insert((id, Source::Image, k), s); }
         Ok(true)
@@ -406,6 +415,12 @@ impl Renderer {
         for id in ids {
             let same = |a: Option<&ImageSurface>, b: Option<&ImageSurface>| match (a, b) { (Some(x), Some(y)) => x.to_raw_none() == y.to_raw_none(), (None, None) => true, _ => false };
             if !same(self.images.get(&id), state.images.get(&id)) || !same(self.masks.get(&id), state.masks.get(&id)) { self.invalidate(id); }
+        }
+        // Placed masks depend on the layer's geometry too, which a snapshot can change without touching pixels.
+        let before: HashMap<Uuid, &Layer> = self.layers.iter().map(|l| (l.id, l)).collect();
+        for layer in &state.layers {
+            let changed = before.get(&layer.id).is_none_or(|old| old.transform != layer.transform || old.mask_placement != layer.mask_placement || old.mask_linked != layer.mask_linked);
+            if changed { self.placed.retain(|(l, _), _| *l != layer.id); }
         }
         self.layers = state.layers.clone();
         self.images = state.images.clone();
@@ -602,7 +617,7 @@ impl Renderer {
             let ccr = Context::new(&coverage)?;
             ccr.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -region.x as f64, -region.y as f64)));
             let mut masks: Vec<(Uuid, Transform)> = folders.iter().map(|f| (f.id, f.transform)).collect();
-            if layer.mask_enabled() && self.masks.contains_key(&id) { masks.push((id, layer.transform)); }
+            if layer.mask_enabled() && self.masks.contains_key(&id) { masks.push((id, layer.mask_placement.unwrap_or(layer.transform))); }
             let device = device_scale(cr);
             for (mask_id, t) in masks {
                 let (source, level, ws, hs) = self.reduced(mask_id, Source::Mask, t.size.0 * device, t.sampling)?;
@@ -612,7 +627,13 @@ impl Renderer {
                 place(&ccr, &t);
                 let rect = (-t.size.0 / 2.0, -t.size.1 / 2.0, t.size.0 * ws, t.size.1 * hs);
                 let pattern = pattern_over(&source, rect, filter);
-                ccr.set_source(&pattern)?;
+                // Zero beyond the mask's rectangle, as FolderMaskClip clips: the padded edge must not leak.
+                ccr.push_group();
+                ccr.rectangle(rect.0, rect.1, rect.2, rect.3);
+                ccr.clip();
+                ccr.mask(&pattern)?;
+                ccr.reset_clip();
+                ccr.pop_group_to_source()?;
                 ccr.set_operator(Operator::In);
                 ccr.paint()?;
                 ccr.restore()?;

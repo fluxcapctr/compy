@@ -113,6 +113,23 @@ fn opens_a_psd_written_by_imagemagick() {
 }
 
 #[test]
+fn opens_images_as_documents() {
+    for (ext, color, expected) in [("png", "#ff0000", RED), ("jpg", "#0000ff", BLUE), ("gif", "#ffffff", WHITE), ("webp", "#ff0000", RED), ("bmp", "#0000ff", BLUE)] {
+        let path = temp(&format!("open.{ext}"));
+        let Ok(status) = Command::new("magick").args(["-size", "12x8", &format!("xc:{color}")]).arg(&path).status() else { return };
+        assert!(status.success(), "{ext}");
+        let mut document = Document::open_image(&path).unwrap_or_else(|e| panic!("{ext}: {e:#}"));
+        assert_eq!((document.width(), document.height()), (12, 8), "{ext}");
+        assert_eq!(document.renderer.layers().len(), 1);
+        assert!(document.renderer.layers()[0].name.ends_with("-open"), "{ext}");
+        assert!(!document.is_modified());
+        let (pixels, w) = flat(&mut document);
+        assert_pixel(&pixels, w, 3, 3, expected, 3);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[test]
 fn refuses_what_it_cannot_read() {
     let path = temp("cmyk.psd");
     let Ok(status) = Command::new("magick").args(["-size", "8x8", "xc:red", "-colorspace", "CMYK"]).arg(&path).status() else { return };

@@ -195,14 +195,21 @@ pub fn open_image(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'sta
     dialog.open(Some(parent), gio::Cancellable::NONE, move |result| { if let Ok(file) = result { if let Some(path) = file.path() { done(path); } } });
 }
 
-/// A file chooser for Photoshop files.
-pub fn open_psd(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'static) {
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some("Photoshop (PSD)"));
-    for pattern in ["*.psd", "*.PSD"] { filter.add_pattern(pattern); }
+/// A file chooser for everything that opens as a document: images, Photoshop files, and a `.comp` package
+/// picked by its `manifest.json` (a folder chooser for packages is under Open Project Folder).
+pub fn open_file(parent: &gtk::Window, done: impl Fn(std::path::PathBuf) + 'static) {
+    let all = gtk::FileFilter::new();
+    all.set_name(Some("Images, Photoshop and Compositor files"));
+    let images = gtk::FileFilter::new();
+    images.set_name(Some("Images (PNG, JPEG, TIFF, GIF, WebP, BMP)"));
+    for ext in super::IMAGE_EXTENSIONS { for f in [&all, &images] { f.add_pattern(&format!("*.{ext}")); f.add_pattern(&format!("*.{}", ext.to_uppercase())); } }
+    let psd = gtk::FileFilter::new();
+    psd.set_name(Some("Photoshop (PSD)"));
+    for pattern in ["*.psd", "*.PSD"] { psd.add_pattern(pattern); all.add_pattern(pattern); }
+    all.add_pattern("manifest.json");
     let filters = gio::ListStore::new::<gtk::FileFilter>();
-    filters.append(&filter);
-    let dialog = gtk::FileDialog::builder().title("Open PSD").modal(true).filters(&filters).build();
+    for f in [&all, &images, &psd] { filters.append(f); }
+    let dialog = gtk::FileDialog::builder().title("Open").modal(true).filters(&filters).build();
     dialog.open(Some(parent), gio::Cancellable::NONE, move |result| { if let Ok(file) = result { if let Some(path) = file.path() { done(path); } } });
 }
 

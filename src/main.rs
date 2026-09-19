@@ -1,4 +1,4 @@
-//! `compositor [project.comp | file.psd ...]` opens the app; `compositor info <project.comp>` lists the layer tree;
+//! `compositor [project.comp | file.psd | image ...]` opens the app; `compositor info <project.comp>` lists the layer tree;
 //! `compositor render <project.comp> <out.png>` flattens the project to a PNG.
 
 use anyhow::{Context as _, Result, bail};
@@ -47,7 +47,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  compositor [project.comp | file.psd ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way";
+const USAGE: &str = "usage:\n  compositor [project.comp | file.psd | image.png ...]  open the app\n  compositor info <project.comp>           list the layer tree\n  compositor render <project.comp> <out.png>\n  compositor psd <in.comp|in.psd> <out.psd|out.comp>   convert either way";
 
 fn info(path: &Path) -> Result<()> {
     let project = format::load(path).with_context(|| format!("loading {}", path.display()))?;

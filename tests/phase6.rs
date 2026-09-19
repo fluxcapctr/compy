@@ -203,11 +203,17 @@ fn adjustment_layers_render_beneath_them() {
     assert!(p[0] > 200 && p[1] < 150 && p[1] == p[2], "colorize at hue 0 makes a light gray a light red: {p:?}");
     let mut hs = filters::HueSaturation::default();
     hs.set_adjustment("Reds", [120.0, 0.0, 0.0]);
-    d.set_adjustment(id, &Adjustment::HueSaturation(hs), true);
+    d.set_adjustment(id, &Adjustment::HueSaturation(hs.clone()), true);
     assert!(close(flat(&mut d)[0], gray(192), 1), "a Reds shift leaves gray alone");
     // Round trip through the file record.
     let record = d.renderer.layer(id).adjustment.clone().unwrap();
-    assert_eq!(Adjustment::from_record(&record).unwrap(), d.adjustment(id).unwrap());
+    let Adjustment::HueSaturation(decoded) = Adjustment::from_record(&record).unwrap() else { panic!("kind") };
+    assert_eq!(decoded.adjustments, hs.adjustments, "the ranges set come back");
+    assert!(decoded.bands.len() == 7 && decoded.bands.iter().all(|(r, b)| *b == filters::default_band(r)), "bands are the defaults");
+    // The record is in Swift's shape: dictionaries keyed by the ColorRange enum are flat key, value arrays.
+    let adjustments = record.settings["hsvSettings"]["adjustments"].as_array().expect("flat array");
+    assert_eq!(adjustments[0], serde_json::json!("Reds"));
+    assert_eq!(adjustments[1]["hue"], serde_json::json!(120.0));
     assert_eq!(d.undo_name(), Some("Hue/Saturation Adjustment"));
 }
 

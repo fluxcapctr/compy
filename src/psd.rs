@@ -128,6 +128,15 @@ fn read_channel(r: &mut Reader, rows: usize, cols: usize, depth: u16, compressio
     })
 }
 
+/// A layer or mask rectangle's rows and columns, refusing inverted, oversized or absurdly placed ones.
+fn rect_dims(top: i32, left: i32, bottom: i32, right: i32) -> Result<(usize, usize)> {
+    const REACH: u32 = 1 << 24;
+    if [top, left, bottom, right].iter().any(|v| v.unsigned_abs() > REACH) { bail!("a layer rectangle is out of range"); }
+    let rows = bottom.checked_sub(top).filter(|v| (0..=30_000).contains(v)).ok_or_else(|| anyhow::anyhow!("a layer rectangle is inverted or taller than 30,000 pixels"))?;
+    let cols = right.checked_sub(left).filter(|v| (0..=30_000).contains(v)).ok_or_else(|| anyhow::anyhow!("a layer rectangle is inverted or wider than 30,000 pixels"))?;
+    Ok((rows as usize, cols as usize))
+}
+
 fn pascal_string(r: &mut Reader, pad: usize) -> Result<String> {
     let len = r.u8()? as usize;
     let text = String::from_utf8_lossy(r.bytes(len)?).to_string();
@@ -147,6 +156,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
     if version != 1 { bail!("Unknown PSD version {version}."); }
     r.skip(6)?;
     let channels = r.u16()? as usize;
+    if !(1..=56).contains(&channels) { bail!("The file declares {channels} channels; 1 to 56 are valid."); }
     let height = r.u32()? as i32;
     let width = r.u32()? as i32;
     let depth = r.u16()?;
@@ -154,6 +164,11 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
     if !(1..=30_000).contains(&width) || !(1..=30_000).contains(&height) { bail!("The canvas is {width} x {height}; sides run from 1 to 30,000 pixels."); }
     match mode { 1 | 3 => {} 0 => bail!("Bitmap mode files are not supported."), 2 => bail!("Indexed color files are not supported; convert to RGB first."), 4 => bail!("CMYK files are not supported; convert to RGB first."), 7 | 8 => bail!("Multichannel and Duotone files are not supported."), 9 => bail!("Lab files are not supported; convert to RGB first."), other => bail!("Color mode {other} is not supported.") }
     if ![8, 16, 32].contains(&depth) { bail!("{depth}-bit files are not supported."); }
+    if mode == 3 && channels < 3 { bail!("An RGB file needs at least three channels; this one declares {channels}."); }
+    if width as i64 * height as i64 > 100_000_000 { bail!("The canvas is {width} x {height}, past the 100-megapixel budget."); }
+    let sample_bytes = (depth as usize / 8).max(1);
+    // Everything decoded, in samples, counted before any buffer is made.
+    let mut samples_budget: usize = 400_000_000;
     let mut warnings = Vec::new();
     if depth != 8 { warnings.push(format!("The file is {depth}-bit; it was opened at 8 bits per channel.")); }
     let color_mode_len = r.u32()? as usize;
@@ -184,12 +199,18 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
         let layer_info_len = r.u32()? as usize;
         if layer_info_len > 0 {
             let count = r.i16()?.unsigned_abs() as usize;
-            let mut records = Vec::with_capacity(count);
+            let mut records = Vec::with_capacity(count.min(1024));
             for _ in 0..count {
                 let (top, left, bottom, right) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+                rect_dims(top, left, bottom, right)?;
                 let channel_count = r.u16()? as usize;
+                if channel_count > 56 { bail!("a layer declares {channel_count} channels"); }
                 let mut channel_specs = Vec::with_capacity(channel_count);
-                for _ in 0..channel_count { channel_specs.push((r.i16()?, r.u32()? as usize)); }
+                for _ in 0..channel_count {
+                    let spec = (r.i16()?, r.u32()? as usize);
+                    if spec.1 > data.len() { bail!("a channel claims more data than the file holds"); }
+                    channel_specs.push(spec);
+                }
                 if r.bytes(4)? != b"8BIM" { bail!("a layer record is damaged"); }
                 let key: [u8; 4] = r.bytes(4)?.try_into().unwrap();
                 // ImageMagick writes "norm" byte-reversed; treat it as Normal.
@@ -205,6 +226,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 if mask_len >= 20 {
                     let mask_start = r.pos;
                     let (mt, ml, mb, mr) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+                    rect_dims(mt, ml, mb, mr)?;
                     let default = r.u8()?;
                     let mflags = r.u8()?;
                     mask = Some((mt, ml, mb, mr, default, mflags));
@@ -244,10 +266,15 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 for (id, len) in channel_specs {
                     let start = r.pos;
                     let (rows, cols) = if id == -2 {
-                        match mask { Some((mt, ml, mb, mr, _, _)) => ((mb - mt).max(0) as usize, (mr - ml).max(0) as usize), None => (0, 0) }
-                    } else { ((bottom - top).max(0) as usize, (right - left).max(0) as usize) };
+                        match mask { Some((mt, ml, mb, mr, _, _)) => rect_dims(mt, ml, mb, mr)?, None => (0, 0) }
+                    } else { rect_dims(top, left, bottom, right)? };
                     if len < 2 || rows == 0 || cols == 0 { r.pos = start + len; continue; }
+                    if len > data.len() - start { bail!("layer \"{name}\" channel {id} runs past the end of the file"); }
                     let compression = r.u16()?;
+                    // Enough declared bytes for what the channel claims to hold, and a share of the budget.
+                    let needed = match compression { 0 => rows * cols * sample_bytes, 1 => rows * 2, _ => 0 } + 2;
+                    if len < needed { bail!("layer \"{name}\" channel {id} is truncated"); }
+                    samples_budget = samples_budget.checked_sub(rows * cols).ok_or_else(|| anyhow::anyhow!("The file's layers exceed the decoding budget."))?;
                     let samples = read_channel(&mut r, rows, cols, depth, compression).with_context(|| format!("layer \"{name}\" channel {id}"))?;
                     channels.push((id, samples));
                     r.pos = start + len;
@@ -265,7 +292,10 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
     if raw_layers.is_empty() {
         let compression = r.u16()?;
         let (rows, cols) = (height as usize, width as usize);
-        let bytes = (depth as usize / 8).max(1);
+        let bytes = sample_bytes;
+        let needed = match compression { 0 => rows * cols * bytes * channels, 1 => rows * channels * 2, _ => 0 };
+        if data.len() - r.pos < needed { bail!("The merged image is truncated."); }
+        samples_budget.checked_sub(rows * cols * channels).ok_or_else(|| anyhow::anyhow!("The merged image exceeds the decoding budget."))?;
         let mut planes: Vec<Vec<u8>> = Vec::new();
         match compression {
             0 => { for _ in 0..channels { planes.push(read_channel(&mut r, rows, cols, depth, 0)?); } }

@@ -102,6 +102,12 @@ impl Doc {
 /// Opens a `.comp` package or a `.psd` file. A PSD opens as a new untitled-at-path document (it saves as
 /// `.comp`); the notes say what the PSD had that was not carried over.
 pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
+    let path = if path.file_name().is_some_and(|n| n == "manifest.json") { path.parent().unwrap_or(path) } else { path };
+    if is_image(path) {
+        let document = Document::open_image(path).with_context(|| format!("opening {}", path.display()))?;
+        let title = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
+        return Ok((Doc::from(document, &title), Vec::new()));
+    }
     if is_psd(path) {
         let (document, notes) = Document::open_psd(path).with_context(|| format!("opening {}", path.display()))?;
         let title = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
@@ -116,6 +122,15 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
+
+pub const IMAGE_EXTENSIONS: [&str; 9] = ["png", "jpg", "jpeg", "tif", "tiff", "gif", "webp", "bmp", "jpe"];
+
+pub fn is_image(path: &Path) -> bool {
+    path.is_file() && path.extension().is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Anything the app opens as a document: a `.comp` package (or its manifest), a PSD, or an image.
+pub fn is_openable(path: &Path) -> bool { dialogs::is_project(path) || path.file_name().is_some_and(|n| n == "manifest.json") || is_psd(path) || is_image(path) }
 
 /// Scripted checks: a zoom to set, a wand click to make (document pixels), and a PNG to save the window to
 /// before quitting.
@@ -202,7 +217,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     window.set_titlebar(Some(&header));
 
     let notebook = gtk::Notebook::builder().scrollable(true).show_border(false).build();
-    let empty = gtk::Label::builder().label("Open a .comp project to begin (Ctrl+O).")
+    let empty = gtk::Label::builder().label("Open an image, a Photoshop file or a .comp project to begin (Ctrl+O), or drop one here.")
         .justify(gtk::Justification::Center).css_classes(["dim-label"]).vexpand(true).hexpand(true).build();
     let stack = gtk::Stack::new();
     stack.add_named(&empty, Some("empty"));
@@ -244,8 +259,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     window.add_controller(keys);
 
     let actions: [(&str, &[&str], fn(&Rc<App>)); 44] = [
-        ("open", &["<Control>o"], |s| s.choose_and_open()),
-        ("open-psd", &["<Control><Alt>o"], |s| { let state = s.clone(); dialogs::open_psd(s.window.upcast_ref(), move |path| state.open_path(&path)); }),
+        ("open", &["<Control>o"], |s| { let state = s.clone(); dialogs::open_file(s.window.upcast_ref(), move |path| state.open_path(&path)); }),
+        ("open-project", &["<Control><Shift>o"], |s| s.choose_and_open()),
         ("export-psd", &[], |s| s.export_psd()),
         ("close-tab", &["<Control>w"], |s| s.close_current()),
         ("zoom-in", &["<Control>equal", "<Control>plus", "<Control>KP_Add"], |s| s.with_current(|p| p.canvas.zoom_by(2.0))),
@@ -327,9 +342,10 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         target.connect_drop(move |_, value, _, _| {
             let Ok(file) = value.get::<gio::File>() else { return false };
             let Some(path) = file.path() else { return false };
-            if dialogs::is_project(&path) || is_psd(&path) { state.open_path(&path); }
-            else if state.notebook.current_page().is_some() { state.edit(|d| d.import_image(&path).map(|_| ())); }
-            else { state.alert("Not a Compositor project", "Open a project first, then drop images to import them as layers."); }
+            // Images import as a layer when a document is open, and open as their own document otherwise.
+            if is_image(&path) && state.notebook.current_page().is_some() { state.edit(|d| d.import_image(&path).map(|_| ())); }
+            else if is_openable(&path) { state.open_path(&path); }
+            else { state.alert("Cannot open this file", "Compositor opens .comp projects, Photoshop files, and PNG, JPEG, TIFF, GIF, WebP and BMP images."); }
             true
         });
         window.add_controller(target);
@@ -358,7 +374,7 @@ fn menu() -> gio::Menu {
     let file = gio::Menu::new();
     file.append(Some("New Canvas…"), Some("win.new"));
     file.append(Some("Open…"), Some("win.open"));
-    file.append(Some("Open PSD…"), Some("win.open-psd"));
+    file.append(Some("Open Project Folder…"), Some("win.open-project"));
     file.append(Some("Save"), Some("win.save"));
     file.append(Some("Save As…"), Some("win.save-as"));
     file.append(Some("Import Image…"), Some("win.import"));
