@@ -6,6 +6,7 @@ mod canvas;
 pub mod color_wheel;
 mod dialogs;
 mod filter_dialog;
+mod genfill;
 mod icons;
 mod layers;
 pub mod theme;
@@ -181,6 +182,8 @@ pub struct Script {
     /// A brush preset to paint the scripted stroke with, by name.
     pub brush: Option<String>,
     pub rulers: bool,
+    /// Opens the Generative Fill panel (after the wand selection) for a screenshot.
+    pub genfill: bool,
     /// A window size to ask for (tiling compositors may override it).
     pub window: Option<(i32, i32)>,
     /// An adjustment layer to add and open for editing.
@@ -194,7 +197,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -213,6 +216,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if !script.stroke.is_empty() { p.canvas.scripted_stroke(&script.stroke); }
                 });
                 if let Some(kind) = script.filter { state.open_filter(kind); }
+                if script.genfill { state.open_genfill(false); }
                 if let Some(kind) = script.adjustment.clone() { state.edit(|d| { d.add_adjustment(&kind); Ok(()) }); state.edit_adjustment(); }
             });
         }
@@ -303,7 +307,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     window.add_controller(keys);
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 60] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 62] = [
+        ("generative-fill", &["<Control><Shift>g"], |s| s.open_genfill(false)),
+        ("generative-expand", &[], |s| s.generative_expand()),
         ("toggle-rulers", &["<Control>r"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.rulers = !d.rulers; } p.canvas.area.queue_draw(); })),
         ("swap-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('x'); })),
         ("default-colors", &[], |s| s.with_current(|p| { p.canvas.brush_key('d'); })),
@@ -468,6 +474,7 @@ fn menu() -> gio::Menu {
     edit.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
     edit.append(Some("Fill with Background"), Some("win.fill-background"));
     edit.append(Some("Clear"), Some("win.clear"));
+    edit.append(Some("Generative Fill…"), Some("win.generative-fill"));
     menu.append_submenu(Some("Edit"), &edit);
     let select = gio::Menu::new();
     select.append(Some("All"), Some("win.select-all"));
@@ -513,6 +520,7 @@ fn menu() -> gio::Menu {
     image.append(Some("Invert"), Some("win.invert"));
     image.append(Some("Flip Canvas Horizontal"), Some("win.flip-canvas-horizontal"));
     image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
+    image.append(Some("Generative Expand…"), Some("win.generative-expand"));
     image.append(Some("Rulers"), Some("win.toggle-rulers"));
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
@@ -635,6 +643,33 @@ impl App {
         });
         self.update_tab_titles();
         if let Some(detail) = failure { self.alert("Could not apply", &detail); }
+    }
+
+    /// The Generative Fill panel over the current selection.
+    fn open_genfill(self: &Rc<Self>, expand: bool) {
+        let mut opened = false;
+        self.with_current(|p| {
+            let doc = p.canvas.doc().clone();
+            if doc.borrow().document.genfill_window().is_err() { return; }
+            let (panel, area) = (p.panel.clone(), p.canvas.area.clone());
+            let finished: Rc<dyn Fn()> = Rc::new(move || { panel.rebuild(); area.queue_draw(); });
+            genfill::GenFill::open(self.window.upcast_ref(), doc, finished, expand);
+            opened = true;
+        });
+        if !opened && self.notebook.current_page().is_some() { self.alert("Select an area first", "Generative Fill paints inside a selection. Make one with the Marquee, Lasso or Wand, then try again."); }
+    }
+
+    /// Generative Expand: a Canvas Size dialog that grows the canvas, selects the new margin, then opens the
+    /// fill panel on it.
+    fn generative_expand(self: &Rc<Self>) {
+        let state = self.clone();
+        let Some((w, h)) = self.current_size() else { return };
+        dialogs::canvas_size(self.window.upcast_ref(), (w, h), move |nw, nh, anchor, _| {
+            let mut ok = true;
+            let s2 = state.clone();
+            state.edit(|d| { let r = d.expand_canvas_for_fill(nw, nh, anchor); ok = r.is_ok(); r });
+            if ok { s2.with_current(|p| p.canvas.fit()); s2.open_genfill(true); }
+        });
     }
 
     fn open_filter(self: &Rc<Self>, kind: Kind) {

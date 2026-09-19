@@ -162,6 +162,17 @@ library itself is downloaded when the app is built.
 
 **Import.** PNG, JPEG, TIFF, GIF, WebP, BMP and HEIC files, and pixels dragged out of other apps.
 
+**Generative Fill and Expand.** Edit > Generative Fill (Ctrl+Shift+G) with a selection opens a panel: a
+prompt, a fal.ai model, how many variations, Generate. The selection plus a margin of half its size (at
+least 96 px) is sent as an image and a white-on-black mask (inpainting), scaled to at most 1536 px; the
+results come back as thumbnails, and picking one lays it over the window as a new layer masked to the
+selection (picking another swaps its pixels). Image > Generative Expand grows the canvas with a Canvas Size
+dialog, selects the new margin, and opens the same panel on it. The key goes on the first line of
+`~/.config/compositor/fal.key` (or `FAL_KEY`); the model list lives in `~/.config/compositor/genfill-models.json`
+(FLUX.1 Fill [pro], FLUX.1 [dev] inpainting, Qwen Image Edit, Stable Diffusion inpainting by default; any
+fal model taking `image_url`, `mask_url` and `prompt` works). Only that window of pixels leaves the machine;
+each generation is billed by fal.
+
 **Rulers.** Ctrl+R (or Image > Rulers) shows rulers along the top and left of the canvas in document
 pixels, their steps following the zoom, with the pointer's position marked on each.
 
@@ -239,6 +250,7 @@ src/ui/brushes the brush presets and their picker
 src/distort   the perspective warp behind free distort
 src/heic      HEIC and HEIF decoding through libheif
 src/matte     Remove Background: the model run, the guided-filter refinement, the model download
+src/genfill   Generative Fill: the fal.ai queue client, request building, base64; the panel is src/ui/genfill
 tests/       fixture-built .comp packages with pixel-exact expectations
 reference/   the macOS app, as a submodule, read-only
 ```

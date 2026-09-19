@@ -457,6 +457,122 @@ impl Document {
         Ok(())
     }
 
+    // MARK: Generative Fill
+
+    /// The context window a generation works in: the selection's bounds grown by half their size each way
+    /// (at least 96 pixels), kept on the canvas.
+    pub fn genfill_window(&self) -> Result<(i32, i32, i32, i32)> {
+        let Some((x0, y0, x1, y1)) = self.selection.as_ref().and_then(|s| s.bounds) else { bail!("Select the area to fill first.") };
+        let (w, h) = ((x1 - x0) as f64, (y1 - y0) as f64);
+        let (mx, my) = ((w * crate::genfill::CONTEXT).max(crate::genfill::MIN_CONTEXT), (h * crate::genfill::CONTEXT).max(crate::genfill::MIN_CONTEXT));
+        let gx0 = ((x0 as f64 - mx).floor() as i32).max(0);
+        let gy0 = ((y0 as f64 - my).floor() as i32).max(0);
+        let gx1 = ((x1 as f64 + mx).ceil() as i32).min(self.width());
+        let gy1 = ((y1 as f64 + my).ceil() as i32).min(self.height());
+        Ok((gx0, gy0, gx1, gy1))
+    }
+
+    /// What goes to the model: the window's pixels (every visible layer, or the active layer alone) and the
+    /// selection as a white-on-black mask, both scaled to at most `MAX_SIDE`, as PNGs; and the scale used.
+    pub fn genfill_inputs(&mut self, composite: bool) -> Result<(Vec<u8>, Vec<u8>, (i32, i32, i32, i32), f64)> {
+        let window = self.genfill_window()?;
+        let (gx0, gy0, gx1, gy1) = window;
+        let (w, h) = (gx1 - gx0, gy1 - gy0);
+        if w < 1 || h < 1 { bail!("The selection is off the canvas."); }
+        let scale = (crate::genfill::MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
+        let (sw, sh) = (((w as f64 * scale).round() as i32).max(1), ((h as f64 * scale).round() as i32).max(1));
+        // The pixels, over an opaque neutral so transparency does not read as black to the model.
+        let image = new_argb(sw, sh)?;
+        {
+            let cr = Context::new(&image)?;
+            cr.set_source_rgb(0.5, 0.5, 0.5);
+            cr.paint()?;
+            cr.scale(sw as f64 / w as f64, sh as f64 / h as f64);
+            cr.translate(-(gx0 as f64), -(gy0 as f64));
+            cr.rectangle(gx0 as f64, gy0 as f64, w as f64, h as f64);
+            cr.clip();
+            if composite { self.renderer.draw(&cr)?; }
+            else if let Some(id) = self.active { if !self.renderer.layer(id).is_group() { self.renderer.draw_layer_plain(id, &cr)?; } }
+        }
+        let mask = new_argb(sw, sh)?;
+        {
+            let cr = Context::new(&mask)?;
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.paint()?;
+            cr.scale(sw as f64 / w as f64, sh as f64 / h as f64);
+            cr.translate(-(gx0 as f64), -(gy0 as f64));
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            if let Some(sel) = &self.selection { cr.mask_surface(&sel.mask, 0.0, 0.0)?; }
+        }
+        Ok((crate::png_io::png_bytes(&image)?, crate::png_io::png_bytes(&mask)?, window, scale))
+    }
+
+    /// A generated image laid over `window` as a new layer above the active one, shown only through the
+    /// selection (its mask), as one undo step. Returns the layer.
+    pub fn apply_genfill(&mut self, png: &[u8], window: (i32, i32, i32, i32), name: &str) -> Result<Uuid> {
+        let (surface, iw, ih) = Self::decode_image_bytes(png)?;
+        let (gx0, gy0, gx1, gy1) = window;
+        let (w, h) = (gx1 - gx0, gy1 - gy0);
+        if w < 1 || h < 1 { bail!("the window is empty"); }
+        // Back to the window's own pixels.
+        let placed = new_argb(w, h)?;
+        {
+            let cr = Context::new(&placed)?;
+            cr.scale(w as f64 / iw as f64, h as f64 / ih as f64);
+            cr.set_source_surface(&surface, 0.0, 0.0)?;
+            cr.source().set_filter(cairo::Filter::Good);
+            cr.paint()?;
+        }
+        let transform = Transform { origin: crate::format::Point(gx0 as f64, gy0 as f64), size: crate::format::Size(w as f64, h as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
+        let mask = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&transform, w, h)?), None => None };
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(self.unique_name(name), parent);
+        record.transform = transform;
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        if mask.is_some() { record.mask_file = Some(format!("{}.mask.png", crate::format::upper(record.id))); }
+        let id = record.id;
+        self.begin_edit(name);
+        self.renderer.insert_layer(index, record, Some(placed), mask);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// Another variation into the layer a generation made: its pixels swapped, as one undo step.
+    pub fn replace_genfill(&mut self, id: Uuid, png: &[u8], window: (i32, i32, i32, i32)) -> Result<()> {
+        if !self.has_layer(id) { bail!("The layer is gone."); }
+        let (surface, iw, ih) = Self::decode_image_bytes(png)?;
+        let (w, h) = (window.2 - window.0, window.3 - window.1);
+        let placed = new_argb(w, h)?;
+        {
+            let cr = Context::new(&placed)?;
+            cr.scale(w as f64 / iw as f64, h as f64 / ih as f64);
+            cr.set_source_surface(&surface, 0.0, 0.0)?;
+            cr.source().set_filter(cairo::Filter::Good);
+            cr.paint()?;
+        }
+        self.begin_edit("Generative Fill Variation");
+        self.renderer.set_image(id, placed);
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Generative Expand's first half: the canvas grows to `width` x `height` about `anchor`, and the new
+    /// margin becomes the selection, ready to be filled.
+    pub fn expand_canvas_for_fill(&mut self, width: i32, height: i32, anchor: usize) -> Result<()> {
+        let (ow, oh) = (self.width(), self.height());
+        if width < ow || height < oh { bail!("Generative Expand only grows the canvas; use Canvas Size to shrink it."); }
+        if width == ow && height == oh { bail!("The canvas is already that size."); }
+        self.begin_edit("Generative Expand");
+        self.canvas_size(width, height, anchor, None, None, "Generative Expand")?;
+        let dx = (((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor();
+        let dy = (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor();
+        let inside = Selection::from_shape(width, height, false, |cr| { cr.rectangle(dx, dy, ow as f64, oh as f64); cr.fill()?; Ok(()) })?;
+        self.selection = Some(inside.inverted()?);
+        self.end_edit();
+        Ok(())
+    }
+
     // MARK: Eyedropper
 
     /// The color at a document pixel as the canvas shows it (every visible layer) or on the active layer's
