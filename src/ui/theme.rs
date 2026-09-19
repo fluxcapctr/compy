@@ -177,7 +177,8 @@ pub fn look_css(font: &str) -> String {
         window.csd {{ box-shadow: none; }}
         headerbar {{ min-height: 34px; padding: 0 6px; }}
         .main-menu {{ padding: 0; }}
-        .main-menu > item {{ padding: 4px 10px; border-radius: 0; border: none; }}
+        .main-menu > item {{ padding: 4px 10px; border-radius: 0; border: none; box-shadow: none; }}
+        .main-menu > item:hover, .main-menu > item:selected, .main-menu > item:active {{ box-shadow: none; text-decoration: none; outline: none; }}
         headerbar .dialog-title, .panel-tab, .heading, .layers-panel .heading {{ text-transform: uppercase; letter-spacing: 1.4px; font-size: 10.5px; font-weight: 600; }}
         headerbar .title {{ letter-spacing: 0; font-weight: 600; }}
         .panel-tab.current {{ border-bottom: 1px solid currentColor; }}
