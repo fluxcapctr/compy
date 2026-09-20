@@ -836,10 +836,29 @@ pub struct Assistant {
     app: Rc<App>,
 }
 
+/// The Claude Code binary: COMPOSITOR_CLAUDE, then PATH, then the places installers put it (Omarchy's
+/// mise shims, npm's global bin, Claude's own installer) for a launch from the app launcher whose PATH
+/// is shorter than a shell's.
 fn claude_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("COMPOSITOR_CLAUDE") { return Some(PathBuf::from(p)); }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join("claude")).find(|p| p.exists())
+    if let Some(path) = std::env::var_os("PATH") { if let Some(p) = std::env::split_paths(&path).map(|d| d.join("claude")).find(|p| p.exists()) { return Some(p); } }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    [home.join(".local/share/mise/shims/claude"), home.join(".local/bin/claude"), home.join(".claude/local/claude"), home.join(".npm-global/bin/claude"), PathBuf::from("/usr/local/bin/claude"), PathBuf::from("/usr/bin/claude")].into_iter().find(|p| p.exists())
+}
+
+/// Whether Claude Code is signed in (`claude auth status` says so), asked off the GTK thread; None when
+/// the command could not say.
+fn check_login(claude: PathBuf, done: impl Fn(Option<bool>) + 'static) {
+    let cell = std::sync::Arc::new(std::sync::Mutex::new(None::<Option<bool>>));
+    { let cell = cell.clone(); std::thread::spawn(move || {
+        let out = std::process::Command::new(claude).args(["auth", "status"]).output().ok();
+        let logged = out.and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).and_then(|v| v.get("loggedIn").and_then(Value::as_bool));
+        if let Ok(mut c) = cell.lock() { *c = Some(logged); }
+    }); }
+    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        let ready = cell.lock().ok().and_then(|c| *c);
+        match ready { Some(v) => { done(v); glib::ControlFlow::Break } None => glib::ControlFlow::Continue }
+    });
 }
 use std::path::PathBuf;
 
@@ -895,7 +914,15 @@ impl Assistant {
         { let t = this.clone(); title.add_controller({ let g = gtk::GestureClick::new(); g.connect_released(move |_, _, _, _| t.toggle()); g }); }
         { let t = this.clone(); popout.connect_clicked(move |_| { if t.window.borrow().is_some() { t.dock(); } else { t.undock(); } }); }
         { mic.connect_clicked(move |_| { let _ = std::process::Command::new("voxtype").args(["record", "toggle"]).spawn(); }); }
-        if claude_binary().is_none() { this.append("system", "Claude Code was not found on PATH. Install it, or set COMPOSITOR_CLAUDE to the claude binary."); }
+        // The first thing a new user reads: what Compy is and what it runs on, and anything missing.
+        match claude_binary() {
+            None => this.append("system", "Hi, I'm Compy. I edit the open picture with you: tell me what to do in plain words. I run on Claude Code, which was not found on this machine. On Omarchy it comes preinstalled (open a terminal and run `claude` once to sign in); elsewhere install it from claude.com/claude-code, or set COMPOSITOR_CLAUDE to the claude binary."),
+            Some(claude) => {
+                this.append("system", "Hi, I'm Compy. Tell me what to do with the open picture, in plain words: select, paint, adjust, add type, export. I run on the Claude Code already on this machine, with your sign-in and plan. Generative tools use fal.ai and ask for a key once (File > Generative Fill).");
+                let t = this.clone();
+                check_login(claude, move |logged| { if logged == Some(false) { t.append("system", "Claude Code is installed but not signed in yet. Open a terminal, run `claude`, and sign in; then come back here."); } });
+            }
+        }
         this.dock();
         this.watch_voice();
         this
@@ -1144,7 +1171,12 @@ impl Assistant {
                         this.activity.borrow_mut().clear();
                         if line != "0" {
                             let detail = last_error.borrow().clone();
-                            this.append("system", &format!("Compy stopped ({}). {}", if line == "-1" { "it was interrupted".to_string() } else { format!("status {line}") }, if detail.is_empty() { "Try again, or start a new conversation with the arrow button.".to_string() } else { detail.clone() }));
+                            let lower = detail.to_lowercase();
+                            if lower.contains("log in") || lower.contains("login") || lower.contains("not authenticated") || lower.contains("api key") || lower.contains("oauth") || lower.contains("unauthorized") {
+                                this.append("system", "Claude Code needs a sign-in first. Open a terminal, run `claude`, sign in, and then ask again here.");
+                            } else {
+                                this.append("system", &format!("Compy stopped ({}). {}", if line == "-1" { "it was interrupted".to_string() } else { format!("status {line}") }, if detail.is_empty() { "Try again, or start a new conversation with the arrow button.".to_string() } else { detail.clone() }));
+                            }
                             // A conversation that cannot be resumed starts over next time.
                             if detail.contains("session") || detail.contains("resume") { *this.session.borrow_mut() = None; }
                         } else if !this.replied.get() {

@@ -2,7 +2,7 @@
 
 Seven Claude Opus 5 reviewers each took one subsystem of the whole project (about 28,000 lines of
 Rust), looking for bugs in the interactions between features that the eight incremental Astra rounds
-never covered. Their reports are in `audit/` (document, formats, pixels, renderer, painting, ui,
+never covered. Their reports are in `docs/reviews/audit/` (document, formats, pixels, renderer, painting, ui,
 assistant): 136 findings in all. Every P1 and nearly every P2 is fixed; the rest are marked below with
 the reason. Tests: 188 passed, 2 ignored (network, model download).
 

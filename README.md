@@ -31,9 +31,14 @@ compositing engine, the tools, the file formats and the assistant.
   generates and edits pictures (Generative Fill and Expand, Nano Banana, GPT Image, upscaling,
   relighting). It talks about the picture, not the tools, and every tool call is an undoable step you
   watch happen. Dictation works through voxtype.
-- **Made for Omarchy.** The chrome follows the active Omarchy theme, the app icon and header mark take
-  the accent color, and it is one AUR package away. Autosave every two minutes with recovery on the start
-  page, rulers, guides, a grid, Photoshop shortcuts, and a right-click brush popover.
+- **Made for Omarchy.** Compy fits Omarchy without setup. The whole chrome, the app icon and the header
+  mark follow the active theme and change with it live when you run `omarchy theme set`. The assistant is
+  the Claude Code that Omarchy already ships: your sign-in, your plan, nothing to configure, and Compy
+  says so the first time you open it (and tells you the one command to run if you are not signed in yet).
+  Dictation goes through voxtype, Omarchy's own. Installing is one AUR package. It runs on any other
+  Linux desktop too, with the stock GTK look.
+- **The small things.** Autosave every two minutes with recovery on the start page, rulers, guides, a
+  grid, Photoshop's shortcuts and menu layout, and a right-click brush popover.
 
 The binary and the crate are still called `compositor`, so every command below keeps working; `compy`
 is an alias.
@@ -64,9 +69,12 @@ cd compy
 
 The `reference/` submodule (the macOS original, used as the specification) is not needed to build.
 
-**Optional pieces**: [Claude Code](https://claude.com/claude-code) for the Compy assistant, a fal.ai
-key for generative fill (File > Generative Fill asks for it once), `libavif` for AVIF export, and
-`voxtype` for dictation.
+**First run.** Open Compy, press Ctrl+K, and the assistant tells you what it needs, if anything. On
+Omarchy that is nothing: Claude Code is preinstalled, and if you have not signed in yet Compy asks you to
+run `claude` once in a terminal. On other distributions install
+[Claude Code](https://claude.com/claude-code) first. Generative tools (fill, expand, new pictures,
+upscaling, relighting) use fal.ai and ask for an API key once, under File > Generative Fill; everything
+else works without one. Optional: `libavif` for AVIF export and `voxtype` for dictation.
 
 Progress follows the phases in the build plan:
 
