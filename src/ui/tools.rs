@@ -557,6 +557,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
+        super::center_spins(&stack);
         let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, pattern_list, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
@@ -636,7 +637,7 @@ impl OptionsBar {
 
     /// Reflects settings changed from the keyboard.
     /// Opens the color picker once the button is on screen (the options page may just have switched).
-    pub fn show_color_picker(&self) { let button = self.color.widget.clone(); gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || button.popup()); }
+    pub fn show_color_picker(&self) { let button = self.color.widget.clone(); gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || button.popup()); }
 
     /// The gradient preview follows the palette (the foreground presets are made from it).
     pub fn sync_gradient(&self) { self.gradient_preview.queue_draw(); }

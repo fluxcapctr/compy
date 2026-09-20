@@ -789,7 +789,10 @@ impl Assistant {
         let fold = gtk::Button::builder().label("\u{25be}").has_frame(false).tooltip_text("Fold Compy away or open it (Ctrl+K)").build();
         fold.add_css_class("assistant-fold");
         header.append(&fold);
-        let title = gtk::Label::builder().label("\u{f16a3}  COMPY").css_classes(["heading"]).xalign(0.0).build();
+        // The Compy mark in the theme accent, like the header bar, then the name.
+        let title = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+        title.append(&super::icons::compy_mark(16));
+        title.append(&gtk::Label::builder().label("COMPY").css_classes(["heading"]).xalign(0.0).build());
         header.append(&title);
         let status = gtk::Label::builder().xalign(1.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["dim-label", "caption"]).label("").build();
         header.append(&status);

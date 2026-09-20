@@ -683,166 +683,174 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     state
 }
 
+/// Numbers centered in every spin button under `root`, so they read as values, not text being typed.
+pub fn center_spins(root: &impl IsA<gtk::Widget>) {
+    let mut child = root.first_child();
+    while let Some(w) = child {
+        if let Some(spin) = w.downcast_ref::<gtk::SpinButton>() { spin.set_alignment(0.5); }
+        center_spins(&w);
+        child = w.next_sibling();
+    }
+}
+
+/// A menu from (label, action) pairs, one section per inner list, so the separators match Photoshop's.
+fn sections(groups: &[&[(&str, &str)]]) -> gio::Menu {
+    let menu = gio::Menu::new();
+    for group in groups {
+        let section = gio::Menu::new();
+        for (label, action) in *group { section.append(Some(label), Some(action)); }
+        menu.append_section(None, &section);
+    }
+    menu
+}
+
+/// The menu bar, laid out like Photoshop's: short top levels, related commands in submenus, separators
+/// between the groups.
 fn menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    let file = gio::Menu::new();
-    file.append(Some("New Canvas…"), Some("win.new"));
-    file.append(Some("Open…"), Some("win.open"));
-    file.append(Some("Open Project Folder…"), Some("win.open-project"));
-    file.append(Some("Save"), Some("win.save"));
-    file.append(Some("Save As…"), Some("win.save-as"));
-    file.append(Some("Import Image…"), Some("win.import"));
-    file.append(Some("Export PNG…"), Some("win.export-png"));
-    file.append(Some("Export JPEG…"), Some("win.export-jpeg"));
-    file.append(Some("Export PSD…"), Some("win.export-psd"));
-    file.append(Some("Export Sizes…"), Some("win.export-sizes"));
-    file.append(Some("Export WebP…"), Some("win.export-webp"));
-    file.append(Some("Export GIF…"), Some("win.export-gif"));
-    file.append(Some("Export AVIF…"), Some("win.export-avif"));
-    file.append(Some("Export Layers to Files…"), Some("win.export-layers"));
-    file.append(Some("Export Artboards…"), Some("win.export-artboards"));
-    file.append(Some("Close"), Some("win.close-tab"));
+
+    // File: open and save, import, then everything that writes a picture under Export.
+    let file = sections(&[
+        &[("New Canvas…", "win.new"), ("Open…", "win.open"), ("Open Project Folder…", "win.open-project")],
+        &[("Save", "win.save"), ("Save As…", "win.save-as")],
+        &[("Import Image…", "win.import")],
+    ]);
+    let export = sections(&[
+        &[("PNG…", "win.export-png"), ("JPEG…", "win.export-jpeg"), ("WebP…", "win.export-webp"), ("GIF…", "win.export-gif"), ("AVIF…", "win.export-avif"), ("PSD…", "win.export-psd")],
+        &[("Sizes…", "win.export-sizes"), ("Layers to Files…", "win.export-layers"), ("Artboards…", "win.export-artboards")],
+    ]);
+    let tail = gio::Menu::new();
+    tail.append_submenu(Some("Export"), &export);
+    file.append_section(None, &tail);
+    file.append_section(None, &sections(&[&[("Close", "win.close-tab")]]));
     menu.append_submenu(Some("File"), &file);
-    let edit = gio::Menu::new();
-    edit.append(Some("Undo"), Some("win.undo"));
-    edit.append(Some("Redo"), Some("win.redo"));
-    edit.append(Some("History…"), Some("win.history"));
-    edit.append(Some("Free Transform"), Some("win.free-transform"));
-    edit.append(Some("Copy"), Some("win.copy"));
-    edit.append(Some("Paste as New Layer"), Some("win.paste"));
-    edit.append(Some("Copy Merged"), Some("win.copy-merged"));
-    edit.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
-    edit.append(Some("Fill with Background"), Some("win.fill-background"));
-    edit.append(Some("Clear"), Some("win.clear"));
-    edit.append(Some("Stroke…"), Some("win.stroke-selection"));
-    edit.append(Some("Define Pattern…"), Some("win.define-pattern"));
-    edit.append(Some("Fill with Pattern…"), Some("win.fill-pattern"));
-    edit.append(Some("Generative Fill…"), Some("win.generative-fill"));
+
+    // Edit: undo, clipboard, fill and stroke, transform, then patterns.
+    let edit = sections(&[
+        &[("Undo", "win.undo"), ("Redo", "win.redo"), ("History…", "win.history")],
+        &[("Copy", "win.copy"), ("Copy Merged", "win.copy-merged"), ("Paste as New Layer", "win.paste"), ("Clear", "win.clear")],
+    ]);
+    let fill = sections(&[
+        &[("Foreground Color", "win.fill-foreground"), ("Background Color", "win.fill-background"), ("Pattern…", "win.fill-pattern")],
+        &[("Generative Fill…", "win.generative-fill"), ("Content-Aware Fill", "win.content-aware-fill")],
+    ]);
+    let fills = gio::Menu::new();
+    fills.append_submenu(Some("Fill"), &fill);
+    fills.append(Some("Stroke…"), Some("win.stroke-selection"));
+    edit.append_section(None, &fills);
+    edit.append_section(None, &sections(&[&[("Free Transform", "win.free-transform")]]));
+    edit.append_section(None, &sections(&[&[("Define Pattern…", "win.define-pattern")]]));
     menu.append_submenu(Some("Edit"), &edit);
-    let select = gio::Menu::new();
-    select.append(Some("All"), Some("win.select-all"));
-    select.append(Some("Deselect"), Some("win.deselect"));
-    select.append(Some("Reselect"), Some("win.reselect"));
-    select.append(Some("Inverse"), Some("win.invert-selection"));
-    select.append(Some("All Layers"), Some("win.select-all-layers"));
-    select.append(Some("Color Range…"), Some("win.color-range"));
-    select.append(Some("Feather…"), Some("win.feather-selection"));
-    select.append(Some("From Path"), Some("win.path-select"));
-    select.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
-    select.append(Some("Expand…"), Some("win.expand-selection"));
-    select.append(Some("Contract…"), Some("win.contract-selection"));
-    menu.append_submenu(Some("Select"), &select);
+
+    // Image: the canvas, then every color adjustment under Adjustments, then rotation.
+    let image = sections(&[
+        &[("Image Size…", "win.image-size"), ("Canvas Size…", "win.canvas-size"), ("Crop to Selection", "win.crop")],
+    ]);
+    let adjustments = sections(&[
+        &[("Brightness/Contrast…", "win.filter::brightness"), ("Levels…", "win.filter::levels"), ("Curves…", "win.filter::curves"), ("Exposure…", "win.filter::exposure")],
+        &[("Vibrance…", "win.filter::vibrance"), ("Hue/Saturation…", "win.filter::hsv"), ("Color Balance…", "win.filter::balance"), ("Black & White…", "win.filter::bw"), ("Photo Filter…", "win.filter::photo"), ("Channel Mixer…", "win.filter::mixer")],
+        &[("Invert", "win.invert"), ("Posterize…", "win.filter::posterize"), ("Threshold…", "win.filter::threshold"), ("Gradient Map…", "win.filter::gradient"), ("Selective Color…", "win.filter::selective")],
+        &[("Shadows/Highlights…", "win.filter::shadows"), ("Desaturate", "win.desaturate")],
+    ]);
+    let adjust = gio::Menu::new();
+    adjust.append_submenu(Some("Adjustments"), &adjustments);
+    adjust.append(Some("Auto Tone"), Some("win.auto-tone"));
+    adjust.append(Some("Auto Contrast"), Some("win.auto-contrast"));
+    adjust.append(Some("Auto Color"), Some("win.auto-color"));
+    image.append_section(None, &adjust);
+    let rotate = sections(&[
+        &[("90° Clockwise", "win.rotate-canvas-cw"), ("90° Counterclockwise", "win.rotate-canvas-ccw"), ("180°", "win.rotate-canvas-180"), ("Arbitrary…", "win.rotate-canvas"), ("Straighten to the Pen Line", "win.straighten")],
+        &[("Flip Canvas Horizontal", "win.flip-canvas-horizontal"), ("Flip Canvas Vertical", "win.flip-canvas-vertical")],
+    ]);
+    let rotation = gio::Menu::new();
+    rotation.append_submenu(Some("Image Rotation"), &rotate);
+    image.append_section(None, &rotation);
+    image.append_section(None, &sections(&[&[("Generative Expand…", "win.generative-expand")]]));
+    menu.append_submenu(Some("Image"), &image);
+
+    // Layer: new, then the layer's own commands, masks, arranging, merging, and the vector and type
+    // commands last.
     let layer = gio::Menu::new();
-    layer.append(Some("New Layer"), Some("win.new-layer"));
-    layer.append(Some("New Folder"), Some("win.new-folder"));
-    layer.append(Some("New Artboard…"), Some("win.new-artboard"));
-    layer.append(Some("Artboard from Layers…"), Some("win.artboard-from-layers"));
-    let adjustments = gio::Menu::new();
-    for kind in crate::format::ADJUSTMENT_KINDS { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
-    layer.append_submenu(Some("New Adjustment Layer"), &adjustments);
-    layer.append(Some("Edit Adjustment…"), Some("win.edit-adjustment"));
-    layer.append(Some("Duplicate Layer / Layer via Copy"), Some("win.duplicate-layer"));
-    layer.append(Some("Layer via Cut"), Some("win.layer-via-cut"));
-    layer.append(Some("Layer Style…"), Some("win.layer-style"));
-    layer.append(Some("Clear Layer Style"), Some("win.clear-layer-style"));
-    layer.append(Some("Delete Layer"), Some("win.delete-layer"));
-    layer.append(Some("Rename Layer…"), Some("win.rename-layer"));
-    layer.append(Some("Move Up"), Some("win.layer-up"));
-    layer.append(Some("Move Down"), Some("win.layer-down"));
-    let mask = gio::Menu::new();
-    mask.append(Some("Reveal All"), Some("win.mask-reveal"));
-    mask.append(Some("Hide All"), Some("win.mask-hide"));
-    layer.append_submenu(Some("Add Mask (from the selection, if any)"), &mask);
-    layer.append(Some("Enable / Disable Mask"), Some("win.mask-toggle"));
-    layer.append(Some("Invert Mask"), Some("win.mask-invert"));
-    layer.append(Some("Delete Mask"), Some("win.mask-delete"));
-    layer.append(Some("Create / Release Clipping Mask"), Some("win.toggle-clipping"));
-    layer.append(Some("Flip Horizontal"), Some("win.flip-horizontal"));
-    layer.append(Some("Flip Vertical"), Some("win.flip-vertical"));
-    layer.append(Some("Merge Down / Group"), Some("win.merge"));
-    layer.append(Some("Merge Visible"), Some("win.merge-visible"));
-    layer.append(Some("Stamp Visible"), Some("win.stamp-visible"));
+    let new = sections(&[
+        &[("Layer", "win.new-layer"), ("Group", "win.new-folder")],
+        &[("Artboard…", "win.new-artboard"), ("Artboard from Layers…", "win.artboard-from-layers")],
+        &[("Layer via Copy", "win.duplicate-layer"), ("Layer via Cut", "win.layer-via-cut")],
+    ]);
+    let adjustment_layers = gio::Menu::new();
+    for kind in crate::format::ADJUSTMENT_KINDS { adjustment_layers.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
+    let creating = gio::Menu::new();
+    creating.append_submenu(Some("New"), &new);
+    creating.append_submenu(Some("New Adjustment Layer"), &adjustment_layers);
+    creating.append(Some("Edit Adjustment…"), Some("win.edit-adjustment"));
+    layer.append_section(None, &creating);
+    layer.append_section(None, &sections(&[&[("Duplicate Layer", "win.duplicate-layer"), ("Delete Layer", "win.delete-layer"), ("Rename Layer…", "win.rename-layer"), ("Hide / Show Layer", "win.toggle-layer-visibility")]]));
+    let style = sections(&[&[("Layer Style…", "win.layer-style"), ("Clear Layer Style", "win.clear-layer-style")]]);
+    let mask = sections(&[
+        &[("Reveal All", "win.mask-reveal"), ("Hide All", "win.mask-hide")],
+        &[("Enable / Disable", "win.mask-toggle"), ("Invert", "win.mask-invert"), ("Delete", "win.mask-delete")],
+    ]);
+    let styling = gio::Menu::new();
+    styling.append_submenu(Some("Layer Style"), &style);
+    styling.append_submenu(Some("Layer Mask (from the selection, if any)"), &mask);
+    styling.append(Some("Create / Release Clipping Mask"), Some("win.toggle-clipping"));
+    layer.append_section(None, &styling);
+    let arrange = sections(&[&[("Bring to Front", "win.layer-top"), ("Move Up", "win.layer-up"), ("Move Down", "win.layer-down"), ("Send to Back", "win.layer-bottom")]]);
     let align = gio::Menu::new();
     for (label, edge) in [("Left Edges", "left"), ("Horizontal Centers", "center"), ("Right Edges", "right"), ("Top Edges", "top"), ("Vertical Centers", "middle"), ("Bottom Edges", "bottom")] { align.append(Some(label), Some(&format!("win.align::{edge}"))); }
-    layer.append_submenu(Some("Align (to the selection, or the canvas)"), &align);
-    let distribute = gio::Menu::new();
-    distribute.append(Some("Horizontally"), Some("win.distribute::horizontal"));
-    distribute.append(Some("Vertically"), Some("win.distribute::vertical"));
-    layer.append_submenu(Some("Distribute"), &distribute);
-    layer.append(Some("Bring to Front"), Some("win.layer-top"));
-    layer.append(Some("Send to Back"), Some("win.layer-bottom"));
-    layer.append(Some("Hide / Show Layer"), Some("win.toggle-layer-visibility"));
-    layer.append(Some("Edit Text…"), Some("win.edit-text"));
-    layer.append(Some("Shape from Path"), Some("win.path-shape"));
-    layer.append(Some("Edit Shape Points"), Some("win.shape-edit"));
-    layer.append(Some("Apply Path to Shape"), Some("win.shape-apply"));
+    let distribute = sections(&[&[("Horizontally", "win.distribute::horizontal"), ("Vertically", "win.distribute::vertical")]]);
+    let transform = sections(&[&[("Free Transform", "win.free-transform"), ("Flip Horizontal", "win.flip-horizontal"), ("Flip Vertical", "win.flip-vertical")]]);
+    let arranging = gio::Menu::new();
+    arranging.append_submenu(Some("Arrange"), &arrange);
+    arranging.append_submenu(Some("Align (to the selection, or the canvas)"), &align);
+    arranging.append_submenu(Some("Distribute"), &distribute);
+    arranging.append_submenu(Some("Transform"), &transform);
+    layer.append_section(None, &arranging);
+    layer.append_section(None, &sections(&[&[("Merge Down / Group", "win.merge"), ("Merge Visible", "win.merge-visible"), ("Stamp Visible", "win.stamp-visible")]]));
+    let vector = sections(&[&[("Shape from Path", "win.path-shape"), ("Edit Shape Points", "win.shape-edit"), ("Apply Path to Shape", "win.shape-apply")]]);
+    let typed = gio::Menu::new();
+    typed.append(Some("Edit Text…"), Some("win.edit-text"));
+    typed.append_submenu(Some("Shape"), &vector);
+    layer.append_section(None, &typed);
     menu.append_submenu(Some("Layer"), &layer);
-    let image = gio::Menu::new();
-    image.append(Some("Canvas Size…"), Some("win.canvas-size"));
-    image.append(Some("Image Size…"), Some("win.image-size"));
-    image.append(Some("Crop to Selection"), Some("win.crop"));
-    image.append(Some("Hue/Saturation…"), Some("win.filter::hsv"));
-    image.append(Some("Desaturate"), Some("win.desaturate"));
-    image.append(Some("Exposure…"), Some("win.filter::exposure"));
-    image.append(Some("Levels…"), Some("win.filter::levels"));
-    image.append(Some("Curves…"), Some("win.filter::curves"));
-    image.append(Some("Color Balance…"), Some("win.filter::balance"));
-    image.append(Some("Brightness/Contrast…"), Some("win.filter::brightness"));
-    image.append(Some("Vibrance…"), Some("win.filter::vibrance"));
-    image.append(Some("Black & White…"), Some("win.filter::bw"));
-    image.append(Some("Photo Filter…"), Some("win.filter::photo"));
-    image.append(Some("Threshold…"), Some("win.filter::threshold"));
-    image.append(Some("Posterize…"), Some("win.filter::posterize"));
-    image.append(Some("Shadows/Highlights…"), Some("win.filter::shadows"));
-    image.append(Some("Selective Color…"), Some("win.filter::selective"));
-    image.append(Some("Channel Mixer…"), Some("win.filter::mixer"));
-    image.append(Some("Auto Tone"), Some("win.auto-tone"));
-    image.append(Some("Auto Contrast"), Some("win.auto-contrast"));
-    image.append(Some("Auto Color"), Some("win.auto-color"));
-    image.append(Some("Gradient Map…"), Some("win.filter::gradient"));
-    image.append(Some("Grain…"), Some("win.filter::grain"));
-    image.append(Some("Invert"), Some("win.invert"));
-    image.append(Some("Flip Canvas Horizontal"), Some("win.flip-canvas-horizontal"));
-    image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
-    let rotate = gio::Menu::new();
-    rotate.append(Some("90° Clockwise"), Some("win.rotate-canvas-cw"));
-    rotate.append(Some("90° Counterclockwise"), Some("win.rotate-canvas-ccw"));
-    rotate.append(Some("180°"), Some("win.rotate-canvas-180"));
-    rotate.append(Some("Arbitrary…"), Some("win.rotate-canvas"));
-    image.append_submenu(Some("Rotate Canvas"), &rotate);
-    image.append(Some("Straighten to the Pen Line"), Some("win.straighten"));
-    image.append(Some("Generative Expand…"), Some("win.generative-expand"));
-    image.append(Some("Rulers"), Some("win.toggle-rulers"));
-    let view = gio::Menu::new();
-    view.append(Some("Preview (picture only)"), Some("win.toggle-preview"));
-    view.append(Some("Rulers"), Some("win.toggle-rulers"));
-    view.append(Some("Show Guides"), Some("win.toggle-guides"));
-    view.append(Some("New Guide…"), Some("win.new-guide"));
-    view.append(Some("Clear Guides"), Some("win.clear-guides"));
-    view.append(Some("Snap"), Some("win.toggle-snap"));
-    view.append(Some("Show Grid"), Some("win.toggle-grid"));
-    view.append(Some("Extras (selection edges, guides)"), Some("win.toggle-extras"));
-    view.append(Some("Panels"), Some("win.toggle-panels"));
-    view.append(Some("Transform Controls"), Some("win.toggle-handles"));
-    menu.append_submenu(Some("View"), &view);
-    menu.append_submenu(Some("Image"), &image);
-    let filter = gio::Menu::new();
-    filter.append(Some("Remove Background…"), Some("win.filter::background"));
-    filter.append(Some("Unsharp Mask…"), Some("win.filter::unsharp"));
-    filter.append(Some("Smart Sharpen…"), Some("win.filter::sharpen"));
-    filter.append(Some("Gaussian Blur…"), Some("win.filter::gaussian"));
-    filter.append(Some("Motion Blur…"), Some("win.filter::motion"));
-    filter.append(Some("Radial Blur…"), Some("win.filter::radial"));
-    filter.append(Some("High Pass…"), Some("win.filter::highpass"));
-    filter.append(Some("Add Noise…"), Some("win.filter::noise"));
-    filter.append(Some("Lens Correction…"), Some("win.filter::lens"));
-    filter.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));
-    filter.append(Some("Fade…"), Some("win.filter::fade"));
-    filter.append(Some("Heal Selection"), Some("win.heal-selection"));
+
+    // Select: the whole, then by content, then Modify like Photoshop's.
+    let select = sections(&[
+        &[("All", "win.select-all"), ("Deselect", "win.deselect"), ("Reselect", "win.reselect"), ("Inverse", "win.invert-selection")],
+        &[("All Layers", "win.select-all-layers"), ("Load Layer Pixels", "win.select-layer-pixels"), ("From Path", "win.path-select")],
+        &[("Color Range…", "win.color-range")],
+    ]);
+    let modify = sections(&[&[("Feather…", "win.feather-selection"), ("Expand…", "win.expand-selection"), ("Contract…", "win.contract-selection")]]);
+    let modifying = gio::Menu::new();
+    modifying.append_submenu(Some("Modify"), &modify);
+    select.append_section(None, &modifying);
+    menu.append_submenu(Some("Select"), &select);
+
+    // Filter: the smart tools first, then Blur, Sharpen, Noise, Other like Photoshop's groups.
+    let filter = sections(&[
+        &[("Fade…", "win.filter::fade")],
+        &[("Remove Background…", "win.filter::background"), ("Heal Selection", "win.heal-selection")],
+    ]);
+    let blur = sections(&[&[("Gaussian Blur…", "win.filter::gaussian"), ("Motion Blur…", "win.filter::motion"), ("Radial Blur…", "win.filter::radial")]]);
+    let sharpen = sections(&[&[("Unsharp Mask…", "win.filter::unsharp"), ("Smart Sharpen…", "win.filter::sharpen")]]);
+    let noise = sections(&[&[("Add Noise…", "win.filter::noise"), ("Grain…", "win.filter::grain")]]);
+    let other = sections(&[&[("High Pass…", "win.filter::highpass"), ("Lens Correction…", "win.filter::lens")]]);
+    let groups = gio::Menu::new();
+    groups.append_submenu(Some("Blur"), &blur);
+    groups.append_submenu(Some("Sharpen"), &sharpen);
+    groups.append_submenu(Some("Noise"), &noise);
+    groups.append_submenu(Some("Other"), &other);
+    filter.append_section(None, &groups);
     menu.append_submenu(Some("Filter"), &filter);
-    let help = gio::Menu::new();
-    help.append(Some("Compy, the assistant (Ctrl+K)"), Some("win.assistant"));
-    help.append(Some("Keyboard Shortcuts (F1)"), Some("win.shortcuts"));
+
+    // View: what shows around the picture.
+    let view = sections(&[
+        &[("Preview (picture only)", "win.toggle-preview"), ("Panels", "win.toggle-panels")],
+        &[("Extras (selection edges, guides)", "win.toggle-extras"), ("Transform Controls", "win.toggle-handles"), ("Rulers", "win.toggle-rulers"), ("Show Grid", "win.toggle-grid")],
+        &[("Show Guides", "win.toggle-guides"), ("New Guide…", "win.new-guide"), ("Clear Guides", "win.clear-guides"), ("Snap", "win.toggle-snap")],
+    ]);
+    menu.append_submenu(Some("View"), &view);
+
+    let help = sections(&[&[("Compy, the assistant (Ctrl+K)", "win.assistant"), ("Keyboard Shortcuts (F1)", "win.shortcuts")]]);
     menu.append_submenu(Some("Help"), &help);
     menu
 }
@@ -868,15 +876,6 @@ const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
 /// each drawn as a box in its own aspect ratio, a custom size, and Open.
 fn start_page() -> gtk::Widget {
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
-    // The logo, built into the binary so the start page has it wherever the app runs from.
-    if let Ok(texture) = gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("../../assets/compy-logo.png"))) {
-        let logo = gtk::Picture::for_paintable(&texture);
-        logo.set_size_request(160, 160);
-        logo.set_can_shrink(true);
-        logo.set_halign(gtk::Align::Start);
-        logo.set_margin_bottom(6);
-        page.append(&logo);
-    }
     let recovered = crate::autosave::recoverable();
     if !recovered.is_empty() {
         page.append(&gtk::Label::builder().label("Recovered").xalign(0.0).css_classes(["heading"]).build());

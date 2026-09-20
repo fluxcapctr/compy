@@ -131,6 +131,7 @@ impl Grid {
         spin.set_digits(digits);
         spin.set_value(value);
         spin.set_hexpand(true);
+        spin.set_alignment(0.5);
         spin.connect_value_changed(move |s| changed(s.value()));
         self.grid.attach(&spin, 1, self.row, 1, 1);
         self.row += 1;

@@ -67,7 +67,7 @@ here. `--wand x,y` and `--filter levels` script those for screenshots.
 **Painting (phase 4).** Brush (B), Eraser (E), Spot Healing Brush (J), Clone Stamp (S, Alt-click sets the
 source) and Smear (R, with Liquify, Blur and Smudge modes: Liquify pushes pixels along the drag, Smudge
 drags color, Blur softens) share size, hardness and opacity in the options bar; the brush's color swatch opens a
-picker with a hue ring around a saturation and value square, a hex field, and the colors used lately; `[` and `]` step the size, `{`
+picker like Photoshop's (a saturation and value square with a hue strip beside it, hex and R G B fields, the colors used lately, saved swatches); `[` and `]` step the size, `{`
 and `}` the hardness, and the number keys set opacity. Shift-click paints a straight line from where the
 last stroke ended. Strokes follow a smoothed curve through the pointer samples, accumulate coverage in
 256-pixel tiles with the opacity as a cap on the whole stroke, respect the selection, and commit as one undo
@@ -284,6 +284,14 @@ brush never paints wider than 2000. Many brush packs carry patterns as well: `co
 Fill with Pattern and the Pattern Stamp find them. `compositor convert-brushes out.abr in.abr` rewrites a
 pack as tips alone, which keeps a pattern-heavy file from being read whole at every start.
 
+**Menus.** The menu bar follows Photoshop's layout so the top levels stay short: File > Export holds every
+format and the batch exports; Edit > Fill holds the color, pattern, generative and content-aware fills;
+Image > Adjustments holds every color adjustment and Image > Image Rotation the turns, flips and
+straighten; Layer has New, Layer Style, Layer Mask, Arrange, Align, Distribute and Transform submenus with
+the type and shape commands last; Select > Modify has Feather, Expand and Contract; Filter groups into
+Blur, Sharpen, Noise and Other. Where the README names a command by its old place (Filter > Unsharp Mask,
+say), look in the group it belongs to.
+
 **Export Sizes.** File > Export Sizes writes the document at several sizes at once into a folder:
 tick presets (Instagram post and portrait, Story or Reel, Facebook, X, LinkedIn, YouTube thumbnail,
 Pinterest, the IAB banner sizes, HD, 4K, Letter, A4 and Tabloid at 300 ppi) or a custom size, pick how
@@ -483,7 +491,7 @@ src/history  value-snapshot undo with entry and byte limits
 src/viewport the canvas view math (fit, zoom around a point, pan), a port of CanvasViewport
 src/ui/      the GTK4 app: window and tabs, canvas widget, layers panel
 src/ui/theme Omarchy palette to GTK CSS, watched for live theme switches
-src/ui/color_wheel the brush color picker: hue ring, saturation/value square, hex, recents
+src/ui/color_wheel the brush color picker: saturation/value square, hue strip, hex and RGB, recents, swatches
 src/abr       Photoshop brush files: the sampled tips and their spacing
 src/ui/brushes the brush presets and their picker
 src/distort   the perspective warp behind free distort

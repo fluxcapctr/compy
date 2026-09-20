@@ -1,12 +1,13 @@
-//! A color picker with a hue ring around a saturation/value square, a hex field, and the colors used
-//! lately, in a popover behind a swatch button. Replaces GTK's chooser, whose editor has no wheel.
+//! A color picker like Photoshop's: a big saturation/value square with a hue strip beside it, hex and
+//! RGB fields, and the colors used lately, in a popover behind a swatch button.
 
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-const SIZE: i32 = 220;
-const RING: f64 = 22.0;
+const SIZE: i32 = 256;
+const STRIP: i32 = 20;
+const GAP: i32 = 10;
 const RECENT: usize = 10;
 
 thread_local! { static RECENTS: RefCell<Vec<[f64; 3]>> = const { RefCell::new(Vec::new()) }; }
@@ -109,15 +110,16 @@ fn rounded(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-/// The picker's contents: wheel, hex field, recents.
+/// The picker's contents: the square and hue strip, the hex and RGB fields, recents, swatches.
 struct Picker {
     widget: gtk::Box,
     wheel: gtk::DrawingArea,
     entry: gtk::Entry,
+    channels: [gtk::Entry; 3],
     recents: gtk::Box,
     saved: gtk::FlowBox,
     hsv: Cell<(f64, f64, f64)>,
-    ring_image: RefCell<Option<cairo::ImageSurface>>,
+    strip_image: RefCell<Option<cairo::ImageSurface>>,
     square_image: RefCell<Option<(f64, cairo::ImageSurface)>>,
     dragging: Cell<Option<bool>>,
     on_change: RefCell<Option<Rc<dyn Fn([f64; 3])>>>,
@@ -127,12 +129,18 @@ struct Picker {
 impl Picker {
     fn new(initial: [f64; 3]) -> Rc<Picker> {
         let widget = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
-        let wheel = gtk::DrawingArea::builder().content_width(SIZE).content_height(SIZE).build();
-        let entry = gtk::Entry::builder().max_length(7).width_chars(8).css_classes(["monospace"]).tooltip_text("Hex, like #ff8800").build();
+        let wheel = gtk::DrawingArea::builder().content_width(SIZE + GAP + STRIP).content_height(SIZE).build();
+        let entry = gtk::Entry::builder().max_length(7).width_chars(8).max_width_chars(8).css_classes(["monospace"]).tooltip_text("Hex, like #ff8800").build();
         let recents = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(4).build();
-        let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
-        row.append(&gtk::Label::new(Some("Hex")));
+        // Hex on the left, R G B on the right, one row.
+        let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+        row.append(&gtk::Label::builder().label("Hex").css_classes(["dim-label", "caption"]).build());
         row.append(&entry);
+        let channels: [gtk::Entry; 3] = std::array::from_fn(|_| gtk::Entry::builder().max_length(3).width_chars(4).max_width_chars(4).xalign(0.5).input_purpose(gtk::InputPurpose::Digits).css_classes(["monospace"]).build());
+        for (label, spin) in ["R", "G", "B"].iter().zip(&channels) {
+            row.append(&gtk::Label::builder().label(*label).css_classes(["dim-label", "caption"]).margin_start(4).build());
+            row.append(spin);
+        }
         widget.append(&wheel);
         widget.append(&row);
         widget.append(&recents);
@@ -142,9 +150,9 @@ impl Picker {
         let add = gtk::Button::builder().label("+").has_frame(false).tooltip_text("Save this color as a swatch; right-click a swatch to remove it").build();
         saved_row.append(&add);
         widget.append(&saved_row);
-        let saved = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(2).row_spacing(2).max_children_per_line(10).min_children_per_line(1).build();
+        let saved = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(2).row_spacing(2).max_children_per_line(12).min_children_per_line(1).build();
         widget.append(&saved);
-        let picker = Rc::new(Picker { widget, wheel: wheel.clone(), entry: entry.clone(), recents, saved, hsv: Cell::new(rgb_to_hsv(initial)), ring_image: RefCell::new(None), square_image: RefCell::new(None), dragging: Cell::new(None), on_change: RefCell::new(None), syncing: Cell::new(false) });
+        let picker = Rc::new(Picker { widget, wheel: wheel.clone(), entry: entry.clone(), channels: channels.clone(), recents, saved, hsv: Cell::new(rgb_to_hsv(initial)), strip_image: RefCell::new(None), square_image: RefCell::new(None), dragging: Cell::new(None), on_change: RefCell::new(None), syncing: Cell::new(false) });
         { let p = picker.clone(); wheel.set_draw_func(move |_, cr, w, h| p.draw(cr, w as f64, h as f64)); }
         let drag = gtk::GestureDrag::new();
         { let p = picker.clone(); drag.connect_drag_begin(move |_, x, y| { p.dragging.set(p.region(x, y)); p.pick(x, y); }); }
@@ -152,7 +160,23 @@ impl Picker {
         { let p = picker.clone(); drag.connect_drag_end(move |_, _, _| p.dragging.set(None)); }
         wheel.add_controller(drag);
         { let p = picker.clone(); entry.connect_activate(move |e| { if let Some(rgb) = parse_hex(&e.text()) { p.set_color(rgb); p.emit(); } }); }
-        { let p = picker.clone(); entry.connect_changed(move |e| { if p.syncing.get() { return; } if let Some(rgb) = parse_hex(&e.text()) { if e.text().len() == 7 { p.hsv.set(rgb_to_hsv(rgb)); p.square_image.borrow_mut().take(); p.wheel.queue_draw(); p.emit(); } } }); }
+        { let p = picker.clone(); entry.connect_changed(move |e| { if p.syncing.get() { return; } if let Some(rgb) = parse_hex(&e.text()) { if e.text().len() == 7 { p.hsv.set(rgb_to_hsv(rgb)); p.square_image.borrow_mut().take(); p.sync_channels(); p.wheel.queue_draw(); p.emit(); } } }); }
+        for field in &channels {
+            let p = picker.clone();
+            field.connect_changed(move |_| {
+                if p.syncing.get() { return; }
+                let values: Vec<f64> = p.channels.iter().filter_map(|e| e.text().trim().parse::<u32>().ok()).map(|v| v.min(255) as f64 / 255.0).collect();
+                let Ok(rgb) = <[f64; 3]>::try_from(values) else { return };
+                // Keep the hue when the typed color is gray, so the square does not jump.
+                let (h, sat, v) = rgb_to_hsv(rgb);
+                let old = p.hsv.get();
+                p.hsv.set((if sat <= 0.0 || v <= 0.0 { old.0 } else { h }, sat, v));
+                p.square_image.borrow_mut().take();
+                p.syncing.set(true); p.entry.set_text(&hex(rgb)); p.syncing.set(false);
+                p.wheel.queue_draw();
+                p.emit();
+            });
+        }
         { let p = picker.clone(); add.connect_clicked(move |_| { add_swatch(p.color()); p.fill_swatches(); }); }
         picker.sync_entry();
         picker.fill_recents();
@@ -181,7 +205,7 @@ impl Picker {
     fn on_change(&self, f: Rc<dyn Fn([f64; 3])>) { *self.on_change.borrow_mut() = Some(f); }
     fn color(&self) -> [f64; 3] { let (h, s, v) = self.hsv.get(); hsv_to_rgb(h, s, v) }
     fn set_color(self: &Rc<Self>, rgb: [f64; 3]) {
-        // Keep the hue when the new color is gray, so the ring marker does not jump.
+        // Keep the hue when the new color is gray, so the strip marker does not jump.
         let (h, s, v) = rgb_to_hsv(rgb);
         let old = self.hsv.get();
         self.hsv.set((if s <= 0.0 || v <= 0.0 { old.0 } else { h }, s, v));
@@ -191,7 +215,14 @@ impl Picker {
         self.wheel.queue_draw();
     }
     fn emit(&self) { if let Some(f) = self.on_change.borrow().as_ref() { f(self.color()); } }
-    fn sync_entry(&self) { self.syncing.set(true); self.entry.set_text(&hex(self.color())); self.syncing.set(false); }
+    /// The hex field and the RGB fields, from the color.
+    fn sync_entry(&self) { self.syncing.set(true); self.entry.set_text(&hex(self.color())); self.syncing.set(false); self.sync_channels(); }
+    fn sync_channels(&self) {
+        self.syncing.set(true);
+        let c = self.color();
+        for (field, v) in self.channels.iter().zip(c) { field.set_text(&((v * 255.0).round() as u8).to_string()); }
+        self.syncing.set(false);
+    }
 
     fn fill_recents(self: &Rc<Self>) {
         while let Some(child) = self.recents.first_child() { self.recents.remove(&child); }
@@ -207,33 +238,24 @@ impl Picker {
         }
     }
 
-    fn geometry(&self) -> (f64, f64, f64, f64) {
-        let c = SIZE as f64 / 2.0;
-        let outer = c - 2.0;
-        let inner = outer - RING;
-        let half = (inner - 6.0) / std::f64::consts::SQRT_2;
-        (c, outer, inner, half)
-    }
-
-    /// Some(true) on the ring, Some(false) in the square, None elsewhere.
-    fn region(&self, x: f64, y: f64) -> Option<bool> {
-        let (c, outer, inner, half) = self.geometry();
-        let d = ((x - c).powi(2) + (y - c).powi(2)).sqrt();
-        if d <= outer + 4.0 && d >= inner - 4.0 { return Some(true); }
-        if (x - c).abs() <= half + 4.0 && (y - c).abs() <= half + 4.0 { return Some(false); }
+    /// Some(true) on the hue strip, Some(false) in the square, None in the gap.
+    fn region(&self, x: f64, _y: f64) -> Option<bool> {
+        if x <= SIZE as f64 + 2.0 { return Some(false); }
+        if x >= (SIZE + GAP) as f64 - 2.0 { return Some(true); }
         None
     }
 
     fn pick(&self, x: f64, y: f64) {
-        let Some(on_ring) = self.dragging.get() else { return };
-        let (c, _, _, half) = self.geometry();
+        let Some(on_strip) = self.dragging.get() else { return };
+        let side = SIZE as f64;
         let (mut h, mut s, mut v) = self.hsv.get();
-        if on_ring {
-            h = (y - c).atan2(x - c).to_degrees().rem_euclid(360.0);
+        if on_strip {
+            h = (y / side).clamp(0.0, 1.0) * 360.0;
+            if h >= 360.0 { h = 359.999; }
             self.square_image.borrow_mut().take();
         } else {
-            s = ((x - c + half) / (2.0 * half)).clamp(0.0, 1.0);
-            v = 1.0 - ((y - c + half) / (2.0 * half)).clamp(0.0, 1.0);
+            s = (x / side).clamp(0.0, 1.0);
+            v = 1.0 - (y / side).clamp(0.0, 1.0);
         }
         self.hsv.set((h, s, v));
         self.sync_entry();
@@ -242,35 +264,15 @@ impl Picker {
     }
 
     fn draw(&self, cr: &cairo::Context, _w: f64, _h: f64) {
-        let (c, outer, inner, half) = self.geometry();
+        let side = SIZE as f64;
         let (h, s, v) = self.hsv.get();
-        // The ring, rendered once.
-        if self.ring_image.borrow().is_none() {
+        // The saturation/value square for the current hue: white to the hue across, to black down.
+        let stale = self.square_image.borrow().as_ref().is_none_or(|(hue, _)| *hue != h);
+        if stale {
             if let Ok(image) = crate::raster::new_argb(SIZE, SIZE) {
                 let _ = crate::raster::with_bytes_raw_mut(&image, |data, stride| {
                     for y in 0..SIZE { for x in 0..SIZE {
-                        let (dx, dy) = (x as f64 + 0.5 - c, y as f64 + 0.5 - c);
-                        let d = (dx * dx + dy * dy).sqrt();
-                        let cover = (outer - d + 0.5).clamp(0.0, 1.0) * (d - inner + 0.5).clamp(0.0, 1.0);
-                        if cover <= 0.0 { continue; }
-                        let rgb = hsv_to_rgb(dy.atan2(dx).to_degrees(), 1.0, 1.0);
-                        let i = y as usize * stride + x as usize * 4;
-                        let a = (cover * 255.0).round() as u8;
-                        data[i] = (rgb[2] * a as f64).round() as u8; data[i + 1] = (rgb[1] * a as f64).round() as u8; data[i + 2] = (rgb[0] * a as f64).round() as u8; data[i + 3] = a;
-                    } }
-                });
-                *self.ring_image.borrow_mut() = Some(image);
-            }
-        }
-        if let Some(ring) = self.ring_image.borrow().as_ref() { let _ = cr.set_source_surface(ring, 0.0, 0.0); let _ = cr.paint(); }
-        // The saturation/value square for the current hue.
-        let stale = self.square_image.borrow().as_ref().is_none_or(|(hue, _)| *hue != h);
-        if stale {
-            let side = (half * 2.0).round() as i32;
-            if let Ok(image) = crate::raster::new_argb(side, side) {
-                let _ = crate::raster::with_bytes_raw_mut(&image, |data, stride| {
-                    for y in 0..side { for x in 0..side {
-                        let rgb = hsv_to_rgb(h, x as f64 / (side - 1) as f64, 1.0 - y as f64 / (side - 1) as f64);
+                        let rgb = hsv_to_rgb(h, x as f64 / (SIZE - 1) as f64, 1.0 - y as f64 / (SIZE - 1) as f64);
                         let i = y as usize * stride + x as usize * 4;
                         data[i] = (rgb[2] * 255.0).round() as u8; data[i + 1] = (rgb[1] * 255.0).round() as u8; data[i + 2] = (rgb[0] * 255.0).round() as u8; data[i + 3] = 255;
                     } }
@@ -278,17 +280,37 @@ impl Picker {
                 *self.square_image.borrow_mut() = Some((h, image));
             }
         }
-        if let Some((_, square)) = self.square_image.borrow().as_ref() { let _ = cr.set_source_surface(square, (c - half).round(), (c - half).round()); let _ = cr.paint(); }
-        // Markers: hue on the ring, the color in the square.
-        let a = h.to_radians();
-        let r = (outer + inner) / 2.0;
-        cr.arc(c + a.cos() * r, c + a.sin() * r, 6.0, 0.0, std::f64::consts::TAU);
+        if let Some((_, square)) = self.square_image.borrow().as_ref() { let _ = cr.set_source_surface(square, 0.0, 0.0); let _ = cr.paint(); }
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.6); cr.set_line_width(1.0); cr.rectangle(0.5, 0.5, side - 1.0, side - 1.0); let _ = cr.stroke();
+        // The hue strip, rendered once, red at the top through the spectrum back to red.
+        if self.strip_image.borrow().is_none() {
+            if let Ok(image) = crate::raster::new_argb(STRIP, SIZE) {
+                let _ = crate::raster::with_bytes_raw_mut(&image, |data, stride| {
+                    for y in 0..SIZE {
+                        let rgb = hsv_to_rgb(y as f64 / SIZE as f64 * 360.0, 1.0, 1.0);
+                        for x in 0..STRIP {
+                            let i = y as usize * stride + x as usize * 4;
+                            data[i] = (rgb[2] * 255.0).round() as u8; data[i + 1] = (rgb[1] * 255.0).round() as u8; data[i + 2] = (rgb[0] * 255.0).round() as u8; data[i + 3] = 255;
+                        }
+                    }
+                });
+                *self.strip_image.borrow_mut() = Some(image);
+            }
+        }
+        let sx = (SIZE + GAP) as f64;
+        if let Some(strip) = self.strip_image.borrow().as_ref() { let _ = cr.set_source_surface(strip, sx, 0.0); let _ = cr.paint(); }
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.6); cr.rectangle(sx + 0.5, 0.5, STRIP as f64 - 1.0, side - 1.0); let _ = cr.stroke();
+        // Markers: a bar across the strip at the hue, a ring in the square at the color.
+        let hy = (h / 360.0 * side).round() + 0.5;
+        cr.rectangle(sx - 2.0, hy - 3.0, STRIP as f64 + 4.0, 6.0);
         cr.set_source_rgb(1.0, 1.0, 1.0); cr.set_line_width(2.0); let _ = cr.stroke_preserve();
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.6); cr.set_line_width(1.0); let _ = cr.stroke();
-        let (mx, my) = (c - half + s * 2.0 * half, c - half + (1.0 - v) * 2.0 * half);
+        let (mx, my) = (s * (side - 1.0), (1.0 - v) * (side - 1.0));
         cr.arc(mx, my, 6.0, 0.0, std::f64::consts::TAU);
-        cr.set_source_rgb(if v > 0.5 { 0.0 } else { 1.0 }, if v > 0.5 { 0.0 } else { 1.0 }, if v > 0.5 { 0.0 } else { 1.0 }); cr.set_line_width(2.0); let _ = cr.stroke_preserve();
-        cr.set_source_rgb(if v > 0.5 { 1.0 } else { 0.0 }, if v > 0.5 { 1.0 } else { 0.0 }, if v > 0.5 { 1.0 } else { 0.0 }); cr.set_line_width(1.0); let _ = cr.stroke();
+        let dark = v > 0.5 && !(s > 0.6 && (h < 30.0 || h > 330.0 || (200.0..280.0).contains(&h)));
+        let (a, b) = if dark { (0.0, 1.0) } else { (1.0, 0.0) };
+        cr.set_source_rgb(a, a, a); cr.set_line_width(2.0); let _ = cr.stroke_preserve();
+        cr.set_source_rgb(b, b, b); cr.set_line_width(1.0); let _ = cr.stroke();
     }
 }
 

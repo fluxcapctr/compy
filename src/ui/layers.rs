@@ -321,6 +321,8 @@ impl Inner {
             row.set_opacity(if info.visible { 1.0 } else { 0.45 });
 
             let list_row = gtk::ListBoxRow::builder().child(&row).build();
+            // A hand over the row: it is something to click, like a link.
+            list_row.set_cursor_from_name(Some("pointer"));
             if multi.contains(&info.id) && Some(info.id) != selected { list_row.add_css_class("multi"); }
             self.connect_drag(&list_row, info.id, info.group);
             {

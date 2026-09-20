@@ -41,6 +41,7 @@ fn spin(grid: &gtk::Grid, row: i32, label: &str, low: f64, high: f64, step: f64,
     s.set_digits(digits);
     s.set_value(value);
     s.set_hexpand(true);
+    s.set_alignment(0.5);
     grid.attach(&s, 1, row, 1, 1);
     s
 }
