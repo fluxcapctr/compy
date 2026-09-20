@@ -330,3 +330,108 @@ can only read files, skip that.
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_6.md. No em dashes in your output.
+
+# Round 7 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 6 are fixed (see REVIEW_RESULTS.md
+through REVIEW_RESULTS_6.md); this round covers the code written since, commits d304f62 through 894a95c.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, seventh pass.
+
+Context: a Linux rebuild of a macOS image editor named Compy, with an in-app assistant (also Compy) that
+drives the document through Claude Code over a Unix socket and an MCP server. The Swift source in
+reference/ is the spec (read-only); the C pixel core in csrc/ is compiled unchanged (do not edit it).
+Read CLAUDE.md and README.md first. REVIEW_RESULTS.md through REVIEW_RESULTS_6.md hold the earlier
+findings, all fixed; do not re-report them, but do check that the round 6 fixes hold (area 1).
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there. A partial report that says where it ended is worth more than an unfinished one.
+
+Safety: do not run the app with COMPOSITOR_GPU set to anything (the GPU path is parked; see
+GPU_HANDOFF.md, and do not re-review it). Do not start the app with --assistant while a real one is open.
+Do not send anything to fal.ai; tests that need the network are ignored. Do not write into
+~/.local/share/compositor/brushes or patterns; the user's brush sets and 114 patterns live there.
+
+Cover only what is new since round 6 (git log d304f62^..894a95c). Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (169 tests should pass; the
+ignored ones need the network, a downloaded model or a GPU) and report anything that fails. If you can
+only read files, skip that.
+
+1. The round 6 fixes, as fixes: check each item in the status table of REVIEW_RESULTS_6.md against the
+   current code.
+2. Filters and adjustments in src/filters.rs: Sharpen (unsharp threshold on premultiplied channels,
+   the luminosity branch's noise gate, a fully transparent layer, alpha edges), BrightnessContrast::table
+   (monotonic, endpoints), Vibrance::pixel (skin term, saturation below -100 clamped), BlackWhite::gray
+   (ties between channels, negative weights), PhotoFilter::pixel (preserve luminosity with a zero
+   luminance), Threshold, Posterize::table (levels 2 and 255), ShadowsHighlights::apply (the blurred
+   luma on transparent pixels, radius 500 on a 1 pixel layer), SelectiveColor::membership and pixel
+   (whites, neutrals and blacks summing, relative vs absolute, black slider sign), ChannelMixer,
+   RadialBlur::apply (center outside the layer, amount 100 zoom sampling past the edges, cost at 100
+   megapixels with 24 samples per pixel), high_pass. map_straight rounding. Every new
+   Adjustment variant: from_record with missing or wrong fields, record_is_valid bounds against what
+   normalized() accepts, to_record round trips, is_identity short circuits, apply on alpha 0 pixels.
+   ADJUSTMENT_KINDS in src/format and the validator. The GPU plan's `_ => return None` for new kinds.
+3. The dialog pages in src/ui/filter_dialog.rs for every new Kind (open_adjustment mapping,
+   current_adjustment, the Selective Color range dropdown and its slider sync, the Channel Mixer's
+   twelve sliders, the Gradient Map bar and editor hook), and the name tables in src/ui/mod.rs,
+   src/main.rs and src/ui/agent.rs (a kind present in one and missing in another).
+4. Gradients: src/gradient.rs (normalized with NaN, duplicate positions, knots, at() at the ends,
+   reversed twice, table, from_json with junk, presets), shape_t for each shape at the start point and
+   with start == end, raster at document size (cost, the 1024-step lut), Document::gradient_fill (the
+   Reflected pattern's stop order, angle and diamond on a rotated or flipped layer grid, mask target,
+   preview then commit, opacity), the old gradient() wrapper, Doc's gradient_preset index against
+   gradient_preset_names, the editor in src/ui/gradient_editor.rs (add on a stop's edge, drag past the
+   ends, delete down to two, the picked index after normalization, the color button's callback while
+   syncing, a preset chosen while dragging), the options bar preview redraw on palette change,
+   GradientMap::stops in records (validation, reversed with stops, the GPU LUT).
+5. Blend If: src/effects.rs BlendIf (weight at feather 0 and 127, black above white, serde defaults),
+   Effects::blend_if and is_active, Renderer::styled's early return (the render() call on a 1x1 alpha
+   is made three times), draw_own's `direct` and apply_blend_if (the source surface's device offset,
+   HiDPI device scale, the target readable or not, the offscreen routing in draw(), a layer partly off
+   canvas, a clipped layer, a layer inside a folder, blend modes and opacity after masking, the mask's
+   A8 stride), and the Layer Style page (enabled/set_enabled/original_page).
+6. Patterns: src/patterns.rs (clean() and names that collide, list() ordering, load on a non-PNG),
+   Document::define_pattern (selection bounds vs composite, 4096 limit, transparent areas),
+   fill_pattern (scale matrix direction, mask target gray conversion, selection coverage, opacity),
+   StrokeKind::Pattern (tiled Sample::pixel with negative coordinates, a 1x1 pattern), the Clone
+   tool's Pattern dropdown (index vs names after a new pattern is defined while the app runs), the Fill
+   with Pattern dialog, the Compy tools define_pattern and fill_pattern, and `compositor patterns
+   import` (src/main.rs) with abr::patterns and read_pattern in src/abr.rs (channel count 24 with
+   unwritten channels, a channel rect smaller than the pattern, 16-bit depth, PackBits row tables,
+   a name of 4096 chars, the budget, gray vs RGB, versions 6/7/10 and a .pat file).
+7. Brush files: src/abr.rs versions 7 and 10 accepted with the version 6 record layout (is the
+   subversion 2 skip of 264 bytes right for version 10; check against the RSCO files in
+   ~/.local/share/compositor/brushes read-only), the 400 megapixel budget against memory,
+   shrink_tip (odd sizes, factor rounding, a 1 pixel wide tip), and the picker's load path.
+8. Paragraph text: TextStyle.width (serde default, from_record of an old file), layout_for with
+   width and wrap, render()'s extents with a width narrower than one word, caret and index_at with
+   wrapping, the Type page Width field and show(), the TextBox drag in src/ui/canvas.rs (set_text
+   merging history entries per motion event, a drag that starts on an existing type layer, width below
+   24, the drag when text_edit is None), Compy's width argument.
+9. Path shapes: Document::add_path_shape_layer, shape_path, set_shape_path, redraw_shape's Path
+   branch (baseWidth 0, a shape scaled to 1 pixel, rotation ignored: is that stated), anchors_json and
+   anchors_from_json (partial handles), path_shape_image (an open path filled closed), the canvas's
+   path_shape/shape_edit/shape_apply (tool switch while a stroke is in progress, applying to a
+   rectangle shape), the PSD exporter with a Path shape record.
+10. Compy the assistant: brush_stroke in src/ui/agent.rs (5000 points, tip lookup by substring, a
+    preset's spacing and jitter, heal on a mask, pattern kind without a name, the edit wrapper around
+    replay_stroke), the state's brush_tips and patterns lists (cost per call), running_job_status and
+    the turn clock in send_now (a job left in JOBS after a failure, the label for generative_fill,
+    status overwritten after Done), model_verb, the agent tool schemas against agent_tool's args for
+    every new tool (gradient_fill, stroke_selection, select_color_range, align_layers,
+    distribute_layers, define_pattern, fill_pattern, brush_stroke, layer_style's blend_if key).
+11. Earlier in this range: Dodge/Burn/Sponge in src/brush.rs (alpha 0 pixels, the 0.6 factor, range
+    weights at luma 0 and 1, base alpha kept), the Dodge tool's mask refusal, stroke_selection (band
+    for width 1, position center with width 1, a selection touching the canvas edge, mask target),
+    select_color_range (fuzziness 0, transparent pixels, all_layers false with no active layer),
+    align_layers and distribute_layers (rotated layers' bounds, groups, one layer selected, the
+    Distribute rounding), the header bar mark (icons::compy_mark's thread local decode), the canvas
+    redraw idle after the first frame (any chance of a redraw loop), the assistant status timer.
+12. Anything in tests/features_g.rs (the new tests) or the unit tests in src/gradient.rs, src/abr.rs
+    and src/filters.rs that asserts the wrong value or passes for the wrong reason.
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_7.md. No em dashes in your output.
