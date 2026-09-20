@@ -186,8 +186,25 @@ impl FilterDialog {
                     grid.attach(&button, 1, row, 1, 1);
                 }
                 let reverse = gtk::CheckButton::with_label("Reverse");
+                reverse.set_active(s.gradient.reversed);
                 { let this = self.clone(); reverse.connect_toggled(move |c| { this.settings.borrow_mut().gradient.reversed = c.is_active(); this.schedule(); }); }
                 grid.attach(&reverse, 1, 2, 2, 1);
+                // More colors than two: the gradient editor fills the map's stops.
+                let bar = gtk::DrawingArea::builder().content_height(18).hexpand(true).tooltip_text("The map's gradient; click to edit it with more colors").build();
+                { let this = self.clone(); bar.set_draw_func(move |_, cr, w, h| { let g = this.settings.borrow().gradient.gradient(); super::tools::draw_gradient_bar(cr, w as f64, h as f64, &g); }); }
+                {
+                    let (this, bar2) = (self.clone(), bar.clone());
+                    let click = gtk::GestureClick::new();
+                    click.connect_released(move |g, _, _, _| {
+                        let Some(root) = g.widget().and_then(|w| w.root()).and_downcast::<gtk::Window>() else { return };
+                        let initial = { let st = this.settings.borrow(); let mut m = st.gradient.clone(); m.reversed = false; m.gradient() };
+                        let (t2, b2) = (this.clone(), bar2.clone());
+                        super::gradient_editor::open(&root, initial, [0.0; 3], [1.0; 3], Rc::new(move |g: crate::gradient::Gradient| { t2.settings.borrow_mut().gradient.stops = g.normalized().stops; b2.queue_draw(); t2.schedule(); }));
+                    });
+                    bar.add_controller(click);
+                }
+                grid.attach(&gtk::Label::builder().label("Gradient").xalign(0.0).build(), 0, 3, 1, 1);
+                grid.attach(&bar, 1, 3, 2, 1);
             }
             Kind::Levels => {
                 let channel = gtk::DropDown::from_strings(&["RGB", "Red", "Green", "Blue"]);

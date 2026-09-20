@@ -135,7 +135,7 @@ pixels (Alt as well duplicates them, Ctrl+arrows nudge them); the layer grows if
 
 **Tools.** Crop (C): drag a frame that snaps to layer and canvas edges, Alt keeps its center, a ratio
 dropdown fixes the proportions, Return applies. Eyedropper (I): picks the foreground color from the canvas
-(Alt-click the background); Alt-click with the Brush does the same. Gradient (G): linear or radial, foreground
+(Alt-click the background); Alt-click with the Brush does the same. Gradient (G): any shape and stops (see Gradients with stops), foreground
 to background or to transparent, reversed, at an opacity, over the layer or its mask inside the selection.
 Shape (U): rectangles with rounded corners and ellipses in the foreground color on a new layer, redrawn
 crisp when scaled (Shift+U swaps the kind). Type (T): click the canvas to set text on a new layer in the
@@ -238,6 +238,23 @@ and Distribute spaces three or more evenly. Compy has all of these as tools: fil
 `posterize`, adjustment_layer with the same kinds, `stroke_selection`, `select_color_range`,
 `align_layers` and `distribute_layers`. Script flags: `--filter unsharp|sharpen|brightness|vibrance|bw|photo|threshold|posterize`,
 `--tool dodge`.
+
+**More adjustments and blurs.** Image > Shadows/Highlights (each amount with a radius, judged by the
+surroundings), Selective Color (cyan, magenta, yellow and black within one color family, relative or
+absolute) and Channel Mixer (each channel from the others plus a constant, with a monochrome mode), all
+three also adjustment layers. Filter > High Pass (frequency separation; set the layer to Overlay to
+sharpen with it) and Radial Blur (spin or zoom about a movable center). Compy: filter kinds
+`shadows_highlights`, `selective_color`, `channel_mixer`, `high_pass`, `radial_blur`; script flags
+`--filter shadows|selective|mixer|highpass|radial`.
+
+**Gradients with stops.** The Gradient tool's options show the gradient itself; click it to open the
+editor: color stops under the bar, opacity stops over it, click an empty spot to add one, drag to move,
+pick one to set its color, opacity or location, Delete Stop to remove it. Presets: Foreground to
+Background and Foreground to Transparent (which follow the palette), Black to White, Spectrum, Sunset,
+Sky, Chrome, Copper, Transparent Stripes, and Custom (what the editor made). Shapes: Linear, Radial,
+Angle (a sweep around the start), Reflected (mirrored across the start) and Diamond, plus Reverse and
+Opacity. Gradient Map adjustments take the same multi-stop gradient (click the bar in their dialog),
+saved with the layer. Compy: `gradient_fill` with start, end, shape and a list of stops.
 
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends

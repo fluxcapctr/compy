@@ -399,6 +399,20 @@ impl App {
                         if let Some(v) = args.get("color_overlay") { let mut o = crate::effects::Overlay::default(); o.color = color(v, "color", o.color); o.opacity = f(v, "opacity", o.opacity); e.color_overlay = Some(o); }
                         dd.set_effects(id, Some(&e))?; json!("styled")
                     }
+                    "gradient_fill" => {
+                        let point = |k: &str| args.get(k).and_then(Value::as_array).and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))).ok_or_else(|| anyhow::anyhow!("{k} must be [x, y]"));
+                        let (start, end) = (point("start")?, point("end")?);
+                        let shape = crate::gradient::Shape::from_name(&text(args, "shape").unwrap_or_else(|| "linear".into())).ok_or_else(|| anyhow::anyhow!("shape must be linear, radial, angle, reflected or diamond"))?;
+                        let mut g = crate::gradient::Gradient { stops: Vec::new(), alphas: Vec::new() };
+                        for st in args.get("stops").and_then(Value::as_array).cloned().unwrap_or_default() {
+                            let position = st.get("position").and_then(Value::as_f64).unwrap_or(0.0);
+                            let color = st.get("color").and_then(Value::as_str).and_then(parse_color).ok_or_else(|| anyhow::anyhow!("each stop needs a color like #rrggbb"))?;
+                            g.stops.push(crate::gradient::Stop { position, color });
+                            g.alphas.push(crate::gradient::AlphaStop { position, alpha: st.get("alpha").and_then(Value::as_f64).unwrap_or(1.0) });
+                        }
+                        if g.stops.len() < 2 { bail!("give at least two stops"); }
+                        dd.gradient_fill(start, end, shape, &g, num(args, "opacity").unwrap_or(1.0), true)?; json!("gradient drawn")
+                    }
                     "stroke_selection" => {
                         let color = parse_color(&text(args, "color").unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("color must look like #rrggbb"))?;
                         let position = match text(args, "position").unwrap_or_else(|| "center".into()).as_str() { "inside" => 0, "outside" => 2, _ => 1 };

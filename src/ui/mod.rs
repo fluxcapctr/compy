@@ -2,6 +2,7 @@
 //! and a menu of edits that run on the current tab's document.
 
 pub mod brushes;
+mod gradient_editor;
 mod canvas;
 pub mod color_wheel;
 mod agent;
@@ -78,8 +79,11 @@ pub struct Doc {
     /// A free distortion in progress: the layer's corners on the document.
     pub distort: Option<crate::distort::Corners>,
     /// Gradient tool: radial rather than linear, foreground to transparent rather than to background, reversed, opacity.
-    pub gradient_radial: bool,
-    pub gradient_to_transparent: bool,
+    /// The Gradient tool: its shape, which preset (0 foreground to background, 1 foreground to
+    /// transparent, 2 and up the built-in presets, last the custom one) and the custom gradient.
+    pub gradient_shape: crate::gradient::Shape,
+    pub gradient_preset: u32,
+    pub gradient_custom: crate::gradient::Gradient,
     pub gradient_reversed: bool,
     pub gradient_opacity: f64,
     /// A gradient being dragged: its two ends on the document.
@@ -158,7 +162,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_shape: crate::gradient::Shape::Linear, gradient_preset: 0, gradient_custom: crate::gradient::Gradient::default(), gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -181,7 +185,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_shape: crate::gradient::Shape::Linear, gradient_preset: 0, gradient_custom: crate::gradient::Gradient::default(), gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }

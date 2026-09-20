@@ -989,7 +989,7 @@ impl Canvas {
             }
         };
         match result {
-            Ok(Some((fg, bg, c))) => { self.rail.sync_palette(fg, bg); self.notify(&format!("Picked {}", super::color_wheel::hex(c))); }
+            Ok(Some((fg, bg, c))) => { self.rail.sync_palette(fg, bg); self.options.sync_gradient(); self.notify(&format!("Picked {}", super::color_wheel::hex(c))); }
             Ok(None) => self.notify("Nothing to pick here: the canvas is transparent at that point."),
             Err(error) => self.notify(&format!("{error:#}")),
         }
@@ -997,13 +997,17 @@ impl Canvas {
 
     // Gradient, shape and crop drags
 
-    /// The gradient's two colors from the palette and options, with alpha.
-    fn gradient_colors(d: &super::Doc) -> [[f64; 4]; 2] {
-        let fg = d.brush.color;
-        let mut colors = if d.gradient_to_transparent { [[fg[0], fg[1], fg[2], 1.0], [fg[0], fg[1], fg[2], 0.0]] } else { let bg = d.background; [[fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0]] };
-        if d.document.mask_target() { let w = if d.mask_paint_white { 1.0 } else { 0.0 }; colors = if d.gradient_to_transparent { [[w, w, w, 1.0], [w, w, w, 0.0]] } else { [[w, w, w, 1.0], [1.0 - w, 1.0 - w, 1.0 - w, 1.0]] }; }
-        if d.gradient_reversed { colors.swap(0, 1); }
-        colors
+    /// The gradient the options describe: a palette preset made from the current colors, a built-in one,
+    /// or the custom gradient; reversed when asked; gray when a mask is the target.
+    pub fn current_gradient(d: &super::Doc) -> crate::gradient::Gradient {
+        let g = gradient_for(d.gradient_preset, d.brush.color, d.background, &d.gradient_custom);
+        let g = if d.gradient_reversed { g.reversed() } else { g };
+        if d.document.mask_target() {
+            // On a mask the palette presets paint white (or black) toward the other, as the Brush does.
+            let w = if d.mask_paint_white { 1.0 } else { 0.0 };
+            return match d.gradient_preset { 0 => crate::gradient::Gradient::two([w; 3], [1.0 - w; 3]), 1 => crate::gradient::Gradient::to_transparent([w; 3]), _ => g.grayed() };
+        }
+        g
     }
 
     fn crop_ratio(d: &super::Doc) -> Option<f64> {
@@ -1065,8 +1069,8 @@ impl Canvas {
                     end = (start.0 + len * angle.cos(), start.1 + len * angle.sin());
                 }
                 d.gradient_line = Some((start, end));
-                let (colors, radial, opacity) = (Self::gradient_colors(&d), d.gradient_radial, d.gradient_opacity);
-                let result = d.document.gradient(start, end, radial, colors, opacity, false);
+                let (gradient, shape, opacity) = (Self::current_gradient(&d), d.gradient_shape, d.gradient_opacity);
+                let result = d.document.gradient_fill(start, end, shape, &gradient, opacity, false);
                 drop(d);
                 if let Err(error) = result { self.notify(&format!("{error:#}")); }
             }
@@ -1123,8 +1127,8 @@ impl Canvas {
                     let line = d.gradient_line.take();
                     match line {
                         Some((start, end)) if (end.0 - start.0).hypot(end.1 - start.1) >= 0.5 => {
-                            let (colors, radial, opacity) = (Self::gradient_colors(&d), d.gradient_radial, d.gradient_opacity);
-                            d.document.gradient(start, end, radial, colors, opacity, true)
+                            let (gradient, shape, opacity) = (Self::current_gradient(&d), d.gradient_shape, d.gradient_opacity);
+                            d.document.gradient_fill(start, end, shape, &gradient, opacity, true)
                         }
                         _ => { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } Ok(()) }
                     }
@@ -1566,12 +1570,12 @@ impl Canvas {
             'x' | 'X' => {
                 if d.document.mask_target() { d.mask_paint_white = !d.mask_paint_white; } else { let fg = d.brush.color; d.brush.color = d.background; d.background = fg; }
                 let (fg, bg) = (d.brush.color, d.background); let mask = d.document.mask_target();
-                drop(d); self.rail.sync_palette(fg, bg); self.sync_inspector(); if mask { self.options.sync_mask_paint(&self.doc); } return true;
+                drop(d); self.rail.sync_palette(fg, bg); self.options.sync_gradient(); self.sync_inspector(); if mask { self.options.sync_mask_paint(&self.doc); } return true;
             }
             'd' | 'D' => {
                 if d.document.mask_target() { d.mask_paint_white = false; } else { d.brush.color = [0.0; 3]; d.background = [1.0; 3]; }
                 let (fg, bg) = (d.brush.color, d.background); let mask = d.document.mask_target();
-                drop(d); self.rail.sync_palette(fg, bg); if mask { self.options.sync_mask_paint(&self.doc); } return true;
+                drop(d); self.rail.sync_palette(fg, bg); self.options.sync_gradient(); if mask { self.options.sync_mask_paint(&self.doc); } return true;
             }
             'U' if d.tool == Tool::Shape => { d.shape_ellipse = !d.shape_ellipse; let e = d.shape_ellipse; drop(d); self.options.sync_shape_kind(e); return true; }
             _ => {}
@@ -2265,4 +2269,24 @@ fn word_end(text: &str, i: usize) -> usize {
     let skipped = tail.trim_start_matches(|c: char| !c.is_alphanumeric());
     let after = skipped.trim_start_matches(|c: char| c.is_alphanumeric());
     text.len() - after.len()
+}
+
+
+/// The gradient a preset index names: the two palette presets, then the built-ins, then the custom one.
+pub fn gradient_for(preset: u32, foreground: [f64; 3], background: [f64; 3], custom: &crate::gradient::Gradient) -> crate::gradient::Gradient {
+    let presets = crate::gradient::Gradient::presets();
+    match preset {
+        0 => crate::gradient::Gradient::two(foreground, background),
+        1 => crate::gradient::Gradient::to_transparent(foreground),
+        n if (n as usize) < 2 + presets.len() => presets[n as usize - 2].1.clone(),
+        _ => custom.normalized(),
+    }
+}
+
+/// The names the preset dropdown shows, in `gradient_for`'s order.
+pub fn gradient_preset_names() -> Vec<String> {
+    let mut names = vec!["Foreground to Background".to_string(), "Foreground to Transparent".to_string()];
+    names.extend(crate::gradient::Gradient::presets().into_iter().map(|(n, _)| n.to_string()));
+    names.push("Custom".into());
+    names
 }

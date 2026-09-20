@@ -114,7 +114,19 @@ pub struct OptionsBar {
     roundness: gtk::SpinButton,
     jitter: gtk::SpinButton,
     type_page: TypePage,
+    gradient_preview: gtk::DrawingArea,
     syncing: std::cell::Cell<bool>,
+}
+
+/// A gradient over a checkerboard, as the options bar and the editor show it.
+pub fn draw_gradient_bar(cr: &cairo::Context, w: f64, h: f64, gradient: &crate::gradient::Gradient) {
+    let tile = 6.0;
+    for row in 0..(h / tile).ceil() as i32 { for col in 0..(w / tile).ceil() as i32 { let v = if (row + col) % 2 == 0 { 0.55 } else { 0.75 }; cr.set_source_rgb(v, v, v); cr.rectangle(col as f64 * tile, row as f64 * tile, tile, tile); let _ = cr.fill(); } }
+    let p = cairo::LinearGradient::new(0.0, 0.0, w, 0.0);
+    gradient.fill_pattern(&p, 0.0, 1.0);
+    let _ = cr.set_source(&p);
+    cr.rectangle(0.0, 0.0, w, h);
+    let _ = cr.fill();
 }
 
 /// The Type tool's options: the font and its setting.
@@ -436,23 +448,44 @@ impl OptionsBar {
         brushes.append(&extra);
         stack.add_named(&brushes, Some("brushes"));
 
-        // Gradient.
+        // Gradient: a preview that opens the editor, the preset, the shape, reverse and opacity.
         let gradient = row();
-        let gshape = gtk::DropDown::from_strings(&["Linear", "Radial"]);
-        gshape.set_tooltip_text(Some("Linear runs from the start to the end; radial is centered on the start with the end on its rim"));
-        { let doc = doc.clone(); gshape.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_radial = s.selected() == 1; } }); }
+        let preview = gtk::DrawingArea::builder().content_width(96).content_height(18).tooltip_text("The gradient; click to edit its colors and opacity stops").css_classes(["gradient-preview"]).build();
+        { let doc = doc.clone(); preview.set_draw_func(move |_, cr, w, h| { if let Ok(d) = doc.try_borrow() { draw_gradient_bar(cr, w as f64, h as f64, &super::canvas::Canvas::current_gradient(&d)); } }); }
+        let preset = gtk::DropDown::from_strings(&super::canvas::gradient_preset_names().iter().map(String::as_str).collect::<Vec<_>>());
+        preset.set_tooltip_text(Some("Foreground and background presets follow the palette; Custom is what the editor made"));
+        { let (doc, preview) = (doc.clone(), preview.clone()); preset.connect_selected_notify(move |p| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_preset = p.selected(); } preview.queue_draw(); }); }
+        {
+            let (doc_c, preview_c, preset_c) = (doc.clone(), preview.clone(), preset.clone());
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |g, _, _, _| {
+                let Some(root) = g.widget().and_then(|w| w.root()).and_downcast::<gtk::Window>() else { return };
+                let (initial, fg, bg) = { let d = doc_c.borrow(); (super::canvas::gradient_for(d.gradient_preset, d.brush.color, d.background, &d.gradient_custom), d.brush.color, d.background) };
+                let (doc2, preview2, preset2) = (doc_c.clone(), preview_c.clone(), preset_c.clone());
+                let custom_index = super::canvas::gradient_preset_names().len() as u32 - 1;
+                super::gradient_editor::open(&root, initial, fg, bg, std::rc::Rc::new(move |g: crate::gradient::Gradient| {
+                    if let Ok(mut d) = doc2.try_borrow_mut() { d.gradient_custom = g; d.gradient_preset = custom_index; }
+                    preset2.set_selected(custom_index);
+                    preview2.queue_draw();
+                }));
+            });
+            preview.add_controller(click);
+        }
+        gradient.append(&preview);
+        gradient.append(&preset);
+        let gshape = gtk::DropDown::from_strings(&crate::gradient::Shape::ALL.map(|s| s.name()));
+        gshape.set_tooltip_text(Some("Linear runs start to end; Radial spreads from the start; Angle sweeps around it; Reflected mirrors across it; Diamond grows a square from it"));
+        { let doc = doc.clone(); gshape.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_shape = crate::gradient::Shape::ALL[s.selected() as usize]; } }); }
         gradient.append(&gshape);
-        let gstyle = gtk::DropDown::from_strings(&["Foreground to Transparent", "Foreground to Background"]);
-        { let doc = doc.clone(); gstyle.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_to_transparent = s.selected() == 0; } }); }
-        gradient.append(&gstyle);
         let reverse = gtk::CheckButton::builder().label("Reverse").build();
-        { let doc = doc.clone(); reverse.connect_toggled(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_reversed = c.is_active(); } }); }
+        { let (doc, preview) = (doc.clone(), preview.clone()); reverse.connect_toggled(move |c| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_reversed = c.is_active(); } preview.queue_draw(); }); }
         gradient.append(&reverse);
         gradient.append(&gtk::Label::new(Some("Opacity")));
         let gopacity = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
         gopacity.set_value(100.0);
         { let doc = doc.clone(); gopacity.connect_value_changed(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.gradient_opacity = s.value() / 100.0; } }); }
         gradient.append(&gopacity);
+        let gradient_preview = preview.clone();
         stack.add_named(&gradient, Some("gradient"));
 
         // Type.
@@ -499,7 +532,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -578,6 +611,9 @@ impl OptionsBar {
     /// Reflects settings changed from the keyboard.
     /// Opens the color picker once the button is on screen (the options page may just have switched).
     pub fn show_color_picker(&self) { let button = self.color.widget.clone(); gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || button.popup()); }
+
+    /// The gradient preview follows the palette (the foreground presets are made from it).
+    pub fn sync_gradient(&self) { self.gradient_preview.queue_draw(); }
 
     pub fn sync_brush(&self, settings: &crate::brush::BrushSettings) {
         self.size.set_value(settings.diameter);

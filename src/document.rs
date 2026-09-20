@@ -902,7 +902,18 @@ impl Document {
     /// selection, previewed (`commit` false) or committed as one undo step (`fillGradient`). `colors` are the
     /// two ends with alpha; on a mask their gray is used. Linear runs start to end; radial is centered on
     /// start with end on its rim.
+    /// A two-color gradient, as the first Gradient tool drew it: a linear or radial run from one color to
+    /// the other. Kept for callers that only need that; `gradient_fill` takes any gradient and shape.
     pub fn gradient(&mut self, start: (f64, f64), end: (f64, f64), radial: bool, colors: [[f64; 4]; 2], opacity: f64, commit: bool) -> Result<()> {
+        use crate::gradient::{AlphaStop, Gradient, Shape, Stop};
+        let g = Gradient { stops: vec![Stop { position: 0.0, color: [colors[0][0], colors[0][1], colors[0][2]] }, Stop { position: 1.0, color: [colors[1][0], colors[1][1], colors[1][2]] }], alphas: vec![AlphaStop { position: 0.0, alpha: colors[0][3] }, AlphaStop { position: 1.0, alpha: colors[1][3] }] };
+        self.gradient_fill(start, end, if radial { Shape::Radial } else { Shape::Linear }, &g, opacity, commit)
+    }
+
+    /// The Gradient tool: `gradient` laid from `start` to `end` in `shape` over the active layer (or its
+    /// mask, in gray) inside the selection at `opacity`; a preview until `commit`.
+    pub fn gradient_fill(&mut self, start: (f64, f64), end: (f64, f64), shape: crate::gradient::Shape, gradient: &crate::gradient::Gradient, opacity: f64, commit: bool) -> Result<()> {
+        use crate::gradient::Shape;
         let Some(id) = self.active else { bail!("Select a layer first.") };
         if self.selection.as_ref().is_some_and(|s| s.is_empty()) { bail!("Nothing is selected."); }
         let layer = self.renderer.layer(id).clone();
@@ -918,6 +929,14 @@ impl Document {
             if let Some(image) = self.renderer.image(id) { let cr = Context::new(&base)?; cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
             (w, h, layer.transform, base)
         };
+        let g = if mask_target { gradient.grayed() } else { gradient.normalized() };
+        // Linear, radial and reflected are Cairo patterns; angle and diamond are rasterized in document space.
+        let pattern: cairo::Pattern = match shape {
+            Shape::Linear => { let p = cairo::LinearGradient::new(start.0, start.1, end.0, end.1); g.fill_pattern(&p, 0.0, 1.0); p.set_extend(cairo::Extend::Pad); cairo::Pattern::clone(&p) }
+            Shape::Radial => { let r = (end.0 - start.0).hypot(end.1 - start.1).max(0.001); let p = cairo::RadialGradient::new(start.0, start.1, 0.0, start.0, start.1, r); g.fill_pattern(&p, 0.0, 1.0); p.set_extend(cairo::Extend::Pad); cairo::Pattern::clone(&p) }
+            Shape::Reflected => { let p = cairo::LinearGradient::new(2.0 * start.0 - end.0, 2.0 * start.1 - end.1, end.0, end.1); g.reversed().fill_pattern(&p, 0.0, 0.5); g.fill_pattern(&p, 0.5, 1.0); p.set_extend(cairo::Extend::Pad); cairo::Pattern::clone(&p) }
+            Shape::Angle | Shape::Diamond => { let raster = crate::gradient::raster(self.width(), self.height(), shape, start, end, &g)?; let p = cairo::SurfacePattern::create(&raster); p.set_filter(cairo::Filter::Good); p.set_extend(cairo::Extend::Pad); (*p).clone() }
+        };
         let result = new_argb(w, h)?;
         {
             let cr = Context::new(&result)?;
@@ -925,13 +944,6 @@ impl Document {
             cr.paint()?;
             // The gradient is defined on the document and drawn through the grid's placement.
             cr.transform(crate::selection::document_to_layer(&grid, w, h)?);
-            let stops = if mask_target { colors.map(|c| { let g = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]; [g, g, g, c[3]] }) } else { colors };
-            let pattern: cairo::Gradient = if radial {
-                let r = (end.0 - start.0).hypot(end.1 - start.1).max(0.001);
-                (*cairo::RadialGradient::new(start.0, start.1, 0.0, start.0, start.1, r)).clone()
-            } else { (*cairo::LinearGradient::new(start.0, start.1, end.0, end.1)).clone() };
-            for (i, c) in stops.iter().enumerate() { pattern.add_color_stop_rgba(i as f64, c[0], c[1], c[2], c[3]); }
-            pattern.set_extend(cairo::Extend::Pad);
             cr.set_source(&pattern)?;
             match &self.selection {
                 Some(sel) => {

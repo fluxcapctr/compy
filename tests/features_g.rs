@@ -581,3 +581,43 @@ fn shadows_highlights_selective_color_mixer_high_pass_and_radial_blur() {
     assert!(smeared < 250 && smeared > 60, "the square smears along the arc above it: {smeared}");
     assert_eq!(rgb_at(&mut e, 5, 5)[0], 255, "far corners untouched");
 }
+
+#[test]
+fn gradient_fill_shapes_and_multi_stop_gradient_map() {
+    use compositor::filters::{Adjustment, GradientMap};
+    use compositor::gradient::{Gradient, Shape, Stop};
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    // Three stops, linear across: red, then green in the middle, then blue.
+    let g = Gradient { stops: vec![Stop { position: 0.0, color: [1.0, 0.0, 0.0] }, Stop { position: 0.5, color: [0.0, 1.0, 0.0] }, Stop { position: 1.0, color: [0.0, 0.0, 1.0] }], alphas: Vec::new() };
+    d.gradient_fill((0.0, 20.0), (40.0, 20.0), Shape::Linear, &g, 1.0, true).unwrap();
+    assert!(rgb_at(&mut d, 0, 20)[0] > 240);
+    let mid = rgb_at(&mut d, 20, 20);
+    assert!(mid[1] > 200 && mid[0] < 60 && mid[2] < 60, "green in the middle: {mid:?}");
+    assert!(rgb_at(&mut d, 39, 20)[2] > 240);
+    assert_eq!(d.undo_name(), Some("Gradient"));
+    d.undo();
+    // Diamond from the center: the corners of a square at the end distance reach the last color.
+    let bw = Gradient::two([0.0; 3], [1.0; 3]);
+    d.gradient_fill((20.0, 20.0), (30.0, 20.0), Shape::Diamond, &bw, 1.0, true).unwrap();
+    assert!(rgb_at(&mut d, 20, 20)[0] < 30, "dark at the center");
+    assert!(rgb_at(&mut d, 30, 30)[0] > 225, "a diamond reaches its corner at the same distance as its edge");
+    assert!(rgb_at(&mut d, 25, 20)[0] > 100 && rgb_at(&mut d, 25, 20)[0] < 160, "half way along: {}", rgb_at(&mut d, 25, 20)[0]);
+    d.undo();
+    // Angle sweeps around the start.
+    d.gradient_fill((20.0, 20.0), (40.0, 20.0), Shape::Angle, &bw, 1.0, true).unwrap();
+    assert!(rgb_at(&mut d, 35, 20)[0] < 40 || rgb_at(&mut d, 35, 20)[0] > 215, "on the line: the start or the end of the sweep");
+    assert!(rgb_at(&mut d, 20, 35)[0] > 40 && rgb_at(&mut d, 20, 35)[0] < 90, "a quarter turn along: {}", rgb_at(&mut d, 20, 35)[0]);
+    d.undo();
+    // Reflected mirrors across the start.
+    d.gradient_fill((20.0, 20.0), (40.0, 20.0), Shape::Reflected, &bw, 1.0, true).unwrap();
+    let (left, right, center) = (rgb_at(&mut d, 10, 20)[0], rgb_at(&mut d, 30, 20)[0], rgb_at(&mut d, 20, 20)[0]);
+    assert!((left as i32 - right as i32).abs() < 20, "the same tone either side of the start: {left} {right} center {center}");
+    // A Gradient Map with three stops maps middle gray to the middle stop, and round-trips.
+    let map = GradientMap { stops: g.stops.clone(), ..GradientMap::default() };
+    let t = map.table();
+    assert!(t[128 * 3 + 1] > 200 && t[128 * 3] < 60, "mid gray hits the green stop");
+    assert_eq!(&t[0..3], &[255, 0, 0]);
+    let back = Adjustment::from_record(&Adjustment::GradientMap(map.clone()).to_record()).unwrap();
+    assert_eq!(back, Adjustment::GradientMap(map));
+}

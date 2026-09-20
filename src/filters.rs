@@ -418,19 +418,17 @@ impl Grain {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GradientMap { pub shadows: [f64; 3], pub highlights: [f64; 3], pub reversed: bool }
-impl Default for GradientMap { fn default() -> Self { GradientMap { shadows: [0.0; 3], highlights: [1.0; 3], reversed: false } } }
+pub struct GradientMap { pub shadows: [f64; 3], pub highlights: [f64; 3], pub reversed: bool, /// More than two colors, from the gradient editor; empty means shadows to highlights.
+    pub stops: Vec<crate::gradient::Stop> }
+impl Default for GradientMap { fn default() -> Self { GradientMap { shadows: [0.0; 3], highlights: [1.0; 3], reversed: false, stops: Vec::new() } } }
 impl GradientMap {
-    /// 256 x 3 straight sRGB bytes, darkest first.
-    pub fn table(&self) -> [u8; 768] {
-        let (dark, light) = if self.reversed { (self.highlights, self.shadows) } else { (self.shadows, self.highlights) };
-        let mut table = [0u8; 768];
-        for i in 0..256 {
-            let t = i as f64 / 255.0;
-            for c in 0..3 { table[i * 3 + c] = ((dark[c] + (light[c] - dark[c]) * t) * 255.0).round().clamp(0.0, 255.0) as u8; }
-        }
-        table
+    /// The gradient the map runs through, darkest first.
+    pub fn gradient(&self) -> crate::gradient::Gradient {
+        let g = if self.stops.len() >= 2 { crate::gradient::Gradient { stops: self.stops.clone(), alphas: Vec::new() }.normalized() } else { crate::gradient::Gradient::two(self.shadows, self.highlights) };
+        if self.reversed { g.reversed() } else { g }
     }
+    /// 256 x 3 straight sRGB bytes, darkest first.
+    pub fn table(&self) -> [u8; 768] { self.gradient().table() }
 }
 
 /// One channel's levels: input black and white points, gamma, output range (`LevelRange`).
@@ -1028,7 +1026,8 @@ impl Adjustment {
             }
             "Gradient Map" => {
                 let g = s.get("gradientMapSettings");
-                Adjustment::GradientMap(GradientMap { shadows: color(g.and_then(|g| g.get("shadows")), [0.0; 3]), highlights: color(g.and_then(|g| g.get("highlights")), [1.0; 3]), reversed: g.and_then(|g| g.get("reversed")).and_then(Value::as_bool).unwrap_or(false) })
+                let stops = g.and_then(|g| g.get("stops")).and_then(Value::as_array).map(|a| a.iter().filter_map(|st| Some(crate::gradient::Stop { position: st.get("position")?.as_f64()?, color: color(st.get("color"), [0.0; 3]) })).collect()).unwrap_or_default();
+                Adjustment::GradientMap(GradientMap { shadows: color(g.and_then(|g| g.get("shadows")), [0.0; 3]), highlights: color(g.and_then(|g| g.get("highlights")), [1.0; 3]), reversed: g.and_then(|g| g.get("reversed")).and_then(Value::as_bool).unwrap_or(false), stops })
             }
             "Grain" => {
                 let g = s.get("grainSettings");
@@ -1138,6 +1137,7 @@ impl Adjustment {
         if let Some(g) = s.get("gradientMapSettings") {
             ok &= boolean(g.get("reversed"));
             for key in ["shadows", "highlights"] { if let Some(c) = g.get(key) { ok &= c.is_object() && ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0)); } }
+            if let Some(stops) = g.get("stops") { ok &= stops.as_array().is_some_and(|a| a.iter().all(|st| st.is_object() && within(st.get("position"), 0.0, 1.0) && st.get("color").is_some_and(|c| c.is_object() && ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0))))); }
         }
         if let Some(g) = s.get("grainSettings") { ok &= within(g.get("amount"), 0.0, 100.0) && within(g.get("size"), 0.5, 20.0) && within(g.get("roughness"), 0.0, 100.0) && g.get("seed").is_none_or(|v| v.as_u64().is_some()); }
         ok
@@ -1155,7 +1155,11 @@ impl Adjustment {
             Adjustment::Levels(l) => { settings.insert("levels".into(), json!({"channel": "RGB", "ranges": l.ranges.iter().map(|r| json!({"black": r.black, "gamma": r.gamma, "white": r.white, "outputBlack": r.output_black, "outputWhite": r.output_white})).collect::<Vec<_>>()})); }
             Adjustment::Curves(c) => { settings.insert("curves".into(), json!({"channel": "RGB", "channels": c.channels.iter().map(|ch| ch.iter().map(|p| json!({"x": p.0, "y": p.1})).collect::<Vec<_>>()).collect::<Vec<_>>()})); }
             Adjustment::Exposure(e) => { settings.insert("exposureSettings".into(), json!({"exposure": e.exposure, "offset": e.offset, "gamma": e.gamma})); }
-            Adjustment::GradientMap(g) => { settings.insert("gradientMapSettings".into(), json!({"shadows": {"red": g.shadows[0], "green": g.shadows[1], "blue": g.shadows[2]}, "highlights": {"red": g.highlights[0], "green": g.highlights[1], "blue": g.highlights[2]}, "reversed": g.reversed})); }
+            Adjustment::GradientMap(g) => {
+                let mut v = json!({"shadows": {"red": g.shadows[0], "green": g.shadows[1], "blue": g.shadows[2]}, "highlights": {"red": g.highlights[0], "green": g.highlights[1], "blue": g.highlights[2]}, "reversed": g.reversed});
+                if g.stops.len() >= 2 { v["stops"] = json!(g.stops.iter().map(|s| json!({"position": s.position, "color": {"red": s.color[0], "green": s.color[1], "blue": s.color[2]}})).collect::<Vec<_>>()); }
+                settings.insert("gradientMapSettings".into(), v);
+            }
             Adjustment::Grain { grain, seed } => { settings.insert("grainSettings".into(), json!({"amount": grain.amount, "size": grain.size, "roughness": grain.roughness, "seed": seed})); }
             Adjustment::HueSaturation(h) => {
                 let master = h.adjustment("Master");
