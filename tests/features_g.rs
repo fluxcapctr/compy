@@ -523,3 +523,61 @@ fn stroke_color_range_align_and_distribute() {
     assert!(d.distribute_layers(true).is_err(), "one layer cannot be distributed");
     assert!(d.align_layers("sideways").is_err());
 }
+
+#[test]
+fn shadows_highlights_selective_color_mixer_high_pass_and_radial_blur() {
+    use compositor::filters::{Adjustment, ChannelMixer, Kind, SelectiveColor, Settings, ShadowsHighlights};
+    // Shadows lift only the dark side, highlights pull only the bright side.
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 20.0, 40.0), [0.15, 0.15, 0.15], 0.0).unwrap();
+    d.add_shape_layer(false, (20.0, 0.0, 20.0, 40.0), [0.9, 0.9, 0.9], 0.0).unwrap();
+    let id = d.stamp_visible().unwrap();
+    d.select_layer(Some(id));
+    let (dark, light) = (rgb_at(&mut d, 5, 20)[0], rgb_at(&mut d, 35, 20)[0]);
+    let mut s = Settings::default();
+    s.shadows_highlights = ShadowsHighlights { shadows: 60.0, highlights: 0.0, radius: 4.0 };
+    d.apply_filter(Kind::ShadowsHighlights, &s).unwrap();
+    assert!(rgb_at(&mut d, 5, 20)[0] > dark + 10, "shadows lifted: {}", rgb_at(&mut d, 5, 20)[0]);
+    assert!(rgb_at(&mut d, 35, 20)[0] >= light - 2, "highlights left alone");
+    d.undo();
+    s.shadows_highlights = ShadowsHighlights { shadows: 0.0, highlights: 60.0, radius: 4.0 };
+    d.apply_filter(Kind::ShadowsHighlights, &s).unwrap();
+    assert!(rgb_at(&mut d, 35, 20)[0] < light - 10, "highlights pulled down");
+    assert!(rgb_at(&mut d, 5, 20)[0] <= dark + 2);
+    // Selective Color: more cyan in the reds takes red out of a red pixel and leaves a blue one alone.
+    let mut sc = SelectiveColor::default();
+    sc.set_adjustment("Reds", [60.0, 0.0, 0.0, 0.0]);
+    let red = sc.pixel([1.0, 0.1, 0.1]);
+    assert!(red[0] < 0.7 && (red[1] - 0.1).abs() < 1e-9, "{red:?}");
+    assert_eq!(sc.pixel([0.1, 0.1, 1.0]), [0.1, 0.1, 1.0]);
+    let blacks = { let mut b = SelectiveColor::default(); b.set_adjustment("Blacks", [0.0, 0.0, 0.0, 50.0]); b };
+    assert!(blacks.pixel([0.2, 0.2, 0.2])[0] < 0.2 && blacks.pixel([0.9, 0.9, 0.9])[0] == 0.9);
+    // Channel Mixer: monochrome from the red row, and the identity is the identity.
+    assert_eq!(ChannelMixer::default().pixel([0.3, 0.6, 0.9]), [0.3, 0.6, 0.9]);
+    let mono = ChannelMixer { red: [100.0, 0.0, 0.0, 0.0], monochrome: true, ..ChannelMixer::default() };
+    assert_eq!(mono.pixel([0.3, 0.6, 0.9]), [0.3, 0.3, 0.3]);
+    let back = Adjustment::from_record(&Adjustment::SelectiveColor(sc.clone()).to_record()).unwrap();
+    assert_eq!(back, Adjustment::SelectiveColor(sc));
+    let back = Adjustment::from_record(&Adjustment::ChannelMixer(mono.clone()).to_record()).unwrap();
+    assert_eq!(back, Adjustment::ChannelMixer(mono));
+    // High Pass: flat areas go to middle gray, the edge keeps a light and a dark side.
+    d.undo();
+    s.high_pass = 3.0;
+    d.apply_filter(Kind::HighPass, &s).unwrap();
+    let flat = rgb_at(&mut d, 3, 20)[0];
+    assert!((120..=136).contains(&flat), "flat goes gray: {flat}");
+    assert!(rgb_at(&mut d, 19, 20)[0] < flat && rgb_at(&mut d, 20, 20)[0] > flat, "the edge stays");
+    // Radial Blur (spin) smears a small square around the center; the center pixel itself keeps its color.
+    d.undo();
+    let mut e = Document::blank(60, 60, 72.0).unwrap();
+    e.add_shape_layer(false, (0.0, 0.0, 60.0, 60.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    e.add_shape_layer(false, (40.0, 28.0, 6.0, 4.0), [0.0, 0.0, 0.0], 0.0).unwrap();
+    let id = e.stamp_visible().unwrap();
+    e.select_layer(Some(id));
+    let mut r = Settings::default();
+    r.radial.amount = 40.0;
+    e.apply_filter(Kind::RadialBlur, &r).unwrap();
+    let smeared = rgb_at(&mut e, 42, 26)[0];
+    assert!(smeared < 250 && smeared > 60, "the square smears along the arc above it: {smeared}");
+    assert_eq!(rgb_at(&mut e, 5, 5)[0], 255, "far corners untouched");
+}

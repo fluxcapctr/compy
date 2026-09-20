@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use cairo::ImageSurface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, Curves, ColorBalance, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground, Fade, UnsharpMask, SmartSharpen, BrightnessContrast, Vibrance, BlackWhite, PhotoFilter, Threshold, Posterize }
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, Curves, ColorBalance, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground, Fade, UnsharpMask, SmartSharpen, BrightnessContrast, Vibrance, BlackWhite, PhotoFilter, Threshold, Posterize, ShadowsHighlights, SelectiveColor, ChannelMixer, HighPass, RadialBlur }
 
 impl Kind {
     pub fn name(self) -> &'static str {
@@ -21,6 +21,7 @@ impl Kind {
             Kind::Curves => "Curves", Kind::ColorBalance => "Color Balance", Kind::Fade => "Fade",
             Kind::UnsharpMask => "Unsharp Mask", Kind::SmartSharpen => "Smart Sharpen", Kind::BrightnessContrast => "Brightness/Contrast", Kind::Vibrance => "Vibrance",
             Kind::BlackWhite => "Black & White", Kind::PhotoFilter => "Photo Filter", Kind::Threshold => "Threshold", Kind::Posterize => "Posterize",
+            Kind::ShadowsHighlights => "Shadows/Highlights", Kind::SelectiveColor => "Selective Color", Kind::ChannelMixer => "Channel Mixer", Kind::HighPass => "High Pass", Kind::RadialBlur => "Radial Blur",
         }
     }
     /// Filters that work on the selection itself rather than the layer's colors, and need one.
@@ -28,7 +29,7 @@ impl Kind {
     /// The room a blur needs around the layer to spread into: about three standard deviations, or half a
     /// streak (`FilterEdit.blurMargin`).
     pub fn margin(self, settings: &Settings) -> usize {
-        match self { Kind::GaussianBlur => (settings.radius * 3.0 + 2.0).ceil() as usize, Kind::MotionBlur => (settings.distance / 2.0 + 2.0).ceil() as usize, Kind::UnsharpMask | Kind::SmartSharpen => (settings.sharpen.radius * 3.0 + 2.0).ceil() as usize, _ => 0 }
+        match self { Kind::GaussianBlur => (settings.radius * 3.0 + 2.0).ceil() as usize, Kind::MotionBlur => (settings.distance / 2.0 + 2.0).ceil() as usize, Kind::UnsharpMask | Kind::SmartSharpen => (settings.sharpen.radius * 3.0 + 2.0).ceil() as usize, Kind::HighPass => (settings.high_pass * 3.0 + 2.0).ceil() as usize, Kind::RadialBlur => 8, _ => 0 }
     }
 }
 
@@ -66,11 +67,17 @@ pub struct Settings {
     pub photo_filter: PhotoFilter,
     pub threshold: Threshold,
     pub posterize: Posterize,
+    pub shadows_highlights: ShadowsHighlights,
+    pub selective: SelectiveColor,
+    pub mixer: ChannelMixer,
+    /// High Pass radius in pixels.
+    pub high_pass: f64,
+    pub radial: RadialBlur,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { curves: Curves::default(), balance: ColorBalance::default(), fade: 1.0, amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default(), sharpen: Sharpen::default(), brightness: BrightnessContrast::default(), vibrance: Vibrance::default(), black_white: BlackWhite::default(), photo_filter: PhotoFilter::default(), threshold: Threshold::default(), posterize: Posterize::default() }
+        Settings { curves: Curves::default(), balance: ColorBalance::default(), fade: 1.0, amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default(), sharpen: Sharpen::default(), brightness: BrightnessContrast::default(), vibrance: Vibrance::default(), black_white: BlackWhite::default(), photo_filter: PhotoFilter::default(), threshold: Threshold::default(), posterize: Posterize::default(), shadows_highlights: ShadowsHighlights::default(), selective: SelectiveColor::default(), mixer: ChannelMixer::default(), high_pass: 10.0, radial: RadialBlur::default() }
     }
 }
 
@@ -94,7 +101,154 @@ impl Settings {
         s.photo_filter = s.photo_filter.normalized();
         s.threshold = s.threshold.normalized();
         s.posterize = s.posterize.normalized();
+        s.shadows_highlights = s.shadows_highlights.normalized();
+        s.selective = s.selective.normalized();
+        s.mixer = s.mixer.normalized();
+        s.high_pass = clamp(s.high_pass, 0.1, 250.0, 10.0);
+        s.radial = s.radial.normalized();
         s
+    }
+}
+
+/// Shadows/Highlights: the dark parts lifted and the bright parts brought down, each by an amount in
+/// percent, judged by the brightness of the surroundings within `radius` so local contrast survives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowsHighlights { pub shadows: f64, pub highlights: f64, pub radius: f64 }
+impl Default for ShadowsHighlights { fn default() -> Self { ShadowsHighlights { shadows: 35.0, highlights: 0.0, radius: 30.0 } } }
+impl ShadowsHighlights {
+    pub fn normalized(&self) -> ShadowsHighlights { ShadowsHighlights { shadows: clamp(self.shadows, 0.0, 100.0, 35.0), highlights: clamp(self.highlights, 0.0, 100.0, 0.0), radius: clamp(self.radius, 1.0, 500.0, 30.0) } }
+    pub fn is_identity(&self) -> bool { let n = self.normalized(); n.shadows == 0.0 && n.highlights == 0.0 }
+    pub fn apply(&self, pixels: &mut [u8], w: usize, h: usize) {
+        let n = self.normalized();
+        if n.shadows == 0.0 && n.highlights == 0.0 { return; }
+        // The neighbourhood brightness: luminosity blurred by the radius.
+        let mut luma = vec![0u8; w * h];
+        for (i, p) in pixels.chunks_exact(4).enumerate() { let a = p[3] as f64; luma[i] = if a <= 0.0 { 0 } else { ((0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64) / a * 255.0).round().clamp(0.0, 255.0) as u8 }; }
+        crate::blur::gaussian(&mut luma, w, h, 1, n.radius / 2.0);
+        for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+            let a = p[3] as f64;
+            if a <= 0.0 { continue; }
+            let lb = luma[i] as f64 / 255.0;
+            // A gamma lift where the surroundings are dark, a gamma drop where they are bright.
+            let lift = 1.0 / (1.0 + n.shadows / 100.0 * (1.0 - lb).powi(2) * 2.0);
+            let drop = 1.0 + n.highlights / 100.0 * lb.powi(2) * 2.0;
+            for k in 0..3 {
+                let v = (p[k] as f64 / a).clamp(0.0, 1.0);
+                let out = v.powf(lift).powf(drop);
+                p[k] = (out * a).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+pub const SELECTIVE_RANGES: [&str; 9] = ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks"];
+
+/// Selective Color: cyan, magenta, yellow and black nudged (percent, -100 to 100) within one color
+/// family at a time; relative scales what is there, absolute adds a flat amount.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectiveColor { pub range: String, pub adjustments: Vec<(String, [f64; 4])>, pub relative: bool }
+impl Default for SelectiveColor { fn default() -> Self { SelectiveColor { range: "Reds".into(), adjustments: Vec::new(), relative: true } } }
+impl SelectiveColor {
+    pub fn normalized(&self) -> SelectiveColor {
+        SelectiveColor { range: if SELECTIVE_RANGES.contains(&self.range.as_str()) { self.range.clone() } else { "Reds".into() }, adjustments: self.adjustments.iter().filter(|(r, _)| SELECTIVE_RANGES.contains(&r.as_str())).map(|(r, a)| (r.clone(), a.map(|v| clamp(v, -100.0, 100.0, 0.0)))).collect(), relative: self.relative }
+    }
+    pub fn is_identity(&self) -> bool { self.adjustments.iter().all(|(_, a)| *a == [0.0; 4]) }
+    pub fn adjustment(&self, range: &str) -> [f64; 4] { self.adjustments.iter().find(|(r, _)| r == range).map(|(_, a)| *a).unwrap_or([0.0; 4]) }
+    pub fn set_adjustment(&mut self, range: &str, value: [f64; 4]) { match self.adjustments.iter_mut().find(|(r, _)| r == range) { Some(e) => e.1 = value, None => self.adjustments.push((range.to_string(), value)) } }
+    /// How much of each family a straight color holds, 0 to 1, in the order of `SELECTIVE_RANGES`.
+    pub fn membership(rgb: [f64; 3]) -> [f64; 9] {
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let z = |v: f64| v.max(0.0);
+        [z(r - g.max(b)), z(r.min(g) - b), z(g - r.max(b)), z(g.min(b) - r), z(b - r.max(g)), z(r.min(b) - g), z(2.0 * min - 1.0), z(1.0 - (max + min - 1.0).abs() - (max - min)), z(1.0 - 2.0 * max)]
+    }
+    pub fn pixel(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let n = self.normalized();
+        let member = Self::membership(rgb);
+        let mut out = rgb;
+        for (i, range) in SELECTIVE_RANGES.iter().enumerate() {
+            let a = n.adjustment(range);
+            if a == [0.0; 4] || member[i] <= 0.0 { continue; }
+            let m = member[i];
+            for (c, ink) in [0usize, 1, 2].into_iter().zip([a[0], a[1], a[2]]) {
+                // More cyan takes red away (and so on); the black slider takes from every channel.
+                let amount = (ink + a[3]) / 100.0 * m;
+                let scale = if n.relative { out[c] } else { 1.0 };
+                out[c] = (out[c] - amount * scale).clamp(0.0, 1.0);
+            }
+        }
+        out
+    }
+}
+
+/// Channel Mixer: each output channel as percentages of the input channels plus a constant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelMixer { pub red: [f64; 4], pub green: [f64; 4], pub blue: [f64; 4], pub monochrome: bool }
+impl Default for ChannelMixer { fn default() -> Self { ChannelMixer { red: [100.0, 0.0, 0.0, 0.0], green: [0.0, 100.0, 0.0, 0.0], blue: [0.0, 0.0, 100.0, 0.0], monochrome: false } } }
+impl ChannelMixer {
+    pub fn normalized(&self) -> ChannelMixer {
+        let row = |r: [f64; 4]| [clamp(r[0], -200.0, 200.0, 0.0), clamp(r[1], -200.0, 200.0, 0.0), clamp(r[2], -200.0, 200.0, 0.0), clamp(r[3], -200.0, 200.0, 0.0)];
+        ChannelMixer { red: row(self.red), green: row(self.green), blue: row(self.blue), monochrome: self.monochrome }
+    }
+    pub fn is_identity(&self) -> bool { self.normalized() == ChannelMixer::default() }
+    pub fn pixel(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let n = self.normalized();
+        let mix = |row: [f64; 4]| ((row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2] + row[3]) / 100.0).clamp(0.0, 1.0);
+        if n.monochrome { let g = mix(n.red); [g, g, g] } else { [mix(n.red), mix(n.green), mix(n.blue)] }
+    }
+}
+
+/// Radial Blur: spin around a center by `amount` degrees, or zoom toward it by `amount` percent;
+/// the center is a fraction of the layer's width and height.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadialBlur { pub amount: f64, pub zoom: bool, pub center: (f64, f64) }
+impl Default for RadialBlur { fn default() -> Self { RadialBlur { amount: 10.0, zoom: false, center: (0.5, 0.5) } } }
+impl RadialBlur {
+    pub fn normalized(&self) -> RadialBlur { RadialBlur { amount: clamp(self.amount, 1.0, 100.0, 10.0), zoom: self.zoom, center: (clamp(self.center.0, 0.0, 1.0, 0.5), clamp(self.center.1, 0.0, 1.0, 0.5)) } }
+    pub fn apply(&self, pixels: &mut [u8], w: usize, h: usize) {
+        let n = self.normalized();
+        let source = pixels.to_vec();
+        let (cx, cy) = (n.center.0 * w as f64, n.center.1 * h as f64);
+        let steps = 24usize;
+        let fetch = |x: f64, y: f64| -> [f64; 4] {
+            let (xi, yi) = (x.round() as isize, y.round() as isize);
+            if xi < 0 || yi < 0 || xi >= w as isize || yi >= h as isize { return [0.0; 4]; }
+            let i = (yi as usize * w + xi as usize) * 4;
+            [source[i] as f64, source[i + 1] as f64, source[i + 2] as f64, source[i + 3] as f64]
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+                let mut sum = [0.0f64; 4];
+                for k in 0..steps {
+                    let t = k as f64 / (steps - 1) as f64 - 0.5;
+                    let (sx, sy) = if n.zoom {
+                        let f = 1.0 - t * n.amount / 100.0;
+                        (cx + px * f, cy + py * f)
+                    } else {
+                        let a = t * n.amount.to_radians();
+                        let (sa, ca) = a.sin_cos();
+                        (cx + px * ca - py * sa, cy + px * sa + py * ca)
+                    };
+                    let v = fetch(sx - 0.5, sy - 0.5);
+                    for c in 0..4 { sum[c] += v[c]; }
+                }
+                let o = (y * w + x) * 4;
+                for c in 0..4 { pixels[o + c] = (sum[c] / steps as f64).round().clamp(0.0, 255.0) as u8; }
+            }
+        }
+    }
+}
+
+/// High Pass: what is left when the blur is taken away, around middle gray; the base for frequency
+/// separation and for sharpening on an Overlay layer.
+pub fn high_pass(pixels: &mut [u8], w: usize, h: usize, radius: f64) {
+    let mut blurred = pixels.to_vec();
+    crate::blur::gaussian(&mut blurred, w, h, 4, radius);
+    for (p, b) in pixels.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
+        let a = p[3] as f64;
+        if a <= 0.0 { continue; }
+        for k in 0..3 { p[k] = (p[k] as f64 - b[k] as f64 + a / 2.0).round().clamp(0.0, a) as u8; }
     }
 }
 
@@ -490,6 +644,11 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
         Kind::PhotoFilter => Adjustment::PhotoFilter(settings.photo_filter.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
         Kind::Threshold => Adjustment::Threshold(settings.threshold.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
         Kind::Posterize => Adjustment::Posterize(settings.posterize.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::ShadowsHighlights => settings.shadows_highlights.apply(&mut pixels, w, h),
+        Kind::SelectiveColor => Adjustment::SelectiveColor(settings.selective.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::ChannelMixer => Adjustment::ChannelMixer(settings.mixer.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::HighPass => high_pass(&mut pixels, w, h, settings.high_pass),
+        Kind::RadialBlur => settings.radial.apply(&mut pixels, w, h),
         Kind::HueSaturation => Adjustment::HueSaturation(settings.hue_saturation.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
     }
     if let Some(mask) = &coverage {
@@ -809,6 +968,9 @@ pub enum Adjustment {
     PhotoFilter(PhotoFilter),
     Threshold(Threshold),
     Posterize(Posterize),
+    ShadowsHighlights(ShadowsHighlights),
+    SelectiveColor(SelectiveColor),
+    ChannelMixer(ChannelMixer),
 }
 
 impl Adjustment {
@@ -816,6 +978,7 @@ impl Adjustment {
         match self {
             Adjustment::Levels(_) => "Levels", Adjustment::Curves(_) => "Curves", Adjustment::Exposure(_) => "Exposure", Adjustment::GradientMap(_) => "Gradient Map", Adjustment::Grain { .. } => "Grain", Adjustment::HueSaturation(_) => "Hue/Saturation",
             Adjustment::BrightnessContrast(_) => "Brightness/Contrast", Adjustment::Vibrance(_) => "Vibrance", Adjustment::BlackWhite(_) => "Black & White", Adjustment::PhotoFilter(_) => "Photo Filter", Adjustment::Threshold(_) => "Threshold", Adjustment::Posterize(_) => "Posterize",
+            Adjustment::ShadowsHighlights(_) => "Shadows/Highlights", Adjustment::SelectiveColor(_) => "Selective Color", Adjustment::ChannelMixer(_) => "Channel Mixer",
         }
     }
 
@@ -826,7 +989,8 @@ impl Adjustment {
             "Hue/Saturation" => Adjustment::HueSaturation(HueSaturation::default()),
             "Brightness/Contrast" => Adjustment::BrightnessContrast(BrightnessContrast::default()), "Vibrance" => Adjustment::Vibrance(Vibrance::default()),
             "Black & White" => Adjustment::BlackWhite(BlackWhite::default()), "Photo Filter" => Adjustment::PhotoFilter(PhotoFilter::default()),
-            "Threshold" => Adjustment::Threshold(Threshold::default()), "Posterize" => Adjustment::Posterize(Posterize::default()), _ => return None,
+            "Threshold" => Adjustment::Threshold(Threshold::default()), "Posterize" => Adjustment::Posterize(Posterize::default()),
+            "Shadows/Highlights" => Adjustment::ShadowsHighlights(ShadowsHighlights::default()), "Selective Color" => Adjustment::SelectiveColor(SelectiveColor::default()), "Channel Mixer" => Adjustment::ChannelMixer(ChannelMixer::default()), _ => return None,
         })
     }
 
@@ -898,6 +1062,19 @@ impl Adjustment {
             }
             "Threshold" => Adjustment::Threshold(Threshold { level: num(s.get("threshold").and_then(|v| v.get("level")), 128.0) }.normalized()),
             "Posterize" => Adjustment::Posterize(Posterize { levels: num(s.get("posterize").and_then(|v| v.get("levels")), 4.0) }.normalized()),
+            "Shadows/Highlights" => { let v = s.get("shadowsHighlights"); let d = ShadowsHighlights::default(); Adjustment::ShadowsHighlights(ShadowsHighlights { shadows: num(v.and_then(|v| v.get("shadows")), d.shadows), highlights: num(v.and_then(|v| v.get("highlights")), d.highlights), radius: num(v.and_then(|v| v.get("radius")), d.radius) }.normalized()) }
+            "Selective Color" => {
+                let v = s.get("selectiveColor");
+                let mut sc = SelectiveColor { range: v.and_then(|v| v.get("range")).and_then(Value::as_str).unwrap_or("Reds").to_string(), adjustments: Vec::new(), relative: v.and_then(|v| v.get("relative")).and_then(Value::as_bool).unwrap_or(true) };
+                for (range, a) in keyed_entries(v.and_then(|v| v.get("adjustments"))) { sc.adjustments.push((range, [num(a.get("cyan"), 0.0), num(a.get("magenta"), 0.0), num(a.get("yellow"), 0.0), num(a.get("black"), 0.0)])); }
+                Adjustment::SelectiveColor(sc.normalized())
+            }
+            "Channel Mixer" => {
+                let v = s.get("channelMixer");
+                let row = |k: &str, d: [f64; 4]| v.and_then(|v| v.get(k)).and_then(Value::as_array).map(|a| [num(a.first(), d[0]), num(a.get(1), d[1]), num(a.get(2), d[2]), num(a.get(3), d[3])]).unwrap_or(d);
+                let d = ChannelMixer::default();
+                Adjustment::ChannelMixer(ChannelMixer { red: row("red", d.red), green: row("green", d.green), blue: row("blue", d.blue), monochrome: v.and_then(|v| v.get("monochrome")).and_then(Value::as_bool).unwrap_or(false) }.normalized())
+            }
             _ => return None,
         })
     }
@@ -915,7 +1092,15 @@ impl Adjustment {
         let mut ok = within(s.get("hue"), -360.0, 360.0) && within(s.get("saturation"), -100.0, 100.0) && within(s.get("lightness"), -100.0, 100.0) && boolean(s.get("colorize"));
         ok &= object(s.get("hsvSettings")) && object(s.get("levels")) && object(s.get("curves")) && object(s.get("exposureSettings")) && object(s.get("gradientMapSettings")) && object(s.get("grainSettings"));
         ok &= object(s.get("brightnessContrast")) && object(s.get("vibranceSettings")) && object(s.get("blackWhite")) && object(s.get("photoFilter")) && object(s.get("threshold")) && object(s.get("posterize"));
+        ok &= object(s.get("shadowsHighlights")) && object(s.get("selectiveColor")) && object(s.get("channelMixer"));
         if !ok { return false; }
+        if let Some(v) = s.get("shadowsHighlights") { ok &= within(v.get("shadows"), 0.0, 100.0) && within(v.get("highlights"), 0.0, 100.0) && within(v.get("radius"), 1.0, 500.0); }
+        if let Some(v) = s.get("selectiveColor") {
+            ok &= boolean(v.get("relative")) && v.get("range").is_none_or(|r| r.as_str().is_some_and(|r| SELECTIVE_RANGES.contains(&r)));
+            ok &= v.get("adjustments").is_none_or(|d| d.is_array() || d.is_object());
+            ok &= keyed_entries(v.get("adjustments")).into_iter().all(|(r, a)| SELECTIVE_RANGES.contains(&r.as_str()) && a.is_object() && ["cyan", "magenta", "yellow", "black"].iter().all(|k| within(a.get(*k), -100.0, 100.0)));
+        }
+        if let Some(v) = s.get("channelMixer") { ok &= boolean(v.get("monochrome")) && ["red", "green", "blue"].iter().all(|k| v.get(*k).is_none_or(|row| row.as_array().is_some_and(|a| a.len() == 4 && a.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && (-200.0..=200.0).contains(&n)))))); }
         if let Some(v) = s.get("brightnessContrast") { ok &= within(v.get("brightness"), -150.0, 150.0) && within(v.get("contrast"), -50.0, 100.0); }
         if let Some(v) = s.get("vibranceSettings") { ok &= within(v.get("vibrance"), -100.0, 100.0) && within(v.get("saturation"), -100.0, 100.0); }
         if let Some(v) = s.get("blackWhite") { ok &= ["reds", "yellows", "greens", "cyans", "blues", "magentas"].iter().all(|k| within(v.get(*k), -200.0, 300.0)); }
@@ -986,6 +1171,12 @@ impl Adjustment {
             Adjustment::PhotoFilter(p) => { settings.insert("photoFilter".into(), json!({"color": {"red": p.color[0], "green": p.color[1], "blue": p.color[2]}, "density": p.density, "preserveLuminosity": p.preserve_luminosity})); }
             Adjustment::Threshold(t) => { settings.insert("threshold".into(), json!({"level": t.level})); }
             Adjustment::Posterize(p) => { settings.insert("posterize".into(), json!({"levels": p.levels})); }
+            Adjustment::ShadowsHighlights(v) => { settings.insert("shadowsHighlights".into(), json!({"shadows": v.shadows, "highlights": v.highlights, "radius": v.radius})); }
+            Adjustment::SelectiveColor(sc) => {
+                let adjustments: Vec<Value> = sc.adjustments.iter().flat_map(|(r, a)| [json!(r), json!({"cyan": a[0], "magenta": a[1], "yellow": a[2], "black": a[3]})]).collect();
+                settings.insert("selectiveColor".into(), json!({"range": sc.range, "relative": sc.relative, "adjustments": adjustments}));
+            }
+            Adjustment::ChannelMixer(m) => { settings.insert("channelMixer".into(), json!({"red": m.red, "green": m.green, "blue": m.blue, "monochrome": m.monochrome})); }
         }
         crate::format::Adjustment { kind: self.kind_name().to_string(), settings }
     }
@@ -1029,6 +1220,9 @@ impl Adjustment {
             Adjustment::PhotoFilter(p) => { map_straight(pixels, |rgb| p.pixel(rgb)); }
             Adjustment::Threshold(t) => { let level = t.normalized().level / 255.0; map_straight(pixels, |rgb| { let l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]; if l >= level { [1.0; 3] } else { [0.0; 3] } }); }
             Adjustment::Posterize(p) => { let t = p.table(); apply_tables(pixels, w * h, &[t, t, t]); }
+            Adjustment::ShadowsHighlights(v) => v.apply(pixels, w, h),
+            Adjustment::SelectiveColor(sc) => { if sc.is_identity() { return; } map_straight(pixels, |rgb| sc.pixel(rgb)); }
+            Adjustment::ChannelMixer(m) => { if m.is_identity() { return; } map_straight(pixels, |rgb| m.pixel(rgb)); }
             Adjustment::HueSaturation(hs) => {
                 if hs.is_identity() { return; }
                 let dim = 33usize;

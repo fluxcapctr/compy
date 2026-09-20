@@ -78,7 +78,8 @@ fn main() {
                         "levels" => Some(compositor::filters::Kind::Levels), "curves" => Some(compositor::filters::Kind::Curves), "balance" => Some(compositor::filters::Kind::ColorBalance), "gaussian" => Some(compositor::filters::Kind::GaussianBlur), "background" => Some(compositor::filters::Kind::RemoveBackground),
                         "motion" => Some(compositor::filters::Kind::MotionBlur), "unsharp" => Some(compositor::filters::Kind::UnsharpMask), "sharpen" => Some(compositor::filters::Kind::SmartSharpen),
                         "brightness" => Some(compositor::filters::Kind::BrightnessContrast), "vibrance" => Some(compositor::filters::Kind::Vibrance), "bw" => Some(compositor::filters::Kind::BlackWhite),
-                        "photo" => Some(compositor::filters::Kind::PhotoFilter), "threshold" => Some(compositor::filters::Kind::Threshold), "posterize" => Some(compositor::filters::Kind::Posterize), _ => None }),
+                        "photo" => Some(compositor::filters::Kind::PhotoFilter), "threshold" => Some(compositor::filters::Kind::Threshold), "posterize" => Some(compositor::filters::Kind::Posterize),
+                        "shadows" => Some(compositor::filters::Kind::ShadowsHighlights), "selective" => Some(compositor::filters::Kind::SelectiveColor), "mixer" => Some(compositor::filters::Kind::ChannelMixer), "highpass" => Some(compositor::filters::Kind::HighPass), "radial" => Some(compositor::filters::Kind::RadialBlur), _ => None }),
                     _ => paths.push(PathBuf::from(arg)),
                 }
             }

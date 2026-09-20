@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Compositor on Linux.
 //!
 //! The macOS app (in `reference/`) is the specification. Its C pixel core is compiled unchanged from `csrc/`;

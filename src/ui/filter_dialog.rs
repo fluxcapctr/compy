@@ -49,6 +49,7 @@ impl FilterDialog {
             filters::Adjustment::GradientMap(_) => Kind::GradientMap, filters::Adjustment::Grain { .. } => Kind::Grain, filters::Adjustment::HueSaturation(_) => Kind::HueSaturation,
             filters::Adjustment::BrightnessContrast(_) => Kind::BrightnessContrast, filters::Adjustment::Vibrance(_) => Kind::Vibrance, filters::Adjustment::BlackWhite(_) => Kind::BlackWhite,
             filters::Adjustment::PhotoFilter(_) => Kind::PhotoFilter, filters::Adjustment::Threshold(_) => Kind::Threshold, filters::Adjustment::Posterize(_) => Kind::Posterize,
+            filters::Adjustment::ShadowsHighlights(_) => Kind::ShadowsHighlights, filters::Adjustment::SelectiveColor(_) => Kind::SelectiveColor, filters::Adjustment::ChannelMixer(_) => Kind::ChannelMixer,
         }, Settings::default());
         match &adjustment {
             filters::Adjustment::Levels(l) => settings.levels = l.clone(),
@@ -63,6 +64,9 @@ impl FilterDialog {
             filters::Adjustment::PhotoFilter(p) => settings.photo_filter = p.clone(),
             filters::Adjustment::Threshold(t) => settings.threshold = t.clone(),
             filters::Adjustment::Posterize(p) => settings.posterize = p.clone(),
+            filters::Adjustment::ShadowsHighlights(v) => settings.shadows_highlights = v.clone(),
+            filters::Adjustment::SelectiveColor(v) => settings.selective = v.clone(),
+            filters::Adjustment::ChannelMixer(v) => settings.mixer = v.clone(),
         }
         let canvas = gtk::DrawingArea::new();
         let this = Rc::new(FilterDialog {
@@ -396,6 +400,75 @@ impl FilterDialog {
             Kind::Posterize => {
                 self.slider(&grid, 0, "Levels", 2.0, 255.0, 1.0, s.posterize.levels, |s, v| s.posterize.levels = v, self);
             }
+            Kind::ShadowsHighlights => {
+                self.slider(&grid, 0, "Shadows %", 0.0, 100.0, 1.0, s.shadows_highlights.shadows, |s, v| s.shadows_highlights.shadows = v, self);
+                self.slider(&grid, 1, "Highlights %", 0.0, 100.0, 1.0, s.shadows_highlights.highlights, |s, v| s.shadows_highlights.highlights = v, self);
+                self.slider(&grid, 2, "Radius", 1.0, 500.0, 1.0, s.shadows_highlights.radius, |s, v| s.shadows_highlights.radius = v, self);
+            }
+            Kind::HighPass => {
+                self.slider(&grid, 0, "Radius", 0.1, 250.0, 0.1, s.high_pass, |s, v| s.high_pass = v, self);
+                grid.attach(&gtk::Label::builder().label("Set the layer to Overlay or Soft Light to sharpen with it.").xalign(0.0).css_classes(["dim-label"]).build(), 0, 1, 3, 1);
+            }
+            Kind::RadialBlur => {
+                grid.attach(&gtk::Label::builder().label("Method").xalign(0.0).build(), 0, 0, 1, 1);
+                let method = gtk::DropDown::from_strings(&["Spin", "Zoom"]);
+                method.set_selected(if s.radial.zoom { 1 } else { 0 });
+                { let this = self.clone(); method.connect_selected_notify(move |d| { this.settings.borrow_mut().radial.zoom = d.selected() == 1; this.schedule(); }); }
+                grid.attach(&method, 1, 0, 2, 1);
+                self.slider(&grid, 1, "Amount", 1.0, 100.0, 1.0, s.radial.amount, |s, v| s.radial.amount = v, self);
+                self.slider(&grid, 2, "Center X %", 0.0, 100.0, 1.0, s.radial.center.0 * 100.0, |s, v| s.radial.center.0 = v / 100.0, self);
+                self.slider(&grid, 3, "Center Y %", 0.0, 100.0, 1.0, s.radial.center.1 * 100.0, |s, v| s.radial.center.1 = v / 100.0, self);
+            }
+            Kind::ChannelMixer => {
+                let mono = gtk::CheckButton::builder().label("Monochrome (the red row makes the gray)").active(s.mixer.monochrome).build();
+                { let this = self.clone(); mono.connect_toggled(move |c| { this.settings.borrow_mut().mixer.monochrome = c.is_active(); this.schedule(); }); }
+                grid.attach(&mono, 0, 0, 3, 1);
+                let mut row = 1;
+                for (out, name) in [(0usize, "Red"), (1, "Green"), (2, "Blue")] {
+                    for (i, input) in ["from Red %", "from Green %", "from Blue %", "Constant %"].into_iter().enumerate() {
+                        let current = match out { 0 => s.mixer.red[i], 1 => s.mixer.green[i], _ => s.mixer.blue[i] };
+                        self.slider(&grid, row, &format!("{name} {input}"), -200.0, 200.0, 1.0, current, move |s, v| { let r = match out { 0 => &mut s.mixer.red, 1 => &mut s.mixer.green, _ => &mut s.mixer.blue }; r[i] = v; }, self);
+                        row += 1;
+                    }
+                }
+            }
+            Kind::SelectiveColor => {
+                let range = gtk::DropDown::from_strings(&filters::SELECTIVE_RANGES);
+                if let Some(i) = filters::SELECTIVE_RANGES.iter().position(|r| *r == s.selective.range) { range.set_selected(i as u32); }
+                grid.attach(&gtk::Label::builder().label("Colors").xalign(0.0).build(), 0, 0, 1, 1);
+                grid.attach(&range, 1, 0, 2, 1);
+                let sliders: Rc<RefCell<Vec<gtk::Scale>>> = Rc::new(RefCell::new(Vec::new()));
+                let current = s.selective.adjustment(&s.selective.range);
+                for (i, label) in ["Cyan", "Magenta", "Yellow", "Black"].into_iter().enumerate() {
+                    let row = 1 + i as i32;
+                    grid.attach(&gtk::Label::builder().label(label).xalign(0.0).build(), 0, row, 1, 1);
+                    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, -100.0, 100.0, 1.0);
+                    scale.set_draw_value(true); scale.set_hexpand(true); scale.set_value(current[i]);
+                    let this = self.clone();
+                    scale.connect_value_changed(move |sc| {
+                        let mut st = this.settings.borrow_mut();
+                        let range = st.selective.range.clone();
+                        let mut a = st.selective.adjustment(&range);
+                        a[i] = sc.value();
+                        st.selective.set_adjustment(&range, a);
+                        drop(st);
+                        this.schedule();
+                    });
+                    grid.attach(&scale, 1, row, 2, 1);
+                    sliders.borrow_mut().push(scale);
+                }
+                {
+                    let (this, sliders) = (self.clone(), sliders.clone());
+                    range.connect_selected_notify(move |d| {
+                        let name = filters::SELECTIVE_RANGES[d.selected() as usize].to_string();
+                        let values = { let mut st = this.settings.borrow_mut(); st.selective.range = name.clone(); st.selective.adjustment(&name) };
+                        for (scale, v) in sliders.borrow().iter().zip(values) { scale.set_value(v); }
+                    });
+                }
+                let relative = gtk::CheckButton::builder().label("Relative").active(s.selective.relative).build();
+                { let this = self.clone(); relative.connect_toggled(move |c| { this.settings.borrow_mut().selective.relative = c.is_active(); this.schedule(); }); }
+                grid.attach(&relative, 1, 5, 2, 1);
+            }
             Kind::MotionBlur => {
                 self.slider(&grid, 0, "Angle", -90.0, 90.0, 1.0, s.angle, |s, v| s.angle = v, self);
                 self.slider(&grid, 1, "Distance", 1.0, 2000.0, 1.0, s.distance, |s, v| s.distance = v, self);
@@ -613,6 +686,9 @@ impl FilterDialog {
             filters::Adjustment::PhotoFilter(_) => filters::Adjustment::PhotoFilter(s.photo_filter.clone()),
             filters::Adjustment::Threshold(_) => filters::Adjustment::Threshold(s.threshold.clone()),
             filters::Adjustment::Posterize(_) => filters::Adjustment::Posterize(s.posterize.clone()),
+            filters::Adjustment::ShadowsHighlights(_) => filters::Adjustment::ShadowsHighlights(s.shadows_highlights.clone()),
+            filters::Adjustment::SelectiveColor(_) => filters::Adjustment::SelectiveColor(s.selective.clone()),
+            filters::Adjustment::ChannelMixer(_) => filters::Adjustment::ChannelMixer(s.mixer.clone()),
         })
     }
 

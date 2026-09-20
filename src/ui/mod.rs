@@ -540,7 +540,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
             let kind = match name.as_str() {
                 "noise" => Kind::AddNoise, "grain" => Kind::Grain, "lens" => Kind::LensCorrection,
                 "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "curves" => Kind::Curves, "balance" => Kind::ColorBalance, "fade" => Kind::Fade, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground,
-                "unsharp" => Kind::UnsharpMask, "sharpen" => Kind::SmartSharpen, "brightness" => Kind::BrightnessContrast, "vibrance" => Kind::Vibrance, "bw" => Kind::BlackWhite, "photo" => Kind::PhotoFilter, "threshold" => Kind::Threshold, "posterize" => Kind::Posterize, _ => return,
+                "unsharp" => Kind::UnsharpMask, "sharpen" => Kind::SmartSharpen, "brightness" => Kind::BrightnessContrast, "vibrance" => Kind::Vibrance, "bw" => Kind::BlackWhite, "photo" => Kind::PhotoFilter, "threshold" => Kind::Threshold, "posterize" => Kind::Posterize,
+                "shadows" => Kind::ShadowsHighlights, "selective" => Kind::SelectiveColor, "mixer" => Kind::ChannelMixer, "highpass" => Kind::HighPass, "radial" => Kind::RadialBlur, _ => return,
             };
             state.open_filter(kind);
         });
@@ -747,6 +748,9 @@ fn menu() -> gio::Menu {
     image.append(Some("Photo Filter…"), Some("win.filter::photo"));
     image.append(Some("Threshold…"), Some("win.filter::threshold"));
     image.append(Some("Posterize…"), Some("win.filter::posterize"));
+    image.append(Some("Shadows/Highlights…"), Some("win.filter::shadows"));
+    image.append(Some("Selective Color…"), Some("win.filter::selective"));
+    image.append(Some("Channel Mixer…"), Some("win.filter::mixer"));
     image.append(Some("Auto Tone"), Some("win.auto-tone"));
     image.append(Some("Auto Contrast"), Some("win.auto-contrast"));
     image.append(Some("Auto Color"), Some("win.auto-color"));
@@ -776,6 +780,8 @@ fn menu() -> gio::Menu {
     filter.append(Some("Smart Sharpen…"), Some("win.filter::sharpen"));
     filter.append(Some("Gaussian Blur…"), Some("win.filter::gaussian"));
     filter.append(Some("Motion Blur…"), Some("win.filter::motion"));
+    filter.append(Some("Radial Blur…"), Some("win.filter::radial"));
+    filter.append(Some("High Pass…"), Some("win.filter::highpass"));
     filter.append(Some("Add Noise…"), Some("win.filter::noise"));
     filter.append(Some("Lens Correction…"), Some("win.filter::lens"));
     filter.append(Some("Content-Aware Fill"), Some("win.content-aware-fill"));
