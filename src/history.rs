@@ -43,6 +43,11 @@ impl<S: Clone + PartialEq> History<S> {
     /// An edit is open (its changes are on screen but not yet a step).
     pub fn is_editing(&self) -> bool { self.depth > 0 }
 
+    /// The steps behind (oldest first) and ahead (next first), by name: the History panel's list.
+    pub fn names(&self) -> (Vec<String>, Vec<String>) {
+        (self.past.iter().map(|e| e.name.clone()).collect(), self.future.iter().rev().map(|e| e.name.clone()).collect())
+    }
+
     /// Starts an edit; nested begins fold into the outermost one.
     pub fn begin(&mut self, name: &str, state: S) {
         if self.depth == 0 { self.pending = Some((name.to_string(), state)); }

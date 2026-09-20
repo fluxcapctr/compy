@@ -37,7 +37,7 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
     body.append(&pages);
     content.append(&body);
 
-    let names = [("dropShadow", "Drop Shadow"), ("innerShadow", "Inner Shadow"), ("outerGlow", "Outer Glow"), ("innerGlow", "Inner Glow"), ("bevel", "Bevel & Emboss"), ("stroke", "Stroke"), ("colorOverlay", "Color Overlay"), ("blendIf", "Blend If")];
+    let names = [("dropShadow", "Drop Shadow"), ("innerShadow", "Inner Shadow"), ("outerGlow", "Outer Glow"), ("innerGlow", "Inner Glow"), ("bevel", "Bevel & Emboss"), ("stroke", "Stroke"), ("colorOverlay", "Color Overlay"), ("gradientOverlay", "Gradient Overlay"), ("patternOverlay", "Pattern Overlay"), ("blendIf", "Blend If")];
     let mut checks = Vec::new();
     for (key, label) in names {
         let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
@@ -95,6 +95,8 @@ fn enabled(e: &Effects, key: &str) -> bool {
         "bevel" => e.bevel.as_ref().is_some_and(|x| x.enabled),
         "stroke" => e.stroke.as_ref().is_some_and(|x| x.enabled),
         "blendIf" => e.blend_if.as_ref().is_some_and(|x| x.enabled),
+        "gradientOverlay" => e.gradient_overlay.as_ref().is_some_and(|x| x.enabled),
+        "patternOverlay" => e.pattern_overlay.as_ref().is_some_and(|x| x.enabled),
         _ => e.color_overlay.as_ref().is_some_and(|x| x.enabled),
     }
 }
@@ -109,12 +111,14 @@ fn set_enabled(e: &mut Effects, key: &str, on: bool) {
         "bevel" => e.bevel.get_or_insert_with(Bevel::default).enabled = on,
         "stroke" => e.stroke.get_or_insert_with(Stroke::default).enabled = on,
         "blendIf" => e.blend_if.get_or_insert_with(crate::effects::BlendIf::default).enabled = on,
+        "gradientOverlay" => e.gradient_overlay.get_or_insert_with(crate::effects::GradientOverlay::default).enabled = on,
+        "patternOverlay" => e.pattern_overlay.get_or_insert_with(crate::effects::PatternOverlay::default).enabled = on,
         _ => e.color_overlay.get_or_insert_with(Overlay::default).enabled = on,
     }
 }
 
 fn original_page(e: &Effects) -> Option<&'static str> {
-    ["dropShadow", "innerShadow", "outerGlow", "innerGlow", "bevel", "stroke", "colorOverlay", "blendIf"].into_iter().find(|k| enabled(e, k))
+    ["dropShadow", "innerShadow", "outerGlow", "innerGlow", "bevel", "stroke", "colorOverlay", "gradientOverlay", "patternOverlay", "blendIf"].into_iter().find(|k| enabled(e, k))
 }
 
 struct Grid { grid: gtk::Grid, row: i32 }
@@ -219,6 +223,46 @@ fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply, check: &
             g.choice("Position", &["Outside", "Inside", "Center"], current.position, edit!(stroke, Stroke::default, |e, v| e.position = v));
             g.color("Color", current.color, edit!(stroke, Stroke::default, |e, v| e.color = v));
             g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(stroke, Stroke::default, |e, v| e.opacity = v / 100.0));
+        }
+        "gradientOverlay" => {
+            use crate::effects::GradientOverlay;
+            let current = state.borrow_mut().gradient_overlay.get_or_insert_with(off!(GradientOverlay::default())).clone();
+            // The gradient itself: a bar that opens the editor.
+            let bar = gtk::DrawingArea::builder().content_height(18).hexpand(true).tooltip_text("The gradient; click to edit its stops").build();
+            { let state = state.clone(); bar.set_draw_func(move |_, cr, w, h| { let g = state.borrow().gradient_overlay.as_ref().map(|o| o.gradient.clone()).unwrap_or_default(); super::tools::draw_gradient_bar(cr, w as f64, h as f64, &g); }); }
+            {
+                let (state, apply, check, bar2) = (state.clone(), apply.clone(), check.clone(), bar.clone());
+                let click = gtk::GestureClick::new();
+                click.connect_released(move |g, _, _, _| {
+                    let Some(root) = g.widget().and_then(|w| w.root()).and_downcast::<gtk::Window>() else { return };
+                    let initial = state.borrow().gradient_overlay.as_ref().map(|o| o.gradient.clone()).unwrap_or_default();
+                    let (state, apply, check, bar) = (state.clone(), apply.clone(), check.clone(), bar2.clone());
+                    super::gradient_editor::open(&root, initial, [0.0; 3], [1.0; 3], Rc::new(move |g: crate::gradient::Gradient| { { let mut s = state.borrow_mut(); let o = s.gradient_overlay.get_or_insert_with(GradientOverlay::default); o.gradient = g; o.enabled = true; } check.set_active(true); bar.queue_draw(); apply(); }));
+                });
+                bar.add_controller(click);
+            }
+            g.grid.attach(&gtk::Label::builder().label("Gradient").xalign(1.0).build(), 0, g.row, 1, 1);
+            g.grid.attach(&bar, 1, g.row, 1, 1);
+            g.row += 1;
+            g.choice("Style", &["Linear", "Radial"], current.radial as u32, edit!(gradient_overlay, GradientOverlay::default, |e, v| e.radial = v == 1));
+            g.spin("Angle", (-180.0, 180.0, 1.0), 0, current.angle, edit!(gradient_overlay, GradientOverlay::default, |e, v| e.angle = v));
+            g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(gradient_overlay, GradientOverlay::default, |e, v| e.opacity = v / 100.0));
+            g.choice("Reverse", &["No", "Yes"], current.reverse as u32, edit!(gradient_overlay, GradientOverlay::default, |e, v| e.reverse = v == 1));
+        }
+        "patternOverlay" => {
+            use crate::effects::PatternOverlay;
+            let current = state.borrow_mut().pattern_overlay.get_or_insert_with(off!(PatternOverlay::default())).clone();
+            let names = crate::patterns::list();
+            if names.is_empty() {
+                g.grid.attach(&gtk::Label::builder().label("No patterns yet: select an area and use Edit > Define Pattern, or import a brush pack's patterns.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build(), 0, g.row, 2, 1);
+                g.row += 1;
+            } else {
+                let selected = names.iter().position(|n| *n == current.pattern).unwrap_or(0) as u32;
+                let names2 = names.clone();
+                g.choice("Pattern", &names.iter().map(String::as_str).collect::<Vec<_>>(), selected, edit!(pattern_overlay, PatternOverlay::default, |e, v| e.pattern = names2.get(v as usize).cloned().unwrap_or_default()));
+            }
+            g.spin("Scale %", (5.0, 2000.0, 1.0), 0, current.scale * 100.0, edit!(pattern_overlay, PatternOverlay::default, |e, v| e.scale = v / 100.0));
+            g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(pattern_overlay, PatternOverlay::default, |e, v| e.opacity = v / 100.0));
         }
         _ => {
             let current = state.borrow_mut().color_overlay.get_or_insert_with(off!(Overlay::default())).clone();

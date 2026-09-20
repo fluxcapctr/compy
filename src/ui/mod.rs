@@ -430,7 +430,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 106] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 114] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -490,6 +490,14 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("export-png", &["<Control><Alt><Shift>w"], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export PNG", &title, "png", move |path| state.edit(|d| d.export_png(&path))); }),
         ("export-jpeg", &["<Control><Alt><Shift>s"], |s| s.export_jpeg()),
         ("export-sizes", &[], |s| s.export_sizes()),
+        ("export-webp", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export WebP", &title, "webp", move |path| state.edit(|d| d.export_webp(&path))); }),
+        ("export-layers", &[], |s| s.export_layers()),
+        ("history", &["<Alt>h"], |s| { let mut doc = None; let mut refresh: Option<Rc<dyn Fn()>> = None; s.with_current(|p| { doc = Some(p.canvas.doc().clone()); let page = p.canvas.clone(); refresh = Some(Rc::new(move || { if let Some(r) = page.refresh_fn() { r(); } })); }); if let (Some(doc), Some(refresh)) = (doc, refresh) { dialogs::history(s.window.upcast_ref(), doc, refresh); } }),
+        ("rotate-canvas-cw", &[], |s| { s.edit(|d| d.rotate_canvas(90.0)); s.with_current(|p| p.canvas.fit()); }),
+        ("rotate-canvas-ccw", &[], |s| { s.edit(|d| d.rotate_canvas(-90.0)); s.with_current(|p| p.canvas.fit()); }),
+        ("rotate-canvas-180", &[], |s| { s.edit(|d| d.rotate_canvas(180.0)); s.with_current(|p| p.canvas.fit()); }),
+        ("rotate-canvas", &[], |s| { let state = s.clone(); dialogs::angle(s.window.upcast_ref(), "Rotate Canvas", "Angle (clockwise)", move |a| { state.edit(|d| d.rotate_canvas(a)); state.with_current(|p| p.canvas.fit()); }); }),
+        ("straighten", &[], |s| { let state = s.clone(); s.with_doc(|d| { let path = d.pen.clone(); if path.anchors.len() < 2 { anyhow::bail!("Draw a line along the horizon with the Pen first: two points, then Image > Straighten."); } let (a, b) = (path.anchors[0].point, path.anchors[path.anchors.len() - 1].point); d.pen = crate::path::Path::default(); d.pen_done = false; d.document.straighten(a, b) }); state.with_current(|p| p.canvas.fit()); }),
         ("copy-merged", &["<Control><Shift>c"], |s| s.copy_merged()),
         ("new-layer", &["<Control><Shift>n", "<Control><Alt><Shift>n"], |s| s.edit(|d| { d.add_blank_layer(); Ok(()) })),
         ("new-folder", &["<Control>g"], |s| s.edit(|d| { d.add_folder(); Ok(()) })),
@@ -680,11 +688,14 @@ fn menu() -> gio::Menu {
     file.append(Some("Export JPEG…"), Some("win.export-jpeg"));
     file.append(Some("Export PSD…"), Some("win.export-psd"));
     file.append(Some("Export Sizes…"), Some("win.export-sizes"));
+    file.append(Some("Export WebP…"), Some("win.export-webp"));
+    file.append(Some("Export Layers to Files…"), Some("win.export-layers"));
     file.append(Some("Close"), Some("win.close-tab"));
     menu.append_submenu(Some("File"), &file);
     let edit = gio::Menu::new();
     edit.append(Some("Undo"), Some("win.undo"));
     edit.append(Some("Redo"), Some("win.redo"));
+    edit.append(Some("History…"), Some("win.history"));
     edit.append(Some("Free Transform"), Some("win.free-transform"));
     edit.append(Some("Copy"), Some("win.copy"));
     edit.append(Some("Paste as New Layer"), Some("win.paste"));
@@ -780,6 +791,13 @@ fn menu() -> gio::Menu {
     image.append(Some("Invert"), Some("win.invert"));
     image.append(Some("Flip Canvas Horizontal"), Some("win.flip-canvas-horizontal"));
     image.append(Some("Flip Canvas Vertical"), Some("win.flip-canvas-vertical"));
+    let rotate = gio::Menu::new();
+    rotate.append(Some("90° Clockwise"), Some("win.rotate-canvas-cw"));
+    rotate.append(Some("90° Counterclockwise"), Some("win.rotate-canvas-ccw"));
+    rotate.append(Some("180°"), Some("win.rotate-canvas-180"));
+    rotate.append(Some("Arbitrary…"), Some("win.rotate-canvas"));
+    image.append_submenu(Some("Rotate Canvas"), &rotate);
+    image.append(Some("Straighten to the Pen Line"), Some("win.straighten"));
     image.append(Some("Generative Expand…"), Some("win.generative-expand"));
     image.append(Some("Rulers"), Some("win.toggle-rulers"));
     let view = gio::Menu::new();
@@ -967,6 +985,10 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Layer", "Layer > Shape from Path, Edit Shape Points, Apply Path to Shape", "A Pen path becomes a vector shape; its points can be picked up again and put back"),
     ("Edit", "Edit > Define Pattern, Fill with Pattern", "Save the selection as a tile; fill with a saved tile (the Clone tool's Pattern option stamps one)"),
     ("File", "File > Export Sizes", "The document at several ad and social sizes at once: reframed, filled or padded"),
+    ("File", "File > Export WebP, Export Layers to Files", "A lossless WebP of the composite; every layer as its own PNG in a folder"),
+    ("Edit", "Alt+H", "History: the list of steps, click one to go back to it"),
+    ("Image", "Image > Rotate Canvas, Straighten", "Quarter turns, a half turn or any angle; straighten to a two-point Pen line along the horizon"),
+    ("Color", "Swatches in the color picker", "+ saves the current color for good; right-click a swatch to remove it"),
     ("Type", "Drag with the Type tool, or the Width field", "Paragraph text that wraps at a width; 0 is a single line"),
     ("Layer", "Layer Style > Blend If", "Show the layer only where its tones, and the tones beneath, fall between black and white points"),
     ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
@@ -1352,6 +1374,21 @@ impl App {
             let label = format!("{}{}", d.title, if d.document.is_modified() { " •" } else { "" });
             if let Some(tab) = self.notebook.tab_label(&page.root) { if let Some(l) = tab.first_child().and_downcast::<gtk::Label>() { l.set_label(&label); } }
         }
+    }
+
+    /// File > Export Layers to Files: every visible layer as a PNG in a chosen folder.
+    fn export_layers(self: &Rc<Self>) {
+        let mut doc = None;
+        self.with_current(|p| doc = Some(p.canvas.doc().clone()));
+        let Some(doc) = doc else { return };
+        let state = self.clone();
+        let dialog = gtk::FileDialog::builder().title("Export layers into").modal(true).build();
+        dialog.select_folder(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else { return };
+            let Some(folder) = file.path() else { return };
+            let outcome = doc.borrow_mut().document.export_layers(&folder, true);
+            match outcome { Ok(files) => state.alert("Export Layers", &format!("{} layer{} written to {}.", files.len(), if files.len() == 1 { "" } else { "s" }, folder.display())), Err(e) => state.alert("Could not export", &format!("{e:#}")) }
+        });
     }
 
     /// File > Export Sizes: the document at several sizes into a folder.

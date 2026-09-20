@@ -203,6 +203,14 @@ impl Document {
     pub fn can_redo(&self) -> bool { self.history.can_redo() }
     pub fn undo_name(&self) -> Option<&str> { self.history.undo_name() }
     pub fn redo_name(&self) -> Option<&str> { self.history.redo_name() }
+    /// The steps behind and ahead, by name.
+    pub fn history_names(&self) -> (Vec<String>, Vec<String>) { self.history.names() }
+
+    /// Moves the document `steps` back (negative) or forward (positive) through its history.
+    pub fn step_history(&mut self, steps: i64) {
+        if steps < 0 { for _ in 0..(-steps) { if !self.undo() { break; } } } else { for _ in 0..steps { if !self.redo() { break; } } }
+    }
+
     pub fn undo(&mut self) -> bool { match self.history.undo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
     pub fn redo(&mut self) -> bool { match self.history.redo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
 
@@ -1144,6 +1152,113 @@ impl Document {
         self.selection = None;
         self.end_edit();
         Ok(())
+    }
+
+    /// Image > Rotate Canvas: every layer turned by `degrees` (clockwise positive) about the canvas
+    /// center, the canvas grown to hold the turned picture (a quarter or half turn keeps it exact).
+    pub fn rotate_canvas(&mut self, degrees: f64) -> Result<()> {
+        if !degrees.is_finite() { bail!("Give an angle in degrees."); }
+        let angle = degrees.rem_euclid(360.0);
+        if angle == 0.0 { return Ok(()); }
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let rad = angle.to_radians();
+        let (sn, cs) = rad.sin_cos();
+        // The turned canvas corners, and the box around them: the new canvas.
+        let corners = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| ((x - cx) * cs - (y - cy) * sn, (x - cx) * sn + (y - cy) * cs));
+        let (nx0, ny0) = (corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min), corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min));
+        let (nx1, ny1) = (corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max), corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max));
+        let (nw, nh) = ((nx1 - nx0).round().max(1.0), (ny1 - ny0).round().max(1.0));
+        if nw > 30_000.0 || nh > 30_000.0 || nw * nh > 100_000_000.0 { bail!("The turned canvas would pass the 30,000-pixel side or 100-megapixel limit."); }
+        let (ncx, ncy) = (nw / 2.0, nh / 2.0);
+        let turn = |t: Transform| -> Transform {
+            let c = t.center();
+            let (dx, dy) = (c.0 - cx, c.1 - cy);
+            let moved = (ncx + dx * cs - dy * sn, ncy + dx * sn + dy * cs);
+            let mut out = t;
+            // A flipped layer turns the other way, as its axes are mirrored.
+            let sign = if t.flip_x != t.flip_y { -1.0 } else { 1.0 };
+            // Kept in the half-open turn around zero, as the inspector shows it.
+            out.rotation = (t.rotation + sign * angle + 180.0).rem_euclid(360.0) - 180.0;
+            out.origin = crate::format::Point(moved.0 - t.size.0 / 2.0, moved.1 - t.size.1 / 2.0);
+            out
+        };
+        self.begin_edit("Rotate Canvas");
+        for layer in self.renderer.layers().to_vec() {
+            self.renderer.set_layer_transform(layer.id, turn(layer.transform));
+            if let Some(p) = layer.mask_placement { self.renderer.set_mask_placement(layer.id, Some(turn(p))); }
+        }
+        let selection = self.selection.take();
+        self.renderer.set_size(nw as i32, nh as i32);
+        if let Some(sel) = selection {
+            self.selection = Some(Selection::from_shape(nw as i32, nh as i32, sel.antialiased, |cr| { cr.translate(ncx, ncy); cr.rotate(rad); cr.translate(-cx, -cy); cr.set_source_surface(&sel.mask, 0.0, 0.0)?; cr.paint()?; Ok(()) })?);
+        }
+        self.guides_v.clear();
+        self.guides_h.clear();
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Image > Straighten: the canvas turned so a line from `a` to `b` (a horizon drawn with the Pen)
+    /// comes level, then cropped to the largest upright rectangle of the same proportions inside it.
+    pub fn straighten(&mut self, a: (f64, f64), b: (f64, f64)) -> Result<()> {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        if dx.hypot(dy) < 2.0 { bail!("Draw a line along the horizon first: two Pen points."); }
+        let mut angle = dy.atan2(dx).to_degrees();
+        // The nearer of level and upright.
+        if angle > 45.0 { angle -= 90.0 } else if angle < -45.0 { angle += 90.0 }
+        if angle.abs() < 0.01 { return Ok(()); }
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        self.begin_edit("Straighten");
+        if let Err(e) = self.rotate_canvas(-angle) { self.abort_edit(); return Err(e); }
+        // The largest axis-aligned rectangle of the original proportions inside the turned picture.
+        let rad = angle.abs().to_radians();
+        let (sn, cs) = rad.sin_cos();
+        let scale = if w >= h { let q = h / w; (q / (q * cs + sn)).min(1.0 / (cs + q * sn)) } else { let q = w / h; (q / (q * cs + sn)).min(1.0 / (cs + q * sn)) };
+        let (cw, ch) = ((w * scale).floor().max(1.0), (h * scale).floor().max(1.0));
+        let (nw, nh) = (self.width() as f64, self.height() as f64);
+        let result = self.crop((((nw - cw) / 2.0).round(), ((nh - ch) / 2.0).round(), cw, ch));
+        match result { Ok(()) => { self.end_edit(); Ok(()) } Err(e) => { self.abort_edit(); Err(e) } }
+    }
+
+    /// The flattened document as lossless WebP bytes.
+    pub fn webp_bytes(&mut self) -> Result<Vec<u8>> {
+        let image = self.renderer.render_flat()?;
+        let (rgba, w, h) = crate::png_io::straight_rgba(&image)?;
+        let mut out = Vec::new();
+        let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
+        use image::ImageEncoder;
+        encoder.write_image(&rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8)?;
+        Ok(out)
+    }
+
+    pub fn export_webp(&mut self, path: &std::path::Path) -> Result<()> { let bytes = self.webp_bytes()?; std::fs::write(path, bytes)?; Ok(()) }
+
+    /// File > Export Layers: every visible pixel, type and shape layer as its own PNG in `folder`, at its
+    /// own bounds (`trim`) or on the full canvas, numbered from the bottom. Returns the files written.
+    pub fn export_layers(&mut self, folder: &std::path::Path, trim: bool) -> Result<Vec<std::path::PathBuf>> {
+        std::fs::create_dir_all(folder)?;
+        let (w, h) = (self.width(), self.height());
+        let mut written = Vec::new();
+        let layers: Vec<crate::format::Layer> = self.renderer.layers().iter().filter(|l| l.is_visible && !l.is_group() && l.adjustment.is_none()).cloned().collect();
+        for layer in layers.iter() {
+            if !self.renderer.has_image(layer.id) { continue; }
+            let (x0, y0, x1, y1) = if trim { let b = layer.transform.bounds(); (b.0.floor().max(0.0) as i32, b.1.floor().max(0.0) as i32, (b.2.ceil() as i32).min(w), (b.3.ceil() as i32).min(h)) } else { (0, 0, w, h) };
+            if x1 <= x0 || y1 <= y0 { continue; }
+            let surface = new_argb(x1 - x0, y1 - y0)?;
+            {
+                let cr = Context::new(&surface)?;
+                cr.translate(-(x0 as f64), -(y0 as f64));
+                cr.rectangle(x0 as f64, y0 as f64, (x1 - x0) as f64, (y1 - y0) as f64);
+                cr.clip();
+                self.renderer.draw_layer_plain(layer.id, &cr)?;
+            }
+            let clean: String = layer.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+            let path = folder.join(format!("{:02}-{}.png", written.len() + 1, clean.trim()));
+            crate::png_io::encode(&surface, &path, self.renderer.resolution())?;
+            written.push(path);
+        }
+        Ok(written)
     }
 
     /// What crop edges snap to: the canvas edges and every visible layer's bounds, in whole pixels.

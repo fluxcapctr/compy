@@ -155,6 +155,8 @@ impl Canvas {
     }
 
     pub fn doc(&self) -> &DocRef { &self.doc }
+    /// The panel-and-canvas refresh the page installed, for windows that change the document.
+    pub fn refresh_fn(&self) -> Option<Rc<dyn Fn()>> { self.refresh.borrow().clone() }
 
     /// Whether the document or view moved on since the last presented frame.
     fn doc_revision_changed(&self, d: &super::Doc) -> bool {

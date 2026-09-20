@@ -292,6 +292,18 @@ elements keep their relative places, scaled to the short side and held inside a 
 Fill: cover and crop; Pad: fit inside and fill the rest with a color), PNG or JPEG, and the folder.
 Files are named title-size-WxH. Compy: `export_sizes` with preset names or width and height objects.
 
+**Gradient and Pattern Overlay, History, swatches, Rotate Canvas, Straighten, WebP, Export Layers.**
+Layer Style gained Gradient Overlay (any gradient from the editor, linear or radial, at an angle,
+reversed, at an opacity; it travels to and from Photoshop) and Pattern Overlay (a saved pattern tiled
+over the layer at a scale). Edit > History (Alt+H) lists every step; click one to go back to it, and the
+steps after it stay until the next edit. The color picker keeps swatches: + saves the current color for
+good, right-click a swatch removes it. Image > Rotate Canvas turns everything a quarter turn either
+way, a half turn or any angle, the canvas growing to hold the picture; Image > Straighten to the Pen
+Line levels a horizon: two Pen points along it, then the command turns and crops the canvas upright.
+File > Export WebP writes a lossless WebP; File > Export Layers to Files writes every visible layer as
+its own PNG, trimmed and numbered from the bottom. Compy: layer_style takes gradient_overlay and
+pattern_overlay; rotate_canvas, straighten, export_layers, and export accepts .webp.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

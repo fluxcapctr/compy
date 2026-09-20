@@ -79,6 +79,22 @@ impl ColorButton {
     pub fn color(&self) -> [f64; 3] { self.color.get() }
 }
 
+/// Saved swatches, kept in `~/.config/compositor/swatches.json` as hex strings.
+fn swatches_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".config"));
+    base.join("compositor/swatches.json")
+}
+pub fn swatches() -> Vec<[f64; 3]> {
+    std::fs::read_to_string(swatches_path()).ok().and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()).map(|v| v.iter().filter_map(|h| parse_hex(h)).collect()).unwrap_or_default()
+}
+fn save_swatches(list: &[[f64; 3]]) {
+    let path = swatches_path();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&list.iter().map(|c| hex(*c)).collect::<Vec<_>>()).unwrap_or_default());
+}
+pub fn add_swatch(c: [f64; 3]) { let mut list = swatches(); list.retain(|x| hex(*x) != hex(c)); list.push(c); if list.len() > 64 { list.remove(0); } save_swatches(&list); }
+pub fn remove_swatch(c: [f64; 3]) { let mut list = swatches(); list.retain(|x| hex(*x) != hex(c)); save_swatches(&list); }
+
 fn remember(c: [f64; 3]) {
     RECENTS.with(|r| { let mut r = r.borrow_mut(); r.retain(|x| hex(*x) != hex(c)); r.insert(0, c); r.truncate(RECENT); });
 }
@@ -99,6 +115,7 @@ struct Picker {
     wheel: gtk::DrawingArea,
     entry: gtk::Entry,
     recents: gtk::Box,
+    saved: gtk::FlowBox,
     hsv: Cell<(f64, f64, f64)>,
     ring_image: RefCell<Option<cairo::ImageSurface>>,
     square_image: RefCell<Option<(f64, cairo::ImageSurface)>>,
@@ -119,7 +136,15 @@ impl Picker {
         widget.append(&wheel);
         widget.append(&row);
         widget.append(&recents);
-        let picker = Rc::new(Picker { widget, wheel: wheel.clone(), entry: entry.clone(), recents, hsv: Cell::new(rgb_to_hsv(initial)), ring_image: RefCell::new(None), square_image: RefCell::new(None), dragging: Cell::new(None), on_change: RefCell::new(None), syncing: Cell::new(false) });
+        // Swatches: colors kept on purpose, across sessions. Plus saves the current one; right-click removes.
+        let saved_row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+        saved_row.append(&gtk::Label::builder().label("Swatches").css_classes(["dim-label", "caption"]).build());
+        let add = gtk::Button::builder().label("+").has_frame(false).tooltip_text("Save this color as a swatch; right-click a swatch to remove it").build();
+        saved_row.append(&add);
+        widget.append(&saved_row);
+        let saved = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(2).row_spacing(2).max_children_per_line(10).min_children_per_line(1).build();
+        widget.append(&saved);
+        let picker = Rc::new(Picker { widget, wheel: wheel.clone(), entry: entry.clone(), recents, saved, hsv: Cell::new(rgb_to_hsv(initial)), ring_image: RefCell::new(None), square_image: RefCell::new(None), dragging: Cell::new(None), on_change: RefCell::new(None), syncing: Cell::new(false) });
         { let p = picker.clone(); wheel.set_draw_func(move |_, cr, w, h| p.draw(cr, w as f64, h as f64)); }
         let drag = gtk::GestureDrag::new();
         { let p = picker.clone(); drag.connect_drag_begin(move |_, x, y| { p.dragging.set(p.region(x, y)); p.pick(x, y); }); }
@@ -128,9 +153,29 @@ impl Picker {
         wheel.add_controller(drag);
         { let p = picker.clone(); entry.connect_activate(move |e| { if let Some(rgb) = parse_hex(&e.text()) { p.set_color(rgb); p.emit(); } }); }
         { let p = picker.clone(); entry.connect_changed(move |e| { if p.syncing.get() { return; } if let Some(rgb) = parse_hex(&e.text()) { if e.text().len() == 7 { p.hsv.set(rgb_to_hsv(rgb)); p.square_image.borrow_mut().take(); p.wheel.queue_draw(); p.emit(); } } }); }
+        { let p = picker.clone(); add.connect_clicked(move |_| { add_swatch(p.color()); p.fill_swatches(); }); }
         picker.sync_entry();
         picker.fill_recents();
+        picker.fill_swatches();
         picker
+    }
+
+    fn fill_swatches(self: &Rc<Self>) {
+        while let Some(child) = self.saved.first_child() { self.saved.remove(&child); }
+        for c in swatches() {
+            let swatch = gtk::Button::builder().width_request(18).height_request(18).has_frame(false).tooltip_text(hex(c)).build();
+            let area = gtk::DrawingArea::builder().content_width(16).content_height(16).build();
+            area.set_draw_func(move |_, cr, w, h| { cr.set_source_rgb(c[0], c[1], c[2]); rounded(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 3.0); let _ = cr.fill_preserve(); cr.set_source_rgba(0.5, 0.5, 0.5, 0.6); cr.set_line_width(1.0); let _ = cr.stroke(); });
+            swatch.set_child(Some(&area));
+            { let p = self.clone(); swatch.connect_clicked(move |_| { p.set_color(c); p.emit(); }); }
+            {
+                let p = self.clone();
+                let right = gtk::GestureClick::builder().button(3).build();
+                right.connect_released(move |_, _, _, _| { remove_swatch(c); p.fill_swatches(); });
+                swatch.add_controller(right);
+            }
+            self.saved.insert(&swatch, -1);
+        }
     }
 
     fn on_change(&self, f: Rc<dyn Fn([f64; 3])>) { *self.on_change.borrow_mut() = Some(f); }

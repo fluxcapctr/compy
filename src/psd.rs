@@ -706,6 +706,16 @@ pub fn effects_descriptor(e: &Effects) -> Descriptor {
         f.push("enab", Item::Bool(o.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Md  ", blend_item("Nrml")).push("Opct", prc(o.opacity * 100.0)).push("Clr ", rgb(o.color));
         d.push("SoFi", Item::Desc(f));
     }
+    if let Some(g) = &e.gradient_overlay {
+        let n = g.gradient.normalized();
+        let mut grad = Descriptor::new("Grdn");
+        grad.push("Nm  ", Item::Text("Custom".into())).push("GrdF", Item::Enum("GrdF".into(), "CstS".into())).push("Intr", Item::Double(4096.0));
+        grad.push("Clrs", Item::List(n.stops.iter().map(|st| { let mut c = Descriptor::new("Clrt"); c.push("Clr ", rgb(st.color)).push("Type", Item::Enum("Clry".into(), "UsrS".into())).push("Lctn", Item::Int((st.position * 4096.0).round() as i32)).push("Mdpn", Item::Int(50)); Item::Desc(c) }).collect()));
+        grad.push("Trns", Item::List(n.alphas.iter().map(|a| { let mut t = Descriptor::new("TrnS"); t.push("Opct", prc(a.alpha * 100.0)).push("Lctn", Item::Int((a.position * 4096.0).round() as i32)).push("Mdpn", Item::Int(50)); Item::Desc(t) }).collect()));
+        let mut f = Descriptor::new("GrFl");
+        f.push("enab", Item::Bool(g.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Md  ", blend_item("Nrml")).push("Opct", prc(g.opacity * 100.0)).push("Grad", Item::Desc(grad)).push("Angl", ang(g.angle)).push("Type", Item::Enum("GrdT".into(), if g.radial { "Rdl " } else { "Lnr " }.into())).push("Rvrs", Item::Bool(g.reverse)).push("Algn", Item::Bool(true)).push("Scl ", prc(100.0));
+        d.push("GrFl", Item::Desc(f));
+    }
     if let Some(s) = &e.stroke {
         let mut f = Descriptor::new("FrFX");
         f.push("enab", Item::Bool(s.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Styl", Item::Enum("FStl".into(), match s.position { 1 => "InsF", 2 => "CtrF", _ => "OutF" }.into())).push("PntT", Item::Enum("FrFl".into(), "SClr".into())).push("Md  ", blend_item("Nrml")).push("Opct", prc(s.opacity * 100.0)).push("Sz  ", pxl(s.size)).push("Clr ", rgb(s.color));
@@ -731,6 +741,16 @@ pub fn effects_from_descriptor(d: &Descriptor) -> Option<Effects> {
         e.bevel = Some(Bevel { enabled: on(o), style, depth: o.number("srgR").unwrap_or(100.0), size: o.number("blur").unwrap_or(5.0) * scale, angle: o.number("lagl").unwrap_or(120.0), altitude: o.number("Lald").unwrap_or(30.0), highlight_opacity: o.number("hglO").unwrap_or(75.0) / 100.0, shadow_opacity: o.number("sdwO").unwrap_or(75.0) / 100.0 });
     }
     if let Some(o) = d.desc("SoFi") { e.color_overlay = Some(Overlay { enabled: on(o), color: o.color("Clr ").unwrap_or([1.0, 0.0, 0.0]), opacity: o.number("Opct").unwrap_or(100.0) / 100.0 }); }
+    if let Some(o) = d.desc("GrFl") {
+        let mut gradient = crate::gradient::Gradient { stops: Vec::new(), alphas: Vec::new() };
+        if let Some(grad) = o.desc("Grad") {
+            if let Some(Item::List(colors)) = grad.get("Clrs") { for c in colors { if let Item::Desc(c) = c { if let Some(color) = c.color("Clr ") { gradient.stops.push(crate::gradient::Stop { position: c.number("Lctn").unwrap_or(0.0) / 4096.0, color }); } } } }
+            if let Some(Item::List(alphas)) = grad.get("Trns") { for a in alphas { if let Item::Desc(a) = a { gradient.alphas.push(crate::gradient::AlphaStop { position: a.number("Lctn").unwrap_or(0.0) / 4096.0, alpha: a.number("Opct").unwrap_or(100.0) / 100.0 }); } } }
+        }
+        if gradient.stops.len() >= 2 {
+            e.gradient_overlay = Some(crate::effects::GradientOverlay { enabled: on(o), gradient: gradient.normalized(), angle: o.number("Angl").unwrap_or(90.0), opacity: o.number("Opct").unwrap_or(100.0) / 100.0, radial: o.enum_value("Type") == Some("Rdl "), reverse: o.boolean("Rvrs").unwrap_or(false) });
+        }
+    }
     if let Some(o) = d.desc("FrFX") {
         let position = match o.enum_value("Styl") { Some("InsF") => 1, Some("CtrF") => 2, _ => 0 };
         e.stroke = Some(Stroke { enabled: on(o), size: o.number("Sz  ").unwrap_or(3.0) * scale, position, color: o.color("Clr ").unwrap_or([1.0, 0.0, 0.0]), opacity: o.number("Opct").unwrap_or(100.0) / 100.0 });
@@ -847,6 +867,7 @@ mod descriptor_tests {
         e.stroke = Some(Stroke { enabled: true, size: 4.0, position: 1, color: [1.0, 1.0, 0.0], opacity: 0.8 });
         e.bevel = Some(Bevel { enabled: true, style: 2, depth: 150.0, size: 6.0, angle: 90.0, altitude: 45.0, highlight_opacity: 0.5, shadow_opacity: 0.4 });
         e.color_overlay = Some(Overlay { enabled: false, color: [0.0, 1.0, 0.0], opacity: 0.3 });
+        e.gradient_overlay = Some(crate::effects::GradientOverlay { enabled: true, gradient: crate::gradient::Gradient::two([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), angle: 45.0, opacity: 0.7, radial: true, reverse: true });
         let bytes = crate::psd_desc::write(&effects_descriptor(&e));
         let mut block = vec![0, 0, 0, 0, 0, 0, 0, 16];
         block.extend_from_slice(&bytes);
@@ -858,6 +879,8 @@ mod descriptor_tests {
         let b = back.bevel.unwrap();
         assert!(b.style == 2 && b.depth == 150.0 && b.altitude == 45.0 && (b.highlight_opacity - 0.5).abs() < 1e-9);
         assert!(!back.color_overlay.unwrap().enabled);
+        let g = back.gradient_overlay.unwrap();
+        assert!(g.radial && g.reverse && g.angle == 45.0 && (g.opacity - 0.7).abs() < 1e-9 && g.gradient.stops.len() == 2 && g.gradient.stops[1].color == [0.0, 0.0, 1.0]);
         // A TySh block: the transform, the text descriptor with engine data, and a warp.
         let mut d = Descriptor::new("TxLr");
         d.push("Txt ", Item::Text("Hello\rWorld".into()));

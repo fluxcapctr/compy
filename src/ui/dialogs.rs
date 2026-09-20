@@ -243,6 +243,65 @@ pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::
     window.present();
 }
 
+/// Edit > History: the steps behind and ahead; clicking one moves the document there.
+pub fn history(parent: &gtk::Window, doc: super::DocRef, refresh: std::rc::Rc<dyn Fn()>) {
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(10).margin_bottom(10).margin_start(10).margin_end(10).build();
+    let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
+    let scroller = gtk::ScrolledWindow::builder().child(&list).min_content_height(280).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
+    content.append(&gtk::Label::builder().label("Click a step to go back to it; the steps after it stay until you make a new edit.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    content.append(&scroller);
+    let window = floating(parent, "History", false, 300, &content);
+    let syncing = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Rebuilds the list from the document: the past, the present, and the steps ahead, dimmed.
+    let rebuild: std::rc::Rc<dyn Fn()> = {
+        let (list, doc, syncing) = (list.clone(), doc.clone(), syncing.clone());
+        std::rc::Rc::new(move || {
+            syncing.set(true);
+            while let Some(child) = list.first_child() { list.remove(&child); }
+            let (past, future) = doc.borrow().document.history_names();
+            let row = |text: &str, dim: bool| { let l = gtk::Label::builder().label(text).xalign(0.0).margin_start(6).margin_end(6).margin_top(3).margin_bottom(3).build(); if dim { l.add_css_class("dim-label"); } gtk::ListBoxRow::builder().child(&l).build() };
+            list.append(&row("Open", past.is_empty() && false));
+            for name in &past { list.append(&row(name, false)); }
+            for name in &future { list.append(&row(name, true)); }
+            list.select_row(list.row_at_index(past.len() as i32).as_ref());
+            syncing.set(false);
+        })
+    };
+    {
+        let (doc, syncing, rebuild, refresh) = (doc.clone(), syncing.clone(), rebuild.clone(), refresh.clone());
+        list.connect_row_selected(move |_, row| {
+            if syncing.get() { return; }
+            let Some(row) = row else { return };
+            let target = row.index() as i64;
+            let current = doc.borrow().document.history_names().0.len() as i64;
+            if target == current { return; }
+            doc.borrow_mut().document.step_history(target - current);
+            refresh();
+            rebuild();
+        });
+    }
+    rebuild();
+    // The document changes behind the window: keep the list current while it is open.
+    let (doc2, rebuild2, window2) = (doc.clone(), rebuild.clone(), window.clone());
+    let mut shown = doc.borrow().document.edit_serial;
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+        if !window2.is_visible() { return gtk::glib::ControlFlow::Break; }
+        let serial = doc2.borrow().document.edit_serial;
+        if serial != shown { shown = serial; rebuild2(); }
+        gtk::glib::ControlFlow::Continue
+    });
+    window.present();
+}
+
+/// An angle in degrees.
+pub fn angle(parent: &gtk::Window, title: &str, label: &str, done: impl Fn(f64) + 'static) {
+    let (window, grid, ok) = dialog(parent, title);
+    let value = spin(&grid, 0, label, -360.0, 360.0, 0.1, 0.0, 1);
+    let w = window.clone();
+    ok.connect_clicked(move |_| { done(value.value()); w.close(); });
+    window.present();
+}
+
 /// A text field, for renaming.
 pub fn text(parent: &gtk::Window, title: &str, label: &str, initial: &str, done: impl Fn(String) + 'static) {
     let (window, grid, ok) = dialog(parent, title);

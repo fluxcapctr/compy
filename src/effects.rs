@@ -59,6 +59,28 @@ pub struct Overlay {
     #[serde(default = "one")] pub opacity: f64,
 }
 
+/// Gradient Overlay: a gradient across the layer's bounds at an angle (0 is left to right, 90 bottom
+/// to top), linear or radial, recoloring the layer within its own coverage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientOverlay {
+    #[serde(default = "t")] pub enabled: bool,
+    pub gradient: crate::gradient::Gradient,
+    #[serde(default = "ninety")] pub angle: f64,
+    #[serde(default = "one")] pub opacity: f64,
+    #[serde(default)] pub radial: bool,
+    #[serde(default)] pub reverse: bool,
+}
+fn ninety() -> f64 { 90.0 }
+
+/// Pattern Overlay: a saved pattern tiled over the layer from its top left corner, at a scale.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternOverlay {
+    #[serde(default = "t")] pub enabled: bool,
+    pub pattern: String,
+    #[serde(default = "one")] pub scale: f64,
+    #[serde(default = "one")] pub opacity: f64,
+}
+
 /// Blend If: the layer shows only where its own tones, and the tones underneath, fall between the
 /// black and white points (0 to 255), fading in over `feather` levels at each end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,6 +119,8 @@ pub struct Effects {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub bevel: Option<Bevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub stroke: Option<Stroke>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "colorOverlay")] pub color_overlay: Option<Overlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "gradientOverlay")] pub gradient_overlay: Option<GradientOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "patternOverlay")] pub pattern_overlay: Option<PatternOverlay>,
 }
 
 impl Shadow {
@@ -115,6 +139,12 @@ impl Default for Stroke {
 }
 impl Default for Overlay {
     fn default() -> Overlay { Overlay { enabled: true, color: [1.0, 0.0, 0.0], opacity: 1.0 } }
+}
+impl Default for GradientOverlay {
+    fn default() -> GradientOverlay { GradientOverlay { enabled: true, gradient: crate::gradient::Gradient::default(), angle: 90.0, opacity: 1.0, radial: false, reverse: false } }
+}
+impl Default for PatternOverlay {
+    fn default() -> PatternOverlay { PatternOverlay { enabled: true, pattern: crate::patterns::list().first().cloned().unwrap_or_default(), scale: 1.0, opacity: 1.0 } }
 }
 
 /// What the effects draw, in premultiplied ARGB32 rows the size of the alpha given: `below` goes under
@@ -141,6 +171,7 @@ impl Effects {
             || self.outer_glow.as_ref().is_some_and(|e| e.enabled) || self.inner_glow.as_ref().is_some_and(|e| e.enabled)
             || self.bevel.as_ref().is_some_and(|e| e.enabled) || self.stroke.as_ref().is_some_and(|e| e.enabled)
             || self.color_overlay.as_ref().is_some_and(|e| e.enabled)
+            || self.gradient_overlay.as_ref().is_some_and(|e| e.enabled) || self.pattern_overlay.as_ref().is_some_and(|e| e.enabled)
     }
 
     /// Effects that draw outside the layer's bounds, and how far (document pixels).
@@ -180,6 +211,46 @@ impl Effects {
         if let Some(o) = self.color_overlay.as_ref().filter(|e| e.enabled) {
             let cov: Vec<f32> = a01.iter().map(|a| if *a > 0.0 { o.opacity as f32 } else { 0.0 }).collect();
             paint(layer(&mut inside, n), &cov, o.color);
+        }
+        if let Some(g) = self.gradient_overlay.as_ref().filter(|e| e.enabled) {
+            // Across the box the coverage occupies, so the gradient runs edge to edge of the layer.
+            let (bx0, by0, bx1, by1) = coverage_box(alpha, w, h).unwrap_or((0, 0, w, h));
+            let (bw, bh) = ((bx1 - bx0).max(1) as f64, (by1 - by0).max(1) as f64);
+            let gradient = if g.reverse { g.gradient.reversed() } else { g.gradient.normalized() };
+            let lut: Vec<[f64; 4]> = (0..256).map(|i| gradient.at(i as f64 / 255.0)).collect();
+            let (ca, sa) = ((-g.angle).to_radians().cos(), (-g.angle).to_radians().sin());
+            let buf = layer(&mut inside, n);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if a01[i] <= 0.0 { continue; }
+                    // The point in the box from -0.5 to 0.5 each way, projected on the angle's direction.
+                    let (u, v) = ((x as f64 + 0.5 - bx0 as f64) / bw - 0.5, (y as f64 + 0.5 - by0 as f64) / bh - 0.5);
+                    let t = if g.radial { (u.hypot(v) * 2.0).min(1.0) } else { ((u * ca + v * sa) / (ca.abs() + sa.abs()).max(1e-6) + 0.5).clamp(0.0, 1.0) };
+                    let c = lut[(t * 255.0).round() as usize];
+                    let cov = (c[3] * g.opacity) as f32;
+                    paint_one(&mut buf[i * 4..i * 4 + 4], cov, [c[0], c[1], c[2]]);
+                }
+            }
+        }
+        if let Some(p) = self.pattern_overlay.as_ref().filter(|e| e.enabled) {
+            if let Ok(tile) = crate::patterns::load(&p.pattern) {
+                if let Ok((rgba, tw, th)) = crate::png_io::straight_rgba(&tile) {
+                    let (bx0, by0, _, _) = coverage_box(alpha, w, h).unwrap_or((0, 0, w, h));
+                    let scale = if p.scale.is_finite() { p.scale.clamp(0.05, 20.0) } else { 1.0 };
+                    let buf = layer(&mut inside, n);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let i = y * w + x;
+                            if a01[i] <= 0.0 { continue; }
+                            let (sx, sy) = ((((x as i64 - bx0 as i64) as f64 / scale).floor() as i64).rem_euclid(tw as i64) as usize, (((y as i64 - by0 as i64) as f64 / scale).floor() as i64).rem_euclid(th as i64) as usize);
+                            let px = &rgba[(sy * tw + sx) * 4..(sy * tw + sx) * 4 + 4];
+                            let cov = (px[3] as f64 / 255.0 * p.opacity) as f32;
+                            paint_one(&mut buf[i * 4..i * 4 + 4], cov, [px[0] as f64 / 255.0, px[1] as f64 / 255.0, px[2] as f64 / 255.0]);
+                        }
+                    }
+                }
+            }
         }
         if let Some(g) = self.inner_glow.as_ref().filter(|e| e.enabled) {
             let inverse: Vec<u8> = alpha.iter().map(|a| 255 - a).collect();
@@ -278,6 +349,24 @@ fn shift_fill(src: &[u8], w: usize, h: usize, dx: f64, dy: f64, fill: u8) -> Vec
 }
 
 /// Composites `color` at `coverage` over a premultiplied ARGB32 buffer.
+/// The box the coverage occupies (x0, y0, x1, y1), None when it is empty.
+fn coverage_box(alpha: &[u8], w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for y in 0..h { for x in 0..w { if alpha[y * w + x] > 0 { x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x + 1); y1 = y1.max(y + 1); } } }
+    if x1 == 0 { None } else { Some((x0, y0, x1, y1)) }
+}
+
+/// One pixel of `color` at `coverage` over what is in `p` (premultiplied BGRA).
+fn paint_one(p: &mut [u8], coverage: f32, color: [f64; 3]) {
+    if coverage <= 0.0005 { return; }
+    let c = coverage.min(1.0);
+    let keep = 1.0 - c;
+    p[0] = (color[2] as f32 * c * 255.0 + p[0] as f32 * keep).round().min(255.0) as u8;
+    p[1] = (color[1] as f32 * c * 255.0 + p[1] as f32 * keep).round().min(255.0) as u8;
+    p[2] = (color[0] as f32 * c * 255.0 + p[2] as f32 * keep).round().min(255.0) as u8;
+    p[3] = (c * 255.0 + p[3] as f32 * keep).round().min(255.0) as u8;
+}
+
 fn paint(buf: &mut [u8], coverage: &[f32], color: [f64; 3]) {
     let (r, g, b) = (color[0] as f32, color[1] as f32, color[2] as f32);
     for (i, c) in coverage.iter().enumerate() {

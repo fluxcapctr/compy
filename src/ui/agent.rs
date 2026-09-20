@@ -382,7 +382,7 @@ impl App {
                     "shape_layer" => { let ellipse = text(args, "kind").unwrap_or_default() == "ellipse"; let color = text(args, "color").and_then(|c| parse_color(&c)).unwrap_or(d.brush.color); let dd = &mut d.document; let id = dd.add_shape_layer(ellipse, (num(args, "x").unwrap_or(0.0), num(args, "y").unwrap_or(0.0), num(args, "width").unwrap_or(100.0), num(args, "height").unwrap_or(100.0)), color, num(args, "corner_radius").unwrap_or(0.0))?; json!({"id": crate::format::upper(id)}) }
                     "layer_style" => {
                         let id = dd.active.ok_or_else(|| anyhow::anyhow!("no active layer"))?;
-                        const KEYS: [&str; 8] = ["drop_shadow", "inner_shadow", "outer_glow", "inner_glow", "bevel", "stroke", "color_overlay", "blend_if"];
+                        const KEYS: [&str; 10] = ["drop_shadow", "inner_shadow", "outer_glow", "inner_glow", "bevel", "stroke", "color_overlay", "blend_if", "gradient_overlay", "pattern_overlay"];
                         let Some(map) = args.as_object() else { bail!("layer_style takes an object of effects") };
                         for (k, v) in map {
                             if !KEYS.contains(&k.as_str()) { bail!("unknown effect {k}; the effects are {}", KEYS.join(", ")); }
@@ -390,7 +390,10 @@ impl App {
                             for (f, fv) in fields {
                                 match f.as_str() {
                                     "color" => { if fv.as_str().and_then(parse_color).is_none() { bail!("{k}.color must look like #rrggbb"); } }
-                                    "opacity" | "angle" | "distance" | "size" | "depth" | "altitude" | "style" | "position" | "this_black" | "this_white" | "under_black" | "under_white" | "feather" => { if !fv.is_number() { bail!("{k}.{f} must be a number"); } }
+                                    "opacity" | "angle" | "distance" | "size" | "depth" | "altitude" | "style" | "position" | "this_black" | "this_white" | "under_black" | "under_white" | "feather" | "scale" => { if !fv.is_number() { bail!("{k}.{f} must be a number"); } }
+                                    "stops" => { if !fv.is_array() { bail!("{k}.stops must be a list"); } }
+                                    "pattern" => { if !fv.is_string() { bail!("{k}.pattern must be a name"); } }
+                                    "radial" | "reverse" => { if !fv.is_boolean() { bail!("{k}.{f} must be true or false"); } }
                                     other => bail!("{k}.{other} is not a setting"),
                                 }
                             }
@@ -404,6 +407,22 @@ impl App {
                         if let Some(v) = args.get("inner_glow") { let mut g = crate::effects::Glow::inner_default(); g.color = color(v, "color", g.color); g.opacity = f(v, "opacity", g.opacity); g.size = f(v, "size", g.size); e.inner_glow = Some(g); }
                         if let Some(v) = args.get("bevel") { let mut b = crate::effects::Bevel::default(); b.style = f(v, "style", 0.0) as u32; b.depth = f(v, "depth", b.depth); b.size = f(v, "size", b.size); b.angle = f(v, "angle", b.angle); b.altitude = f(v, "altitude", b.altitude); e.bevel = Some(b); }
                         if let Some(v) = args.get("stroke") { let mut s = crate::effects::Stroke::default(); s.size = f(v, "size", s.size); s.position = f(v, "position", 0.0) as u32; s.color = color(v, "color", s.color); s.opacity = f(v, "opacity", s.opacity); e.stroke = Some(s); }
+                        if let Some(v) = args.get("gradient_overlay") {
+                            let mut o = crate::effects::GradientOverlay::default();
+                            if let Some(stops) = v.get("stops").and_then(Value::as_array) {
+                                let mut g = crate::gradient::Gradient { stops: Vec::new(), alphas: Vec::new() };
+                                for st in stops { let position = st.get("position").and_then(Value::as_f64).unwrap_or(0.0); let color = st.get("color").and_then(Value::as_str).and_then(parse_color).ok_or_else(|| anyhow::anyhow!("each stop needs a color like #rrggbb"))?; g.stops.push(crate::gradient::Stop { position, color }); g.alphas.push(crate::gradient::AlphaStop { position, alpha: st.get("alpha").and_then(Value::as_f64).unwrap_or(1.0) }); }
+                                if g.stops.len() < 2 { bail!("gradient_overlay.stops needs two or more"); }
+                                o.gradient = g.normalized();
+                            }
+                            o.angle = f(v, "angle", o.angle); o.opacity = f(v, "opacity", o.opacity); o.radial = v.get("radial").and_then(Value::as_bool).unwrap_or(false); o.reverse = v.get("reverse").and_then(Value::as_bool).unwrap_or(false);
+                            e.gradient_overlay = Some(o);
+                        }
+                        if let Some(v) = args.get("pattern_overlay") {
+                            let name = v.get("pattern").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("pattern_overlay needs a pattern name"))?.to_string();
+                            if !crate::patterns::list().contains(&name) { bail!("no pattern called {name}; the state lists patterns"); }
+                            e.pattern_overlay = Some(crate::effects::PatternOverlay { enabled: true, pattern: name, scale: f(v, "scale", 1.0), opacity: f(v, "opacity", 1.0) });
+                        }
                         if let Some(v) = args.get("blend_if") { let mut b = crate::effects::BlendIf::default(); b.this_black = f(v, "this_black", b.this_black); b.this_white = f(v, "this_white", b.this_white); b.under_black = f(v, "under_black", b.under_black); b.under_white = f(v, "under_white", b.under_white); b.feather = f(v, "feather", b.feather); e.blend_if = Some(b); }
                         if let Some(v) = args.get("color_overlay") { let mut o = crate::effects::Overlay::default(); o.color = color(v, "color", o.color); o.opacity = f(v, "opacity", o.opacity); e.color_overlay = Some(o); }
                         dd.set_effects(id, Some(&e))?; json!("styled")
@@ -482,6 +501,17 @@ impl App {
                     "image_size" => { let res = dd.renderer.resolution(); dd.image_size(num(args, "width").unwrap_or(0.0) as i32, num(args, "height").unwrap_or(0.0) as i32, res, crate::format::Sampling::High)?; json!("resized") }
                     "flip" => { let horizontal = text(args, "axis").unwrap_or_default() != "vertical"; if flag(args, "canvas").unwrap_or(false) { dd.flip_canvas(horizontal)?; } else { dd.flip_layer(horizontal); } json!("flipped") }
                     "crop_to_selection" => { dd.crop_to_selection()?; json!("cropped") }
+                    "rotate_canvas" => { dd.rotate_canvas(num(args, "degrees").unwrap_or(0.0))?; json!("rotated") }
+                    "straighten" => {
+                        let point = |k: &str| args.get(k).and_then(Value::as_array).and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))).ok_or_else(|| anyhow::anyhow!("{k} must be [x, y]"));
+                        dd.straighten(point("a")?, point("b")?)?; json!("straightened")
+                    }
+                    "export_layers" => {
+                        let folder = std::path::PathBuf::from(text(args, "folder").unwrap_or_default());
+                        if folder.as_os_str().is_empty() { bail!("folder needed"); }
+                        let files = dd.export_layers(&folder, flag(args, "trim").unwrap_or(true))?;
+                        refresh = false; json!({"written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()})
+                    }
                     "export_sizes" => {
                         use crate::export_sizes::{Fit, Format, SizePreset};
                         let folder = std::path::PathBuf::from(text(args, "folder").unwrap_or_default());
@@ -506,7 +536,7 @@ impl App {
                     "export" => {
                         let path = std::path::PathBuf::from(text(args, "path").unwrap_or_default());
                         if path.as_os_str().is_empty() { bail!("path needed"); }
-                        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")) { dd.export_jpeg(&path, num(args, "quality").unwrap_or(90.0), [1.0; 3])?; } else { dd.export_png(&path)?; }
+                        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")) { dd.export_jpeg(&path, num(args, "quality").map(|q| if q > 1.0 { q / 100.0 } else { q }).unwrap_or(0.9), [1.0; 3])?; } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("webp")) { dd.export_webp(&path)?; } else { dd.export_png(&path)?; }
                         refresh = false; json!(format!("wrote {}", path.display()))
                     }
                     "save" => {

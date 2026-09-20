@@ -4,6 +4,9 @@
 use compositor::document::Document;
 use compositor::selection::Mode;
 
+/// Tests that point XDG_DATA_HOME at a folder of their own take this first: the variable is process-wide.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn alpha_at(d: &mut Document, x: usize, y: usize) -> u8 {
     let s = d.renderer.render_flat().unwrap();
     compositor::raster::with_bytes(&s, |b, stride| b[y * stride + x * 4 + 3]).unwrap()
@@ -702,6 +705,7 @@ fn paragraph_text_wraps_at_its_width_and_shapes_come_from_paths() {
 
 #[test]
 fn patterns_define_fill_and_stamp() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("compy-patterns-{}", std::process::id()));
     let saved_home = std::env::var_os("XDG_DATA_HOME");
     unsafe { std::env::set_var("XDG_DATA_HOME", &dir); }
@@ -741,6 +745,7 @@ fn patterns_define_fill_and_stamp() {
 
 #[test]
 fn round_seven_fixes_hold() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use compositor::effects::{BlendIf, Effects};
     use compositor::filters::{Kind, Settings};
     // A stroke lands on the layer it began on, even when another layer became active meanwhile.
@@ -852,4 +857,80 @@ fn export_sizes_reframes_fills_and_pads() {
     assert!(made[0].ends_with("T-Story-90x160.jpg") && made[0].exists());
     assert_eq!(failed.len(), 1, "the impossible size is reported, not fatal");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rotate_straighten_history_webp_layers_and_overlay_styles() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use compositor::effects::{Effects, GradientOverlay, PatternOverlay};
+    use compositor::gradient::Gradient;
+    // Rotate a 40 x 20 canvas a quarter turn: 20 x 40, and the red top left corner lands top right.
+    let mut d = Document::blank(40, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 40.0, 20.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 8.0, 8.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.rotate_canvas(90.0).unwrap();
+    assert_eq!((d.width(), d.height()), (20, 40));
+    assert_eq!(rgb_at(&mut d, 16, 4), [255, 0, 0, 255], "clockwise: the corner is top right");
+    assert_eq!(rgb_at(&mut d, 3, 36), [255, 255, 255, 255]);
+    assert_eq!(d.undo_name(), Some("Rotate Canvas"));
+    d.undo();
+    assert_eq!((d.width(), d.height()), (40, 20));
+    // History names and stepping.
+    let (past, future) = d.history_names();
+    assert_eq!(past.len(), 2, "two layers were added: {past:?}");
+    assert_eq!(future, vec!["Rotate Canvas".to_string()]);
+    d.step_history(1);
+    assert_eq!((d.width(), d.height()), (20, 40));
+    d.step_history(-1);
+    assert_eq!((d.width(), d.height()), (40, 20));
+    // Straighten: a line tilted 10 degrees comes level and the canvas is cropped upright.
+    let mut e = Document::blank(200, 100, 72.0).unwrap();
+    let id = e.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let rad = 10f64.to_radians();
+    e.straighten((20.0, 50.0), (20.0 + 100.0 * rad.cos(), 50.0 + 100.0 * rad.sin())).unwrap();
+    let t = e.renderer.layer(id).transform;
+    assert!((t.rotation + 10.0).abs() < 0.01, "the picture turned back by ten degrees: {}", t.rotation);
+    assert!(e.width() < 200 && e.height() < 100 && e.width() >= 140, "cropped upright inside the turned picture: {} x {}", e.width(), e.height());
+    assert_eq!(rgb_at(&mut e, 2, 2), [0, 0, 255, 255], "the corner is picture, not empty");
+    assert_eq!(d.undo_name().is_some(), true);
+    // WebP export decodes to the same pixels.
+    let dir = std::env::temp_dir().join(format!("compy-webp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let webp = dir.join("out.webp");
+    d.export_webp(&webp).unwrap();
+    let decoded = image::open(&webp).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (40, 20));
+    assert_eq!(decoded.get_pixel(2, 2).0, [255, 0, 0, 255]);
+    // Export Layers: two visible layers, trimmed to their bounds.
+    let files = d.export_layers(&dir.join("layers"), true).unwrap();
+    assert_eq!(files.len(), 2);
+    let small = image::open(&files[1]).unwrap();
+    assert_eq!((small.width(), small.height()), (8, 8));
+    assert!(files[1].file_name().unwrap().to_string_lossy().starts_with("02-"));
+    // A gradient overlay recolors the layer from red to blue, left to right.
+    let mut g = Document::blank(60, 20, 72.0).unwrap();
+    let bar = g.add_shape_layer(false, (0.0, 0.0, 60.0, 20.0), [0.5, 0.5, 0.5], 0.0).unwrap();
+    let mut fx = Effects::default();
+    fx.gradient_overlay = Some(GradientOverlay { enabled: true, gradient: Gradient::two([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), angle: 0.0, opacity: 1.0, radial: false, reverse: false });
+    g.set_effects(bar, Some(&fx)).unwrap();
+    let (l, r) = (rgb_at(&mut g, 2, 10), rgb_at(&mut g, 57, 10));
+    assert!(l[0] > 200 && l[2] < 60, "red at the left: {l:?}");
+    assert!(r[2] > 200 && r[0] < 60, "blue at the right: {r:?}");
+    let back = Effects::from_record(&fx.to_record()).unwrap();
+    assert_eq!(back.gradient_overlay, fx.gradient_overlay);
+    // A pattern overlay tiles a saved pattern over the layer.
+    let saved_home = std::env::var_os("XDG_DATA_HOME");
+    let pdir = std::env::temp_dir().join(format!("compy-pov-{}", std::process::id()));
+    unsafe { std::env::set_var("XDG_DATA_HOME", &pdir); }
+    let tile = compositor::raster::new_argb(2, 2).unwrap();
+    { let cr = cairo::Context::new(&tile).unwrap(); cr.set_source_rgb(0.0, 1.0, 0.0); cr.rectangle(0.0, 0.0, 1.0, 2.0); cr.fill().unwrap(); cr.set_source_rgb(0.0, 0.0, 0.0); cr.rectangle(1.0, 0.0, 1.0, 2.0); cr.fill().unwrap(); }
+    compositor::patterns::save("Stripes", &tile).unwrap();
+    fx.gradient_overlay = None;
+    fx.pattern_overlay = Some(PatternOverlay { enabled: true, pattern: "Stripes".into(), scale: 1.0, opacity: 1.0 });
+    g.set_effects(bar, Some(&fx)).unwrap();
+    assert_eq!(rgb_at(&mut g, 10, 10), [0, 255, 0, 255]);
+    assert_eq!(rgb_at(&mut g, 11, 10), [0, 0, 0, 255]);
+    let _ = std::fs::remove_dir_all(&pdir);
+    let _ = std::fs::remove_dir_all(&dir);
+    match saved_home { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
 }
