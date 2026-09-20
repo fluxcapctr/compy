@@ -63,6 +63,8 @@ pub struct Doc {
     pub heal_mode: i32,
     pub clone_aligned: bool,
     pub clone_all_layers: bool,
+    /// The Pattern Stamp: which saved pattern the Clone tool paints instead of sampled pixels.
+    pub clone_pattern: Option<String>,
     /// Where Clone Stamp copies from (Alt-click), and the offset the first aligned stroke fixed.
     pub clone_source: Option<(f64, f64)>,
     pub clone_offset: Option<(f64, f64)>,
@@ -161,7 +163,7 @@ struct App {
 impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
-            brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
+            brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_pattern: None, clone_source: None, clone_offset: None, last_brush_point: None,
             marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_shape: crate::gradient::Shape::Linear, gradient_preset: 0, gradient_custom: crate::gradient::Gradient::default(), gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
     }
 }
@@ -184,7 +186,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let document = Document::new(project)?;
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
-        brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
+        brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_pattern: None, clone_source: None, clone_offset: None, last_brush_point: None,
         marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_shape: crate::gradient::Shape::Linear, gradient_preset: 0, gradient_custom: crate::gradient::Gradient::default(), gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
@@ -425,7 +427,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 100] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 105] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -523,6 +525,11 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("canvas-size", &["<Control><Alt>c"], |s| { let state = s.clone(); let Some((w, h)) = s.current_size() else { return }; dialogs::canvas_size(s.window.upcast_ref(), (w, h), move |nw, nh, anchor, fill| state.edit(|d| d.canvas_size(nw, nh, anchor, fill, None, "Canvas Size"))); }),
         ("image-size", &["<Control><Alt>i"], |s| { let state = s.clone(); let Some((w, h)) = s.current_size() else { return }; let res = s.current_resolution(); dialogs::image_size(s.window.upcast_ref(), (w, h, res), move |nw, nh, r, sampling| { state.edit(|d| d.image_size(nw, nh, r, sampling)); state.with_current(|p| p.canvas.fit()); }); }),
         ("crop", &[], |s| s.edit(|d| d.crop_to_selection())),
+        ("define-pattern", &[], |s| { let state = s.clone(); dialogs::text(s.window.upcast_ref(), "Define Pattern", "Name", "Pattern", move |name| state.edit(|d| d.define_pattern(&name))); }),
+        ("fill-pattern", &[], |s| { let names = crate::patterns::list(); if names.is_empty() { s.alert("No patterns yet", "Select an area and use Edit > Define Pattern first."); return; } let state = s.clone(); dialogs::pattern_fill(s.window.upcast_ref(), &names, move |name, scale, opacity| state.edit(|d| d.fill_pattern(&name, scale, opacity))); }),
+        ("path-shape", &[], |s| s.with_current(|p| p.canvas.path_shape())),
+        ("shape-edit", &[], |s| s.with_current(|p| p.canvas.shape_edit())),
+        ("shape-apply", &[], |s| s.with_current(|p| p.canvas.shape_apply())),
         ("stroke-selection", &[], |s| { let state = s.clone(); dialogs::stroke(s.window.upcast_ref(), move |width, position, opacity| state.with_doc(|d| { let color = d.brush.color; d.document.stroke_selection(width, color, position, opacity) })); }),
         ("color-range", &[], |s| { let state = s.clone(); dialogs::color_range(s.window.upcast_ref(), move |fuzziness, all| state.with_doc(|d| { let (color, mode) = (d.brush.color, d.mode); d.document.select_color_range(color, fuzziness, all, mode) })); }),
         ("expand-selection", &[], |s| { let state = s.clone(); dialogs::amount(s.window.upcast_ref(), "Expand Selection", "Expand by (px)", move |n| state.edit(|d| d.resize_selection(n))); }),
@@ -681,6 +688,8 @@ fn menu() -> gio::Menu {
     edit.append(Some("Fill with Background"), Some("win.fill-background"));
     edit.append(Some("Clear"), Some("win.clear"));
     edit.append(Some("Stroke…"), Some("win.stroke-selection"));
+    edit.append(Some("Define Pattern…"), Some("win.define-pattern"));
+    edit.append(Some("Fill with Pattern…"), Some("win.fill-pattern"));
     edit.append(Some("Generative Fill…"), Some("win.generative-fill"));
     menu.append_submenu(Some("Edit"), &edit);
     let select = gio::Menu::new();
@@ -735,6 +744,9 @@ fn menu() -> gio::Menu {
     layer.append(Some("Send to Back"), Some("win.layer-bottom"));
     layer.append(Some("Hide / Show Layer"), Some("win.toggle-layer-visibility"));
     layer.append(Some("Edit Text…"), Some("win.edit-text"));
+    layer.append(Some("Shape from Path"), Some("win.path-shape"));
+    layer.append(Some("Edit Shape Points"), Some("win.shape-edit"));
+    layer.append(Some("Apply Path to Shape"), Some("win.shape-apply"));
     menu.append_submenu(Some("Layer"), &layer);
     let image = gio::Menu::new();
     image.append(Some("Canvas Size…"), Some("win.canvas-size"));
@@ -947,6 +959,10 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Select", "Select > Color Range", "Every pixel near the foreground color, with a fuzziness"),
     ("Edit", "Edit > Stroke", "Outline the selection in the foreground color, inside, centered or outside"),
     ("Layer", "Layer > Align, Distribute", "Selected layers to the selection or canvas edges and centers; three or more spaced evenly"),
+    ("Layer", "Layer > Shape from Path, Edit Shape Points, Apply Path to Shape", "A Pen path becomes a vector shape; its points can be picked up again and put back"),
+    ("Edit", "Edit > Define Pattern, Fill with Pattern", "Save the selection as a tile; fill with a saved tile (the Clone tool's Pattern option stamps one)"),
+    ("Type", "Drag with the Type tool, or the Width field", "Paragraph text that wraps at a width; 0 is a single line"),
+    ("Layer", "Layer Style > Blend If", "Show the layer only where its tones, and the tones beneath, fall between black and white points"),
     ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
     ("Select", "Shift, Alt while selecting", "Add to, subtract from the selection"),
     ("Image", "Ctrl+L, Ctrl+M, Ctrl+B", "Levels, Curves, Color Balance"),

@@ -99,6 +99,8 @@ enum PenDrag { Place(usize), Anchor(usize), HandleIn(usize), HandleOut(usize) }
 #[derive(Clone, Copy, PartialEq)]
 enum ToolDrag {
     Gradient { start: (f64, f64) },
+    /// Dragging with the Type tool right after a click made a type layer: its paragraph width follows.
+    TextBox { id: uuid::Uuid, anchor: (f64, f64) },
     Shape { anchor: (f64, f64) },
     /// Creating a frame, moving it, or dragging one of its handles; `original` is the frame at the press.
     Crop { start: (f64, f64), original: Option<(f64, f64, f64, f64)>, mode: DragMode },
@@ -1024,6 +1026,11 @@ impl Canvas {
                 d.gradient_line = Some((point, point));
                 ToolDrag::Gradient { start: point }
             }
+            Tool::Type => {
+                // The press already made (or picked) the type layer; a drag from here sets its box width.
+                let Some((id, _)) = *self.text_edit.borrow() else { return };
+                ToolDrag::TextBox { id, anchor: point }
+            }
             Tool::Shape => {
                 let anchor = (point.0.round(), point.1.round());
                 d.shape_draft = Some((anchor.0, anchor.1, 0.0, 0.0));
@@ -1077,6 +1084,20 @@ impl Canvas {
             ToolDrag::Shape { anchor } => {
                 d.shape_draft = Some(drag_box(anchor, point, shift, alt));
                 drop(d);
+            }
+            ToolDrag::TextBox { id, anchor } => {
+                let width = (point.0 - anchor.0).abs();
+                if width >= 24.0 {
+                    if let Some(mut style) = d.document.text_style(id) {
+                        style.width = Some(width.round());
+                        d.text_style.width = style.width;
+                        let result = d.document.set_text(id, &style);
+                        drop(d);
+                        if let Err(error) = result { self.notify(&format!("{error:#}")); }
+                        self.sync_inspector();
+                        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+                    } else { drop(d); }
+                } else { drop(d); }
             }
             ToolDrag::Crop { start, original, mode } => {
                 let ratio = Self::crop_ratio(&d);
@@ -1133,6 +1154,7 @@ impl Canvas {
                         _ => { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } Ok(()) }
                     }
                 }
+                ToolDrag::TextBox { .. } => Ok(()),
                 ToolDrag::Shape { .. } => {
                     let draft = d.shape_draft.take();
                     match draft {
@@ -1238,6 +1260,27 @@ impl Canvas {
         let result = { let mut d = self.doc.borrow_mut(); let (path, brush) = (d.pen.clone(), d.brush.clone()); d.document.stroke_path(&path, &brush) };
         if let Err(e) = result { self.notify(&format!("{e:#}")); }
         if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.area.queue_draw();
+    }
+
+    /// Layer > Shape from Path: the Pen path becomes a vector shape layer in the foreground color.
+    pub fn path_shape(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); let (path, color) = (d.pen.clone(), d.brush.color); d.document.add_path_shape_layer(&path, color) };
+        match result { Ok(_) => { let mut d = self.doc.borrow_mut(); d.pen = crate::path::Path::default(); d.pen_done = false; drop(d); if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); } self.notify("Shape made from the path. Edit Shape Points picks it up again."); } Err(e) => self.notify(&format!("{e:#}")) }
+        self.area.queue_draw();
+    }
+
+    /// Layer > Edit Shape Points: the active Path shape's points come back onto the Pen.
+    pub fn shape_edit(&self) {
+        let loaded = { let mut d = self.doc.borrow_mut(); let path = d.document.active.and_then(|id| d.document.shape_path(id)); match path { Some(p) => { d.pen = p; d.pen_done = true; d.tool = Tool::Pen; true } None => false } };
+        if loaded { self.set_tool(Tool::Pen); self.notify("Drag the points and handles, then Apply Path to Shape."); } else { self.notify("The active layer is not a shape made from a path."); }
+        self.area.queue_draw();
+    }
+
+    /// Layer > Apply Path to Shape: the Pen path replaces the active Path shape's outline.
+    pub fn shape_apply(&self) {
+        let result = { let mut d = self.doc.borrow_mut(); let path = d.pen.clone(); match d.document.active { Some(id) => d.document.set_shape_path(id, &path), None => Err(anyhow::anyhow!("Select the shape layer first.")) } };
+        match result { Ok(()) => { if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); } self.notify("Shape updated."); } Err(e) => self.notify(&format!("{e:#}")) }
         self.area.queue_draw();
     }
 
@@ -1421,6 +1464,7 @@ impl Canvas {
                     if d.document.mask_target() { drop(d); self.notify("Dodge, Burn and Sponge work on the layer's pixels; target the layer rather than its mask."); return }
                     match d.dodge_mode { 0 => StrokeKind::Dodge { burn: false, range: d.dodge_range as u8 }, 1 => StrokeKind::Dodge { burn: true, range: d.dodge_range as u8 }, 2 => StrokeKind::Sponge { desaturate: false }, _ => StrokeKind::Sponge { desaturate: true } }
                 }
+                Tool::Clone if d.clone_pattern.is_some() => StrokeKind::Pattern { name: d.clone_pattern.clone().unwrap_or_default() },
                 Tool::Clone => {
                     let Some(source) = d.clone_source else { drop(d); self.notify("Alt-click where Clone Stamp should copy from first."); return };
                     let offset = match (d.clone_aligned, d.clone_offset) { (true, Some(o)) => o, _ => ((source.0 - point.0).round(), (source.1 - point.1).round()) };

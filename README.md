@@ -256,6 +256,18 @@ Angle (a sweep around the start), Reflected (mirrored across the start) and Diam
 Opacity. Gradient Map adjustments take the same multi-stop gradient (click the bar in their dialog),
 saved with the layer. Compy: `gradient_fill` with start, end, shape and a list of stops.
 
+**Blend If, patterns, paragraph text and vector shapes.** Layer Style > Blend If shows the layer only
+where its own tones, and the tones beneath it, fall between black and white points (0 to 255), fading
+over a feather; the classic way to drop a texture into the highlights or knock a layer out of the
+shadows. Edit > Define Pattern saves the selection's part of the picture (or the whole active layer) as
+a tile in `~/.local/share/compositor/patterns/`; Edit > Fill with Pattern tiles one over the active
+layer inside the selection at a scale and opacity, and the Clone tool's Pattern option turns it into the
+Pattern Stamp. The Type tool makes paragraph text: drag out a box when you place it, or set Width in the
+options bar, and the lines wrap there (0 is a single line). The Pen's Make Shape turns a path into a
+vector shape layer in the foreground color; Layer > Edit Shape Points puts its points back on the Pen
+and Apply to Shape (or the Pen's button) writes them back, and the shape redraws crisp at any size.
+Compy: layer_style takes blend_if; define_pattern and fill_pattern; text_layer and set_text take width.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

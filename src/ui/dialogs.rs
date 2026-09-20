@@ -156,6 +156,20 @@ pub fn color_range(parent: &gtk::Window, done: impl Fn(f64, bool) + 'static) {
     window.present();
 }
 
+/// Edit > Fill with Pattern: which saved pattern, at what scale and opacity.
+pub fn pattern_fill(parent: &gtk::Window, names: &[String], done: impl Fn(String, f64, f64) + 'static) {
+    let (window, grid, ok) = dialog(parent, "Fill with Pattern");
+    grid.attach(&gtk::Label::builder().label("Pattern").xalign(0.0).build(), 0, 0, 1, 1);
+    let list = gtk::DropDown::from_strings(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    grid.attach(&list, 1, 0, 1, 1);
+    let scale = spin(&grid, 1, "Scale %", 5.0, 2000.0, 1.0, 100.0, 0);
+    let opacity = spin(&grid, 2, "Opacity %", 1.0, 100.0, 1.0, 100.0, 0);
+    let names: Vec<String> = names.to_vec();
+    let w = window.clone();
+    ok.connect_clicked(move |_| { if let Some(name) = names.get(list.selected() as usize) { done(name.clone(), scale.value() / 100.0, opacity.value() / 100.0); } w.close(); });
+    window.present();
+}
+
 /// A text field, for renaming.
 pub fn text(parent: &gtk::Window, title: &str, label: &str, initial: &str, done: impl Fn(String) + 'static) {
     let (window, grid, ok) = dialog(parent, title);

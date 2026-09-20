@@ -59,8 +59,37 @@ pub struct Overlay {
     #[serde(default = "one")] pub opacity: f64,
 }
 
+/// Blend If: the layer shows only where its own tones, and the tones underneath, fall between the
+/// black and white points (0 to 255), fading in over `feather` levels at each end.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlendIf {
+    #[serde(default = "t")] pub enabled: bool,
+    #[serde(rename = "thisBlack")] pub this_black: f64,
+    #[serde(rename = "thisWhite")] pub this_white: f64,
+    #[serde(rename = "underBlack")] pub under_black: f64,
+    #[serde(rename = "underWhite")] pub under_white: f64,
+    #[serde(default = "twenty")] pub feather: f64,
+}
+fn twenty() -> f64 { 20.0 }
+impl Default for BlendIf { fn default() -> Self { BlendIf { enabled: true, this_black: 0.0, this_white: 255.0, under_black: 0.0, under_white: 255.0, feather: 20.0 } } }
+impl BlendIf {
+    /// Whether the ranges do anything.
+    pub fn is_identity(&self) -> bool { self.this_black <= 0.0 && self.this_white >= 255.0 && self.under_black <= 0.0 && self.under_white >= 255.0 }
+    /// How much a tone (0 to 255) within `black..white` shows, 0 to 1, with the feather on both ends.
+    fn weight(value: f64, black: f64, white: f64, feather: f64) -> f64 {
+        let f = feather.max(0.0).min(127.0);
+        let lo = if black <= 0.0 { 1.0 } else if f <= 0.0 { if value >= black { 1.0 } else { 0.0 } } else { ((value - black + f / 2.0) / f).clamp(0.0, 1.0) };
+        let hi = if white >= 255.0 { 1.0 } else if f <= 0.0 { if value <= white { 1.0 } else { 0.0 } } else { ((white + f / 2.0 - value) / f).clamp(0.0, 1.0) };
+        lo * hi
+    }
+    pub fn this_weight(&self, luma: f64) -> f64 { Self::weight(luma, self.this_black, self.this_white, self.feather) }
+    pub fn under_weight(&self, luma: f64) -> f64 { Self::weight(luma, self.under_black, self.under_white, self.feather) }
+    pub fn uses_underlying(&self) -> bool { self.under_black > 0.0 || self.under_white < 255.0 }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Effects {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "blendIf")] pub blend_if: Option<BlendIf>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "dropShadow")] pub drop_shadow: Option<Shadow>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "innerShadow")] pub inner_shadow: Option<Shadow>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "outerGlow")] pub outer_glow: Option<Glow>,
@@ -104,8 +133,11 @@ impl Effects {
     pub fn from_record(value: &serde_json::Value) -> Option<Effects> { serde_json::from_value(value.clone()).ok() }
 
     /// Whether anything draws.
+    /// The Blend If ranges in force, if any.
+    pub fn blend_if(&self) -> Option<&BlendIf> { self.blend_if.as_ref().filter(|b| b.enabled && !b.is_identity()) }
+
     pub fn is_active(&self) -> bool {
-        self.drop_shadow.as_ref().is_some_and(|e| e.enabled) || self.inner_shadow.as_ref().is_some_and(|e| e.enabled)
+        self.blend_if().is_some() || self.drop_shadow.as_ref().is_some_and(|e| e.enabled) || self.inner_shadow.as_ref().is_some_and(|e| e.enabled)
             || self.outer_glow.as_ref().is_some_and(|e| e.enabled) || self.inner_glow.as_ref().is_some_and(|e| e.enabled)
             || self.bevel.as_ref().is_some_and(|e| e.enabled) || self.stroke.as_ref().is_some_and(|e| e.enabled)
             || self.color_overlay.as_ref().is_some_and(|e| e.enabled)

@@ -56,12 +56,19 @@ pub struct Sample {
     pub pixels: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    /// A pattern: the sample repeats in every direction instead of ending at its edges.
+    pub tiled: bool,
 }
 
 impl Sample {
     pub fn pixel(&self, x: f64, y: f64) -> [u8; 4] {
-        if x < 0.0 || y < 0.0 || x >= self.width as f64 || y >= self.height as f64 { return [0; 4]; }
-        let i = (y as usize * self.width + x as usize) * 4;
+        let (xi, yi) = if self.tiled {
+            ((x.floor() as i64).rem_euclid(self.width.max(1) as i64) as usize, (y.floor() as i64).rem_euclid(self.height.max(1) as i64) as usize)
+        } else {
+            if x < 0.0 || y < 0.0 || x >= self.width as f64 || y >= self.height as f64 { return [0; 4]; }
+            (x as usize, y as usize)
+        };
+        let i = (yi * self.width + xi) * 4;
         [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2], self.pixels[i + 3]]
     }
 }

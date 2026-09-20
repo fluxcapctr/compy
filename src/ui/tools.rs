@@ -139,6 +139,7 @@ pub struct TypePage {
     align: gtk::DropDown,
     leading: gtk::SpinButton,
     tracking: gtk::SpinButton,
+    width: gtk::SpinButton,
     google: gtk::Entry,
     status: gtk::Label,
 }
@@ -179,13 +180,18 @@ impl TypePage {
         let tracking = gtk::SpinButton::with_range(-100.0, 500.0, 1.0);
         tracking.set_tooltip_text(Some("Letter spacing in pixels"));
         page.append(&tracking);
+        page.append(&gtk::Label::new(Some("Width")));
+        let width = gtk::SpinButton::with_range(0.0, 30_000.0, 10.0);
+        width.set_value(doc.borrow().text_style.width.unwrap_or(0.0));
+        width.set_tooltip_text(Some("Paragraph width in pixels: the lines wrap at it; 0 is point text that never wraps. Dragging with the Type tool sets it too"));
+        page.append(&width);
         let google = gtk::Entry::builder().placeholder_text("Google font, e.g. Lobster").width_chars(18).tooltip_text("A family name from fonts.google.com; Get downloads it into your fonts").build();
         page.append(&google);
         let get = gtk::Button::builder().label("Get").tooltip_text("Download the family from Google Fonts").build();
         page.append(&get);
         let status = gtk::Label::builder().css_classes(["dim-label"]).build();
         page.append(&status);
-        let this = TypePage { families, family, size, bold, italic, align, leading, tracking, google, status };
+        let this = TypePage { families, family, size, bold, italic, align, leading, tracking, width, google, status };
         this.connect(doc);
         { let google = this.google.clone(); get.connect_clicked(move |_| google.emit_activate()); }
         (page, this)
@@ -212,6 +218,7 @@ impl TypePage {
         { let doc = doc.clone(); self.align.connect_selected_notify(move |a| { let v = a.selected(); apply(&doc, &|st| st.align = v); }); }
         { let doc = doc.clone(); self.leading.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.leading = v); }); }
         { let doc = doc.clone(); self.tracking.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.tracking = v); }); }
+        { let doc = doc.clone(); self.width.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.width = if v >= 1.0 { Some(v) } else { None }); }); }
         {
             let (families, family, status) = (self.families.clone(), self.family.clone(), self.status.clone());
             let doc = doc.clone();
@@ -254,6 +261,7 @@ impl TypePage {
         self.align.set_selected(style.align.min(2));
         self.leading.set_value(style.leading);
         self.tracking.set_value(style.tracking);
+        self.width.set_value(style.width.unwrap_or(0.0));
         doc.borrow_mut().syncing_inspector = false;
     }
 }
@@ -443,6 +451,13 @@ impl OptionsBar {
         let clone_source = gtk::DropDown::from_strings(&["This Layer", "All Layers"]);
         { let doc = doc.clone(); clone_source.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.clone_all_layers = s.selected() == 1; } }); }
         clone.append(&clone_source);
+        clone.append(&gtk::Label::new(Some("Pattern")));
+        let mut pattern_names = vec!["None (sampled pixels)".to_string()];
+        pattern_names.extend(crate::patterns::list());
+        let pattern = gtk::DropDown::from_strings(&pattern_names.iter().map(String::as_str).collect::<Vec<_>>());
+        pattern.set_tooltip_text(Some("The Pattern Stamp: paint a saved pattern instead of sampled pixels (Edit > Define Pattern makes one)"));
+        { let doc = doc.clone(); pattern.connect_selected_notify(move |p| { if let Ok(mut d) = doc.try_borrow_mut() { d.clone_pattern = if p.selected() == 0 { None } else { pattern_names.get(p.selected() as usize).cloned() }; } }); }
+        clone.append(&pattern);
         clone.append(&gtk::Label::builder().label("Alt-click to set the source").css_classes(["dim-label"]).build());
         extra.add_named(&clone, Some("clone"));
         brushes.append(&extra);
@@ -497,6 +512,8 @@ impl OptionsBar {
         pen.append(&gtk::Button::builder().label("Make Selection").action_name("win.path-select").tooltip_text("Marching ants from the path (Ctrl+Return); an open path closes itself").build());
         pen.append(&gtk::Button::builder().label("Fill Path").action_name("win.path-fill").tooltip_text("Fill the path on the active layer with the foreground color").build());
         pen.append(&gtk::Button::builder().label("Stroke with Brush").action_name("win.path-stroke").tooltip_text("Paint along the path with the current brush and foreground color").build());
+        pen.append(&gtk::Button::builder().label("Make Shape").action_name("win.path-shape").tooltip_text("A vector shape layer from the path, in the foreground color; Layer > Edit Shape Points picks it up again").build());
+        pen.append(&gtk::Button::builder().label("Apply to Shape").action_name("win.shape-apply").tooltip_text("Put the edited points back onto the active shape layer").build());
         pen.append(&gtk::Button::builder().label("Clear").action_name("win.path-clear").tooltip_text("Drop the path (Escape)").build());
         pen.append(&gtk::Label::builder().label("Click for corners, drag for curves, click the first point to close").css_classes(["dim-label"]).build());
         stack.add_named(&pen, Some("pen"));

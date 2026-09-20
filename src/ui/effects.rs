@@ -37,7 +37,7 @@ pub fn open(parent: &gtk::Window, doc: DocRef, id: Uuid, finished: Rc<dyn Fn()>)
     body.append(&pages);
     content.append(&body);
 
-    let names = [("dropShadow", "Drop Shadow"), ("innerShadow", "Inner Shadow"), ("outerGlow", "Outer Glow"), ("innerGlow", "Inner Glow"), ("bevel", "Bevel & Emboss"), ("stroke", "Stroke"), ("colorOverlay", "Color Overlay")];
+    let names = [("dropShadow", "Drop Shadow"), ("innerShadow", "Inner Shadow"), ("outerGlow", "Outer Glow"), ("innerGlow", "Inner Glow"), ("bevel", "Bevel & Emboss"), ("stroke", "Stroke"), ("colorOverlay", "Color Overlay"), ("blendIf", "Blend If")];
     let mut checks = Vec::new();
     for (key, label) in names {
         let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
@@ -94,6 +94,7 @@ fn enabled(e: &Effects, key: &str) -> bool {
         "innerGlow" => e.inner_glow.as_ref().is_some_and(|x| x.enabled),
         "bevel" => e.bevel.as_ref().is_some_and(|x| x.enabled),
         "stroke" => e.stroke.as_ref().is_some_and(|x| x.enabled),
+        "blendIf" => e.blend_if.as_ref().is_some_and(|x| x.enabled),
         _ => e.color_overlay.as_ref().is_some_and(|x| x.enabled),
     }
 }
@@ -107,12 +108,13 @@ fn set_enabled(e: &mut Effects, key: &str, on: bool) {
         "innerGlow" => e.inner_glow.get_or_insert_with(Glow::inner_default).enabled = on,
         "bevel" => e.bevel.get_or_insert_with(Bevel::default).enabled = on,
         "stroke" => e.stroke.get_or_insert_with(Stroke::default).enabled = on,
+        "blendIf" => e.blend_if.get_or_insert_with(crate::effects::BlendIf::default).enabled = on,
         _ => e.color_overlay.get_or_insert_with(Overlay::default).enabled = on,
     }
 }
 
 fn original_page(e: &Effects) -> Option<&'static str> {
-    ["dropShadow", "innerShadow", "outerGlow", "innerGlow", "bevel", "stroke", "colorOverlay"].into_iter().find(|k| enabled(e, k))
+    ["dropShadow", "innerShadow", "outerGlow", "innerGlow", "bevel", "stroke", "colorOverlay", "blendIf"].into_iter().find(|k| enabled(e, k))
 }
 
 struct Grid { grid: gtk::Grid, row: i32 }
@@ -189,6 +191,17 @@ fn page(key: &'static str, state: &Rc<RefCell<Effects>>, apply: &Apply, check: &
                 g.spin("Opacity %", (0.0, 100.0, 1.0), 0, current.opacity * 100.0, edit!(outer_glow, Glow::outer_default, |e, v| e.opacity = v / 100.0));
                 g.spin("Size px", (0.0, 250.0, 1.0), 0, current.size, edit!(outer_glow, Glow::outer_default, |e, v| e.size = v));
             }
+        }
+        "blendIf" => {
+            use crate::effects::BlendIf;
+            let current = state.borrow_mut().blend_if.get_or_insert_with(off!(BlendIf::default())).clone();
+            g.spin("This Layer: black", (0.0, 255.0, 1.0), 0, current.this_black, edit!(blend_if, BlendIf::default, |e, v| e.this_black = v));
+            g.spin("This Layer: white", (0.0, 255.0, 1.0), 0, current.this_white, edit!(blend_if, BlendIf::default, |e, v| e.this_white = v));
+            g.spin("Underlying: black", (0.0, 255.0, 1.0), 0, current.under_black, edit!(blend_if, BlendIf::default, |e, v| e.under_black = v));
+            g.spin("Underlying: white", (0.0, 255.0, 1.0), 0, current.under_white, edit!(blend_if, BlendIf::default, |e, v| e.under_white = v));
+            g.spin("Feather (levels)", (0.0, 127.0, 1.0), 0, current.feather, edit!(blend_if, BlendIf::default, |e, v| e.feather = v));
+            g.grid.attach(&gtk::Label::builder().label("The layer shows only where its tones, and the tones beneath it, sit between black and white.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build(), 0, g.row, 2, 1);
+            g.row += 1;
         }
         "bevel" => {
             let current = state.borrow_mut().bevel.get_or_insert_with(off!(Bevel::default())).clone();

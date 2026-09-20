@@ -23,10 +23,13 @@ pub struct TextStyle {
     pub leading: f64,
     /// Letter spacing in pixels.
     pub tracking: f64,
+    /// Paragraph text: the box width the lines wrap at, in document pixels; None is point text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
 impl Default for TextStyle {
-    fn default() -> Self { TextStyle { text: "Type here".into(), family: "Sans".into(), size: 48.0, bold: false, italic: false, color: [0.0; 3], align: 0, leading: 1.2, tracking: 0.0 } }
+    fn default() -> Self { TextStyle { text: "Type here".into(), family: "Sans".into(), size: 48.0, bold: false, italic: false, color: [0.0; 3], align: 0, leading: 1.2, tracking: 0.0, width: None } }
 }
 
 impl TextStyle {
@@ -62,6 +65,10 @@ fn layout_for(style: &TextStyle) -> pango::Layout {
     attrs.insert(pango::AttrInt::new_letter_spacing((style.tracking * pango::SCALE as f64) as i32));
     layout.set_attributes(Some(&attrs));
     layout.set_line_spacing(style.leading as f32);
+    if let Some(w) = style.width.filter(|w| *w >= 1.0) {
+        layout.set_width((w * pango::SCALE as f64) as i32);
+        layout.set_wrap(pango::WrapMode::WordChar);
+    }
     layout
 }
 

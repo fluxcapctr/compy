@@ -1016,8 +1016,11 @@ impl Document {
         let (w, h) = (layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32);
         if self.renderer.image_size(id) == Some((w, h)) || w as i64 * h as i64 > 100_000_000 { return Ok(()); }
         let n = |k: &str| style.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        let ellipse = style.get("kind").and_then(serde_json::Value::as_str) == Some("Ellipse");
-        let image = shape_image(ellipse, w, h, [n("red"), n("green"), n("blue")], n("cornerRadius"))?;
+        let kind = style.get("kind").and_then(serde_json::Value::as_str).unwrap_or("Rectangle");
+        let image = if kind == "Path" {
+            let Some(local) = anchors_from_json(&style) else { return Ok(()) };
+            path_shape_image(&local, (n("baseWidth").max(1.0), n("baseHeight").max(1.0)), w, h, [n("red"), n("green"), n("blue")])?
+        } else { shape_image(kind == "Ellipse", w, h, [n("red"), n("green"), n("blue")], n("cornerRadius"))? };
         // A mask on the layer's grid stays where it is while that grid changes size.
         if self.renderer.mask(id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(id, Some(layer.transform)); }
         self.renderer.set_shape_image(id, image, style);
@@ -1439,6 +1442,8 @@ pub enum StrokeKind {
     Blur,
     Dodge { burn: bool, range: u8 },
     Sponge { desaturate: bool },
+    /// The Pattern Stamp: a saved pattern tiled from the document's origin, painted through the tip.
+    Pattern { name: String },
 }
 
 impl Document {
@@ -1488,7 +1493,7 @@ impl Document {
         if warp.points.is_empty() { return Ok(()); }
         let (w, h) = (warp.surface.width() as usize, warp.surface.height() as usize);
         let pixels = with_bytes(&warp.surface, |data, stride| { let mut out = vec![0u8; w * h * 4]; for y in 0..h { out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&data[y * stride..y * stride + w * 4]); } out })?;
-        let sample = std::rc::Rc::new(crate::brush::Sample { pixels, width: w, height: h });
+        let sample = std::rc::Rc::new(crate::brush::Sample { pixels, width: w, height: h, tiled: false });
         // A hard tip a little wider than the brush covers everything the stroke moved.
         let settings = crate::brush::BrushSettings { diameter: (warp.diameter + 4.0).min(2000.0), hardness: 1.0, color: [0.0; 3], opacity: 1.0, ..Default::default() };
         let layer = self.renderer.layer(id).clone();
@@ -1520,7 +1525,7 @@ impl Document {
         with_bytes(&surface, |data, stride| {
             for y in 0..hu { pixels[y * wu * 4..(y + 1) * wu * 4].copy_from_slice(&data[y * stride..y * stride + wu * 4]); }
         })?;
-        Ok(crate::brush::Sample { pixels, width: wu, height: hu })
+        Ok(crate::brush::Sample { pixels, width: wu, height: hu, tiled: false })
     }
 
     /// A whole stroke laid down at once from known points (no provisional tails), as warps and scripts
@@ -1552,6 +1557,12 @@ impl Document {
             }
             StrokeKind::Dodge { burn, range } => crate::brush::Kind::Dodge { burn, range },
             StrokeKind::Sponge { desaturate } => crate::brush::Kind::Sponge { desaturate },
+            StrokeKind::Pattern { name } => {
+                let surface = crate::patterns::load(&name)?;
+                let (w, h) = (surface.width() as usize, surface.height() as usize);
+                let pixels = with_bytes(&surface, |data, stride| { let mut out = vec![0u8; w * h * 4]; for y in 0..h { out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&data[y * stride..y * stride + w * 4]); } out })?;
+                crate::brush::Kind::Clone { sample: std::rc::Rc::new(crate::brush::Sample { pixels, width: w, height: h, tiled: true }), offset: (0.0, 0.0), replaces: false }
+            }
         };
         let size = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
         let canvas = (self.width() as f64, self.height() as f64);
@@ -3035,6 +3046,163 @@ impl Document {
         Ok(())
     }
 
+    /// Edit > Define Pattern: the selection's part of the composite (or the whole active layer without
+    /// one) saved under `name` for Fill with Pattern and the Pattern Stamp.
+    pub fn define_pattern(&mut self, name: &str) -> Result<()> {
+        let (w, h) = (self.width(), self.height());
+        let (x0, y0, x1, y1) = match self.selection.as_ref().and_then(|s| s.bounds) {
+            Some(b) => (b.0 as i32, b.1 as i32, b.2 as i32, b.3 as i32),
+            None => {
+                let Some(id) = self.active else { bail!("Make a selection, or select a layer to use whole.") };
+                let (bx0, by0, bx1, by1) = self.renderer.layer(id).transform.bounds();
+                (bx0.floor().max(0.0) as i32, by0.floor().max(0.0) as i32, bx1.ceil().min(w as f64) as i32, by1.ceil().min(h as f64) as i32)
+            }
+        };
+        let (pw, ph) = (x1 - x0, y1 - y0);
+        if pw < 1 || ph < 1 { bail!("The pattern would be empty."); }
+        if pw > 4096 || ph > 4096 { bail!("A pattern can be up to 4096 pixels on a side; select a smaller area."); }
+        let tile = new_argb(pw, ph)?;
+        {
+            let cr = Context::new(&tile)?;
+            cr.translate(-x0 as f64, -y0 as f64);
+            cr.rectangle(x0 as f64, y0 as f64, pw as f64, ph as f64);
+            cr.clip();
+            self.renderer.draw(&cr)?;
+        }
+        crate::patterns::save(name, &tile)?;
+        Ok(())
+    }
+
+    /// Edit > Fill with Pattern: `name` tiled from the document's origin at `scale` (1 is its own size)
+    /// over the active layer inside the selection, at `opacity`; gray on a mask.
+    pub fn fill_pattern(&mut self, name: &str, scale: f64, opacity: f64) -> Result<()> {
+        let tile = crate::patterns::load(name)?;
+        let scale = if scale.is_finite() { scale.clamp(0.05, 20.0) } else { 1.0 };
+        let Some(id) = self.active else { bail!("Select a layer first.") };
+        if self.selection.as_ref().is_some_and(|s| s.is_empty()) { bail!("Nothing is selected."); }
+        let mask_target = self.active_mask().is_some();
+        let (w, h, grid, base): (i32, i32, Transform, ImageSurface) = if let Some((_, mask, grid)) = self.active_mask() {
+            let (w, h) = if mask.width() == 1 && mask.height() == 1 { self.renderer.image_size(id).unwrap_or((grid.size.0.round().max(1.0) as i32, grid.size.1.round().max(1.0) as i32)) } else { (mask.width(), mask.height()) };
+            let target = if (w, h) == (mask.width(), mask.height()) { mask } else { let v = with_bytes(&mask, |d, _| d[0])?; crate::raster::a8_filled(w, h, v)? };
+            (w, h, grid, gray_from_a8(&target)?)
+        } else {
+            let layer = self.renderer.layer(id).clone();
+            if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
+            let (w, h) = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
+            let base = new_argb(w, h)?;
+            if let Some(image) = self.renderer.image(id) { let cr = Context::new(&base)?; cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
+            (w, h, layer.transform, base)
+        };
+        let source = if mask_target { let (tw, th) = (tile.width(), tile.height()); let g = new_argb(tw, th)?; { let cr = Context::new(&g)?; cr.set_source_surface(&tile, 0.0, 0.0)?; cr.paint()?; } let (packed, pw, ph) = { let mut p = vec![0u8; tw as usize * th as usize * 4]; with_bytes(&g, |d, stride| { for y in 0..th as usize { p[y * tw as usize * 4..(y + 1) * tw as usize * 4].copy_from_slice(&d[y * stride..y * stride + tw as usize * 4]); } })?; (p, tw, th) }; let mut p = packed; crate::filters::map_straight(&mut p, |rgb| { let v = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]; [v, v, v] }); crate::raster::argb_from_packed(pw, ph, p)? } else { tile };
+        let result = new_argb(w, h)?;
+        {
+            let cr = Context::new(&result)?;
+            cr.set_source_surface(&base, 0.0, 0.0)?;
+            cr.paint()?;
+            cr.transform(crate::selection::document_to_layer(&grid, w, h)?);
+            let pattern = cairo::SurfacePattern::create(&source);
+            pattern.set_extend(cairo::Extend::Repeat);
+            pattern.set_filter(cairo::Filter::Good);
+            let mut m = cairo::Matrix::identity();
+            m.scale(1.0 / scale, 1.0 / scale);
+            pattern.set_matrix(m);
+            match &self.selection {
+                Some(sel) => {
+                    cr.identity_matrix();
+                    let coverage = sel.coverage_on_layer(&grid, w, h)?;
+                    cr.push_group();
+                    cr.transform(crate::selection::document_to_layer(&grid, w, h)?);
+                    cr.set_source(&pattern)?;
+                    cr.paint_with_alpha(opacity.clamp(0.0, 1.0))?;
+                    cr.pop_group_to_source()?;
+                    cr.mask_surface(&coverage, 0.0, 0.0)?;
+                }
+                None => { cr.set_source(&pattern)?; cr.paint_with_alpha(opacity.clamp(0.0, 1.0))?; }
+            }
+        }
+        if mask_target {
+            let a8 = a8_from_gray(&result)?;
+            self.begin_edit("Fill Mask with Pattern");
+            self.renderer.set_mask(id, Some(a8));
+            self.end_edit();
+        } else {
+            self.begin_edit("Fill with Pattern");
+            self.renderer.set_image(id, result);
+            self.end_edit();
+        }
+        Ok(())
+    }
+
+    /// A shape layer from a Pen path, in `color`: the path's own bounds become the layer, and the anchors
+    /// are kept in the record so the shape redraws at any size and can be edited again.
+    pub fn add_path_shape_layer(&mut self, path: &crate::path::Path, color: [f64; 3]) -> Result<Uuid> {
+        if path.anchors.len() < 2 { bail!("Draw a path with at least two points first."); }
+        let (x0, y0, x1, y1) = path_bounds(path);
+        let (ox, oy) = (x0.floor(), y0.floor());
+        let (w, h) = ((x1 - ox).ceil().max(1.0), (y1 - oy).ceil().max(1.0));
+        if w * h > 100_000_000.0 || w > 30_000.0 || h > 30_000.0 { bail!("That shape is too large."); }
+        let local = shift_path(path, -ox, -oy);
+        let style = serde_json::json!({"kind": "Path", "red": color[0], "green": color[1], "blue": color[2], "cornerRadius": 0.0, "closed": local.closed, "baseWidth": w, "baseHeight": h, "anchors": anchors_json(&local)});
+        let image = path_shape_image(&local, (w, h), w as i32, h as i32, color)?;
+        let (index, parent) = self.insertion();
+        let mut record = self.blank_record(self.unique_name("Shape"), parent);
+        record.transform.origin = crate::format::Point(ox, oy);
+        record.transform.size = crate::format::Size(w, h);
+        record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
+        record.shape = Some(style);
+        let id = record.id;
+        self.begin_edit("Shape from Path");
+        self.renderer.insert_layer(index, record, Some(image), None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// The path a Path shape layer was drawn from, in document pixels at the layer's current size
+    /// (its rotation is not applied), or None for any other layer.
+    pub fn shape_path(&self, id: Uuid) -> Option<crate::path::Path> {
+        self.renderer.layer_index(id)?;
+        let layer = self.renderer.layer(id);
+        let style = layer.shape.as_ref()?;
+        if style.get("kind").and_then(serde_json::Value::as_str) != Some("Path") { return None; }
+        let local = anchors_from_json(style)?;
+        let n = |k: &str| style.get(k).and_then(serde_json::Value::as_f64).unwrap_or(1.0).max(1.0);
+        let (sx, sy) = (layer.transform.size.0 / n("baseWidth"), layer.transform.size.1 / n("baseHeight"));
+        let (ox, oy) = (layer.transform.origin.0, layer.transform.origin.1);
+        let map = |p: (f64, f64)| (ox + p.0 * sx, oy + p.1 * sy);
+        Some(crate::path::Path { anchors: local.anchors.iter().map(|a| crate::path::Anchor { point: map(a.point), handle_in: a.handle_in.map(map), handle_out: a.handle_out.map(map) }).collect(), closed: local.closed })
+    }
+
+    /// Replaces a Path shape layer's path (Apply to Shape): the layer moves and resizes to the new bounds.
+    pub fn set_shape_path(&mut self, id: Uuid, path: &crate::path::Path) -> Result<()> {
+        if self.shape_path(id).is_none() { bail!("The active layer is not a shape made from a path."); }
+        if path.anchors.len() < 2 { bail!("The path needs at least two points."); }
+        let layer = self.renderer.layer(id).clone();
+        let style = layer.shape.clone().unwrap_or_default();
+        let n = |k: &str| style.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let color = [n("red"), n("green"), n("blue")];
+        let (x0, y0, x1, y1) = path_bounds(path);
+        let (ox, oy) = (x0.floor(), y0.floor());
+        let (w, h) = ((x1 - ox).ceil().max(1.0), (y1 - oy).ceil().max(1.0));
+        if w * h > 100_000_000.0 || w > 30_000.0 || h > 30_000.0 { bail!("That shape is too large."); }
+        let local = shift_path(path, -ox, -oy);
+        let mut new_style = style.clone();
+        new_style["closed"] = serde_json::json!(local.closed);
+        new_style["baseWidth"] = serde_json::json!(w);
+        new_style["baseHeight"] = serde_json::json!(h);
+        new_style["anchors"] = anchors_json(&local);
+        let image = path_shape_image(&local, (w, h), w as i32, h as i32, color)?;
+        let mut transform = layer.transform;
+        transform.origin = crate::format::Point(ox, oy);
+        transform.size = crate::format::Size(w, h);
+        self.begin_edit("Edit Shape");
+        if self.renderer.mask(id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(id, Some(layer.transform)); }
+        self.renderer.set_layer_transform(id, transform);
+        self.renderer.set_shape_image(id, image, new_style);
+        self.end_edit();
+        Ok(())
+    }
+
     pub fn resize_selection(&mut self, amount: i32) -> Result<()> {
         let Some(current) = &self.selection else { return Ok(()) };
         if current.is_empty() || amount == 0 || amount.abs() > 500 { return Ok(()); }
@@ -3106,4 +3274,40 @@ fn text_layer_name(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("Type").trim();
     let name: String = line.chars().take(40).collect();
     if name.is_empty() { "Type".into() } else { name }
+}
+
+
+/// The box around a path's anchors and handles.
+fn path_bounds(path: &crate::path::Path) -> (f64, f64, f64, f64) {
+    let mut b = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for a in &path.anchors { for p in [Some(a.point), a.handle_in, a.handle_out].into_iter().flatten() { b.0 = b.0.min(p.0); b.1 = b.1.min(p.1); b.2 = b.2.max(p.0); b.3 = b.3.max(p.1); } }
+    if !b.0.is_finite() { (0.0, 0.0, 1.0, 1.0) } else { b }
+}
+
+fn shift_path(path: &crate::path::Path, dx: f64, dy: f64) -> crate::path::Path {
+    let m = |p: (f64, f64)| (p.0 + dx, p.1 + dy);
+    crate::path::Path { anchors: path.anchors.iter().map(|a| crate::path::Anchor { point: m(a.point), handle_in: a.handle_in.map(m), handle_out: a.handle_out.map(m) }).collect(), closed: path.closed }
+}
+
+fn anchors_json(path: &crate::path::Path) -> serde_json::Value {
+    serde_json::Value::Array(path.anchors.iter().map(|a| serde_json::json!({"x": a.point.0, "y": a.point.1, "ix": a.handle_in.map(|h| h.0), "iy": a.handle_in.map(|h| h.1), "ox": a.handle_out.map(|h| h.0), "oy": a.handle_out.map(|h| h.1)})).collect())
+}
+
+fn anchors_from_json(style: &serde_json::Value) -> Option<crate::path::Path> {
+    let list = style.get("anchors")?.as_array()?;
+    let f = |v: &serde_json::Value, k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+    let anchors = list.iter().filter_map(|a| Some(crate::path::Anchor { point: (f(a, "x")?, f(a, "y")?), handle_in: f(a, "ix").zip(f(a, "iy")), handle_out: f(a, "ox").zip(f(a, "oy")) })).collect();
+    Some(crate::path::Path { anchors, closed: style.get("closed").and_then(serde_json::Value::as_bool).unwrap_or(true) })
+}
+
+/// A Path shape's pixels at `w` x `h`: the local path (drawn at `base` size) scaled to fit, filled.
+fn path_shape_image(local: &crate::path::Path, base: (f64, f64), w: i32, h: i32, color: [f64; 3]) -> Result<ImageSurface> {
+    let out = new_argb(w, h)?;
+    let cr = Context::new(&out)?;
+    cr.set_source_rgb(color[0], color[1], color[2]);
+    let (sx, sy) = (w as f64 / base.0.max(1.0), h as f64 / base.1.max(1.0));
+    let closed = crate::path::Path { anchors: local.anchors.clone(), closed: true };
+    closed.trace(&cr, |p| (p.0 * sx, p.1 * sy));
+    cr.fill()?;
+    Ok(out)
 }

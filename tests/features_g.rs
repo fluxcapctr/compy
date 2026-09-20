@@ -621,3 +621,118 @@ fn gradient_fill_shapes_and_multi_stop_gradient_map() {
     let back = Adjustment::from_record(&Adjustment::GradientMap(map.clone()).to_record()).unwrap();
     assert_eq!(back, Adjustment::GradientMap(map));
 }
+
+#[test]
+fn blend_if_hides_tones_of_this_layer_and_of_what_is_beneath() {
+    use compositor::effects::{BlendIf, Effects};
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    // Beneath: dark on the left, light on the right. On top: a mid-gray layer over everything.
+    d.add_shape_layer(false, (0.0, 0.0, 20.0, 40.0), [0.1, 0.1, 0.1], 0.0).unwrap();
+    d.add_shape_layer(false, (20.0, 0.0, 20.0, 40.0), [0.9, 0.9, 0.9], 0.0).unwrap();
+    let top = d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    assert_eq!(rgb_at(&mut d, 5, 20), [255, 0, 0, 255]);
+    // Underlying black point at 128 with no feather: the red shows only over the light half.
+    let mut e = Effects::default();
+    e.blend_if = Some(BlendIf { under_black: 128.0, feather: 0.0, ..BlendIf::default() });
+    d.set_effects(top, Some(&e)).unwrap();
+    let (left, right) = (rgb_at(&mut d, 5, 20), rgb_at(&mut d, 35, 20));
+    assert!(left[0] < 40 && left[1] < 40, "hidden over the dark half: {left:?}");
+    assert_eq!(right, [255, 0, 0, 255], "shown over the light half");
+    // This Layer's white point below the red's own luminosity (76) hides it everywhere.
+    e.blend_if = Some(BlendIf { this_white: 50.0, feather: 0.0, ..BlendIf::default() });
+    d.set_effects(top, Some(&e)).unwrap();
+    assert!(rgb_at(&mut d, 35, 20)[0] > 200 && rgb_at(&mut d, 35, 20)[1] > 200, "the red is gone, the light gray shows");
+    // A feathered edge gives a partial mix.
+    e.blend_if = Some(BlendIf { this_white: 76.0, feather: 40.0, ..BlendIf::default() });
+    d.set_effects(top, Some(&e)).unwrap();
+    let p = rgb_at(&mut d, 35, 20);
+    assert!(p[0] > 200 && p[1] > 60 && p[1] < 200, "part red, part gray: {p:?}");
+    let back = Effects::from_record(&e.to_record()).unwrap();
+    assert_eq!(back.blend_if, e.blend_if);
+}
+
+#[test]
+fn paragraph_text_wraps_at_its_width_and_shapes_come_from_paths() {
+    use compositor::path::{Anchor, Path};
+    use compositor::text::TextStyle;
+    let mut d = Document::blank(400, 400, 72.0).unwrap();
+    let style = TextStyle { text: "one two three four five six seven eight nine ten".into(), size: 20.0, ..TextStyle::default() };
+    let single = d.add_text_layer(&style, 10.0, 10.0).unwrap();
+    let wide = d.renderer.layer(single).transform.size;
+    let boxed = TextStyle { width: Some(120.0), ..style.clone() };
+    let para = d.add_text_layer(&boxed, 10.0, 100.0).unwrap();
+    let narrow = d.renderer.layer(para).transform.size;
+    assert!(narrow.0 <= 130.0 && narrow.1 > wide.1 * 2.5, "wrapped into several lines: {narrow:?} versus {wide:?}");
+    assert_eq!(d.text_style(para).unwrap().width, Some(120.0));
+    // Back to a single line.
+    d.set_text(para, &style).unwrap();
+    assert!(d.renderer.layer(para).transform.size.1 < wide.1 * 1.5);
+    // A triangle path becomes a shape layer, comes back as a path, and can be replaced.
+    let mut path = Path::default();
+    path.anchors.push(Anchor::corner((50.0, 50.0)));
+    path.anchors.push(Anchor::corner((150.0, 50.0)));
+    path.anchors.push(Anchor::corner((100.0, 150.0)));
+    path.closed = true;
+    let shape = d.add_path_shape_layer(&path, [0.0, 0.0, 1.0]).unwrap();
+    let t = d.renderer.layer(shape).transform;
+    assert_eq!((t.origin.0, t.origin.1, t.size.0, t.size.1), (50.0, 50.0, 100.0, 100.0));
+    assert_eq!(rgb_at(&mut d, 100, 100), [0, 0, 255, 255], "inside the triangle");
+    assert_eq!(rgb_at(&mut d, 55, 140)[3], 0, "outside it");
+    let back = d.shape_path(shape).unwrap();
+    assert_eq!(back.anchors.len(), 3);
+    assert_eq!(back.anchors[2].point, (100.0, 150.0));
+    // Scale the layer: the path scales with it.
+    let mut bigger = t;
+    bigger.size = compositor::format::Size(200.0, 200.0);
+    d.set_transform(shape, bigger, "Transform Layer");
+    assert_eq!(d.shape_path(shape).unwrap().anchors[1].point, (250.0, 50.0));
+    assert_eq!(rgb_at(&mut d, 150, 150), [0, 0, 255, 255]);
+    // Replace the outline: a square somewhere else.
+    let mut square = Path::default();
+    for p in [(200.0, 200.0), (300.0, 200.0), (300.0, 300.0), (200.0, 300.0)] { square.anchors.push(Anchor::corner(p)); }
+    square.closed = true;
+    d.set_shape_path(shape, &square).unwrap();
+    let t = d.renderer.layer(shape).transform;
+    assert_eq!((t.origin.0, t.origin.1, t.size.0, t.size.1), (200.0, 200.0, 100.0, 100.0));
+    assert_eq!(rgb_at(&mut d, 250, 250), [0, 0, 255, 255]);
+    assert_eq!(rgb_at(&mut d, 100, 100)[3], 0, "the old triangle is gone");
+    assert_eq!(d.undo_name(), Some("Edit Shape"));
+    assert!(d.set_shape_path(single, &square).is_err(), "a type layer is not a path shape");
+}
+
+#[test]
+fn patterns_define_fill_and_stamp() {
+    let dir = std::env::temp_dir().join(format!("compy-patterns-{}", std::process::id()));
+    unsafe { std::env::set_var("XDG_DATA_HOME", &dir); }
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 2.0, 2.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.add_shape_layer(false, (2.0, 2.0, 2.0, 2.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    // A 4 x 4 checker of red and white becomes the pattern.
+    d.select_box(0.0, 0.0, 4.0, 4.0, false, Mode::Replace, false).unwrap();
+    d.define_pattern("Checks").unwrap();
+    assert!(compositor::patterns::list().contains(&"Checks".to_string()));
+    d.deselect();
+    let target = d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    d.select_layer(Some(target));
+    d.fill_pattern("Checks", 1.0, 1.0).unwrap();
+    assert_eq!(rgb_at(&mut d, 20, 20), [255, 0, 0, 255], "tiled: (20,20) is a red cell");
+    assert_eq!(rgb_at(&mut d, 22, 20), [255, 255, 255, 255], "and (22,20) a white one");
+    assert_eq!(d.undo_name(), Some("Fill with Pattern"));
+    d.undo();
+    assert_eq!(rgb_at(&mut d, 20, 20), [0, 0, 255, 255]);
+    // Scaled up twice, the cells are 4 pixels.
+    d.fill_pattern("Checks", 2.0, 1.0).unwrap();
+    assert_eq!(rgb_at(&mut d, 21, 21), [255, 0, 0, 255]);
+    assert_eq!(rgb_at(&mut d, 25, 21), [255, 255, 255, 255]);
+    d.undo();
+    assert!(d.fill_pattern("Nothing", 1.0, 1.0).is_err());
+    // The Pattern Stamp paints the tile through the brush.
+    let mut brush = compositor::brush::BrushSettings::default();
+    brush.diameter = 12.0;
+    d.replay_stroke(&[(20.0, 20.0), (24.0, 20.0)], &brush, compositor::document::StrokeKind::Pattern { name: "Checks".into() }).unwrap();
+    assert_eq!(rgb_at(&mut d, 20, 20), [255, 0, 0, 255]);
+    assert_eq!(rgb_at(&mut d, 22, 20), [255, 255, 255, 255]);
+    assert_eq!(rgb_at(&mut d, 2, 38), [0, 0, 255, 255], "far from the stroke, untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}

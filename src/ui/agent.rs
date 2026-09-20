@@ -171,7 +171,7 @@ fn state_of(doc: &Doc) -> Value {
         "title": doc.title, "width": d.width(), "height": d.height(), "resolution": d.renderer.resolution(), "modified": d.is_modified(),
         "tool": format!("{:?}", doc.tool), "zoom_percent": (doc.viewport.zoom() * 100.0).round(),
         "foreground_color": format!("#{:02x}{:02x}{:02x}", (doc.brush.color[0] * 255.0) as u8, (doc.brush.color[1] * 255.0) as u8, (doc.brush.color[2] * 255.0) as u8),
-        "selection": selection, "layers": layers,
+        "selection": selection, "layers": layers, "patterns": crate::patterns::list(),
     })
 }
 
@@ -367,6 +367,7 @@ impl App {
                         if let Some(b) = flag(args, "bold") { style.bold = b; }
                         if let Some(i) = flag(args, "italic") { style.italic = i; }
                         if let Some(a) = text(args, "align") { style.align = match a.as_str() { "center" => 1, "right" => 2, _ => 0 }; }
+                        if let Some(w) = num(args, "width") { style.width = if w >= 1.0 { Some(w) } else { None }; }
                         if style.text.trim().is_empty() { bail!("text needed: a type layer with nothing in it is dropped, as the Type tool does"); }
                         let dd = &mut d.document;
                         if tool == "set_text" { let id = dd.active.unwrap(); dd.set_text(id, &style)?; json!("text set") } else { let id = dd.add_text_layer(&style, num(args, "x").unwrap_or(40.0), num(args, "y").unwrap_or(40.0))?; json!({"id": crate::format::upper(id)}) }
@@ -374,7 +375,7 @@ impl App {
                     "shape_layer" => { let ellipse = text(args, "kind").unwrap_or_default() == "ellipse"; let color = text(args, "color").and_then(|c| parse_color(&c)).unwrap_or(d.brush.color); let dd = &mut d.document; let id = dd.add_shape_layer(ellipse, (num(args, "x").unwrap_or(0.0), num(args, "y").unwrap_or(0.0), num(args, "width").unwrap_or(100.0), num(args, "height").unwrap_or(100.0)), color, num(args, "corner_radius").unwrap_or(0.0))?; json!({"id": crate::format::upper(id)}) }
                     "layer_style" => {
                         let id = dd.active.ok_or_else(|| anyhow::anyhow!("no active layer"))?;
-                        const KEYS: [&str; 7] = ["drop_shadow", "inner_shadow", "outer_glow", "inner_glow", "bevel", "stroke", "color_overlay"];
+                        const KEYS: [&str; 8] = ["drop_shadow", "inner_shadow", "outer_glow", "inner_glow", "bevel", "stroke", "color_overlay", "blend_if"];
                         let Some(map) = args.as_object() else { bail!("layer_style takes an object of effects") };
                         for (k, v) in map {
                             if !KEYS.contains(&k.as_str()) { bail!("unknown effect {k}; the effects are {}", KEYS.join(", ")); }
@@ -382,7 +383,7 @@ impl App {
                             for (f, fv) in fields {
                                 match f.as_str() {
                                     "color" => { if fv.as_str().and_then(parse_color).is_none() { bail!("{k}.color must look like #rrggbb"); } }
-                                    "opacity" | "angle" | "distance" | "size" | "depth" | "altitude" | "style" | "position" => { if !fv.is_number() { bail!("{k}.{f} must be a number"); } }
+                                    "opacity" | "angle" | "distance" | "size" | "depth" | "altitude" | "style" | "position" | "this_black" | "this_white" | "under_black" | "under_white" | "feather" => { if !fv.is_number() { bail!("{k}.{f} must be a number"); } }
                                     other => bail!("{k}.{other} is not a setting"),
                                 }
                             }
@@ -396,6 +397,7 @@ impl App {
                         if let Some(v) = args.get("inner_glow") { let mut g = crate::effects::Glow::inner_default(); g.color = color(v, "color", g.color); g.opacity = f(v, "opacity", g.opacity); g.size = f(v, "size", g.size); e.inner_glow = Some(g); }
                         if let Some(v) = args.get("bevel") { let mut b = crate::effects::Bevel::default(); b.style = f(v, "style", 0.0) as u32; b.depth = f(v, "depth", b.depth); b.size = f(v, "size", b.size); b.angle = f(v, "angle", b.angle); b.altitude = f(v, "altitude", b.altitude); e.bevel = Some(b); }
                         if let Some(v) = args.get("stroke") { let mut s = crate::effects::Stroke::default(); s.size = f(v, "size", s.size); s.position = f(v, "position", 0.0) as u32; s.color = color(v, "color", s.color); s.opacity = f(v, "opacity", s.opacity); e.stroke = Some(s); }
+                        if let Some(v) = args.get("blend_if") { let mut b = crate::effects::BlendIf::default(); b.this_black = f(v, "this_black", b.this_black); b.this_white = f(v, "this_white", b.this_white); b.under_black = f(v, "under_black", b.under_black); b.under_white = f(v, "under_white", b.under_white); b.feather = f(v, "feather", b.feather); e.blend_if = Some(b); }
                         if let Some(v) = args.get("color_overlay") { let mut o = crate::effects::Overlay::default(); o.color = color(v, "color", o.color); o.opacity = f(v, "opacity", o.opacity); e.color_overlay = Some(o); }
                         dd.set_effects(id, Some(&e))?; json!("styled")
                     }
@@ -413,6 +415,8 @@ impl App {
                         if g.stops.len() < 2 { bail!("give at least two stops"); }
                         dd.gradient_fill(start, end, shape, &g, num(args, "opacity").unwrap_or(1.0), true)?; json!("gradient drawn")
                     }
+                    "define_pattern" => { dd.define_pattern(&text(args, "name").unwrap_or_default())?; json!("pattern saved") }
+                    "fill_pattern" => { dd.fill_pattern(&text(args, "name").unwrap_or_default(), num(args, "scale").unwrap_or(1.0), num(args, "opacity").unwrap_or(1.0))?; json!("filled") }
                     "stroke_selection" => {
                         let color = parse_color(&text(args, "color").unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("color must look like #rrggbb"))?;
                         let position = match text(args, "position").unwrap_or_else(|| "center".into()).as_str() { "inside" => 0, "outside" => 2, _ => 1 };
