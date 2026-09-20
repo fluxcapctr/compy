@@ -516,6 +516,8 @@ impl Canvas {
                 drag.connect_drag_begin(move |g, x, y| {
                     let button = g.current_button();
                     let tool = this.doc.borrow().tool;
+                    // No layer active: the top one takes the tool, as Photoshop would not but users expect.
+                    if button == 1 && tool != Tool::Move && tool != Tool::Hand && tool != Tool::Zoom { let picked = { let mut d = this.doc.borrow_mut(); d.document.active.is_none() && d.document.ensure_active().is_some() }; if picked { if let Some(refresh) = this.refresh.borrow().as_ref() { refresh(); } } }
                     let pans = button == 2 || (button == 1 && (this.space_held.get() || tool == Tool::Hand));
                     this.dragging.set(pans);
                     last.set((0.0, 0.0));
@@ -657,6 +659,9 @@ impl Canvas {
     /// The transform box of the active layer on screen, when the Move tool would show one.
     fn geometry(&self, d: &super::Doc) -> Option<Geometry> {
         if !d.show_handles { return None; }
+        // The transform box belongs to the Move tool: while drawing a shape or a path, or painting, the
+        // box of whatever layer happens to be active (often the canvas-sized background) is noise.
+        if d.tool != Tool::Move { return None; }
         let id = d.document.active?;
         if self.handles_parked.get() == Some(id) { return None; }
         let size = d.size();

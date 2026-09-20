@@ -317,6 +317,16 @@ impl Document {
     }
 
     /// The active layer's id and pixels, when it is an image layer.
+    /// The active layer, or, when none is active (nothing selected in the panel, the last one deleted),
+    /// the topmost visible image layer, made active: tools go to work on it rather than refusing.
+    pub fn ensure_active(&mut self) -> Option<Uuid> {
+        if let Some(id) = self.active.filter(|id| self.has_layer(*id)) { return Some(id); }
+        let top = crate::format::entries_ordered(self.renderer.layers(), true).into_iter().find(|e| e.visible && !e.layer.is_group() && e.layer.adjustment.is_none() && self.renderer.has_image(e.layer.id)).map(|e| e.layer.id)
+            .or_else(|| crate::format::entries_ordered(self.renderer.layers(), true).into_iter().find(|e| !e.layer.is_group()).map(|e| e.layer.id));
+        if let Some(id) = top { self.select_layer(Some(id)); }
+        top
+    }
+
     pub fn active_image(&self) -> Option<(Uuid, ImageSurface)> {
         let id = self.active?;
         let layer = self.renderer.layer(id);
@@ -1825,7 +1835,7 @@ impl Document {
     /// adjustment layer, or an explicitly empty selection.
     pub fn begin_stroke(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, kind: StrokeKind) -> Result<()> {
         if self.stroke_active() { bail!("a stroke is already in progress"); }
-        let Some(id) = self.active else { bail!("Select a layer first.") };
+        let Some(id) = self.ensure_active() else { bail!("Add a layer first.") };
         let layer = self.renderer.layer(id).clone();
         if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
         if !crate::format::visible_layers(self.renderer.layers()).contains(&id) { bail!("This layer is hidden; show it to paint on it."); }
@@ -2546,7 +2556,7 @@ impl Document {
 
     fn begin_mask_stroke_kind(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, white: bool, blur: bool) -> Result<()> {
         if self.stroke_active() { bail!("a stroke is already in progress"); }
-        let Some(id) = self.active else { bail!("Select a layer first.") };
+        let Some(id) = self.ensure_active() else { bail!("Add a layer first.") };
         let layer = self.renderer.layer(id).clone();
         if !crate::format::visible_layers(self.renderer.layers()).contains(&id) { bail!("This layer is hidden; show it to paint its mask."); }
         let Some(mask) = self.renderer.mask(id).cloned() else { bail!("This layer has no mask.") };
