@@ -560,3 +560,101 @@ files, skip that.
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_8.md. No em dashes in your output.
+
+# Round 9 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 8 are fixed; a whole-project
+audit by seven Opus reviewers followed (AUDIT_FULL.md, reports in audit/), fixed in commit f3d0b7c.
+This round is a short, independent second look at the two areas that audit changed most: the renderer
+and the document history. Nothing else.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, ninth pass: the renderer and
+the history only.
+
+Context: a Linux rebuild of a macOS image editor named Compy (GTK4 + Cairo over a C pixel core in
+csrc/, read-only). The Swift source in reference/ is the spec (read-only). Read CLAUDE.md and README.md
+first. REVIEW_RESULTS.md through REVIEW_RESULTS_8.md and AUDIT_FULL.md hold the earlier findings, all
+fixed; do not re-report them. The audit's own reports are in audit/renderer.md and audit/document.md;
+read them, since this round checks the fixes made for them.
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there.
+
+Safety: do not run the app with COMPOSITOR_GPU set to anything (the GPU path is parked; see
+GPU_HANDOFF.md, and do not review src/gpu or src/render/gpu_plan.rs). Do not start the app with
+--assistant while a real one is open. Do not send anything to fal.ai. Do not write into
+~/.local/share/compositor or ~/.config/compositor.
+
+Cover only these files, as changed in commit f3d0b7c (git show f3d0b7c -- src/render src/history.rs
+src/document.rs src/raster.rs src/filters.rs): src/render/mod.rs, src/render/live.rs, src/history.rs,
+src/document.rs (the edit and history functions, the geometry functions, the artboard functions,
+`rasterize_for_painting`, `layer_coverage`), src/raster.rs. Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (188 tests should pass; the
+2 ignored need the network or a downloaded model) and report anything that fails. You may write
+throwaway probe programs against the library in a temp dir; do not change project files.
+
+1. History as a stack. `History::begin` pushes a snapshot per open edit, `cancel` pops and hands back
+   the innermost start, `end_with` records only when the depth returns to zero and uses the outermost
+   entry. Check: `end_with` after a nested `cancel` (does the popped inner snapshot ever get used as the
+   outer's "before"); a `cancel` at depth 1 after a nested `end`; the merge window with nesting;
+   `trim` while nested; `Document::edited` when `f` itself calls `abort_edit` or `end_edit`
+   (unbalanced by design or by accident); `unwind_edits_to` when the depth is already lower than asked;
+   `abort_edit` restoring a state whose layer the outer edit deleted (`apply` and a dangling active id);
+   `preview_busy` and `busy_editing` against every caller in src/ui (a menu command that legitimately
+   runs during Free Transform, whose edit is open, is it still allowed); `undo`/`redo` refusing while a
+   preview holds the document, but the UI's History window stepping (`step_history`) not refusing.
+2. Geometry and artboards. `canvas_size` now goes through `edited` and `canvas_size_body`: a failure
+   inside (a selection surface that cannot be made) restores everything including the frames and guides;
+   `map_artboards` rounding on repeated Image Size (drift), a frame scaled below one pixel, a mirrored
+   frame; `make_room_for` returning a shift while `canvas_size` also shifts frames (no double shift for
+   existing boards, the right single shift for the new one in `add_artboard`, `set_artboard_frame`,
+   `import_as_artboard`, `fit_canvas_to_artboards`); `rotate_canvas_body` at 90, 180, 270 and 45
+   degrees for frames, guides, masks with placement, the selection, and its `unwind_edits_to(depth - 1)`
+   when `depth` was 1; `resample` keeping text and shape records with scaled size, width, tracking,
+   baseWidth and baseHeight (does a later `redraw_shape` or `set_text` produce the same picture); the
+   `Transform::is_valid` cap at 30,000 against layers loaded from older files that were larger (what
+   happens on open, on move, on save).
+3. `rasterize_for_painting`: the uneven-scale test with a one-percent tolerance on a rotated layer, a
+   flipped layer, a layer whose image is 1 x 1 (a blank layer), a layer with a mask that has its own
+   placement, a layer inside an artboard, a clipped layer or a clipping base (the raster changes the
+   base's alpha grid), a type layer that is also stretched; the record clearing through `set_image`; the
+   "Rasterize Layer" step as its own undo entry versus the stroke's; `begin_stroke` refusing hidden
+   layers by `visible_layers` (a layer inside a collapsed folder, a layer inside a hidden artboard).
+4. `layer_coverage`: the 256-pixel scale and the alpha threshold of 8 against a layer of thin lines
+   (a signature, a hairline logo) whose pixels vanish at the small scale, a layer with a style whose
+   shadow counts as coverage, a clipped layer, a layer with opacity 0.05; the bounds it returns
+   converted back through the scale (off by up to one pixel at each edge), and how `remake`'s Reframe
+   uses them for a layer that partly hangs off the canvas.
+5. The renderer at device scale. `target_scale`, `device_scale` (now the matrix scale times the
+   surface's own scale), `Region::offscreen` (pixels times the scale, `set_device_scale`), the clip in
+   `draw_composite` under `identity_matrix`, `coverage` handing back an A8 with a device scale, and
+   `adjust` reading the target through its device scale and offset. Check every consumer of a region or
+   an offscreen surface: `apply_blend_if` (which already handled scales: is anything now applied twice),
+   `through_masks` masking with the coverage at `region.x`/`region.y` under identity, `draw`'s offscreen
+   branch painting back at the region origin, `render_layer` and `render_artboard` (device scale 1 with
+   a `cr.scale`), the frame cache in src/ui/canvas.rs at `backing_scale` 2 with a pan and a fractional
+   zoom, a `push_group` target inside a scaled context (a group surface carries its parent's device
+   scale and an offset: does `adjust` get both right), `Region::of` rounding at a fractional scale where
+   `width * sx` is not whole, and `reduced`'s mip level choice now that `device_scale` doubled on
+   HiDPI (is a layer drawn from a level too shallow, costing time, or is any halving skipped).
+6. `apply_tables` without the extra pass: confirm on the Filter menu path (`filtered`, `run` for
+   Levels, Curves, Exposure, Brightness/Contrast, Posterize) and on the adjustment-layer path
+   (`Adjustment::apply` from `adjust`) that no other caller still wraps `ffi::levels` in
+   `unpremultiply_partial`/`premultiply_partial`, and that mask targets (opaque gray) are unchanged.
+   `high_pass` on straight color at alpha 1 and at the edge. `ShadowsHighlights` with the coverage
+   blur at radius 0 and on a fully opaque layer (identical to before).
+7. `check_size` in src/raster.rs: the 400-megapixel budget against the largest surfaces the app makes
+   on purpose (a 100-megapixel document at device scale 2 is 400 megapixels exactly; the styled buffer
+   at 120 megapixels padded; `Region::offscreen` for a 4K window at scale 2; `render_flat` of a
+   30,000 x 3,333 canvas), and whether any of them now fails where it used to succeed. Also whether a
+   surface refused there leaves an edit open anywhere (every `new_argb` and `a8_filled` call inside a
+   `begin_edit`).
+8. Tests: `whole_project_audit_fixes` and `round_eight_fixes` in tests/features_g.rs and the unit
+   tests in src/history.rs: anything that passes for the wrong reason, and any of the fixes above with
+   no test at all.
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_9.md. No em dashes in your output.
