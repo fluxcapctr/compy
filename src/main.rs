@@ -30,6 +30,27 @@ fn main() {
             }
             std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes to {}", set.len(), Path::new(&args[2]).display()))
         }
+        Some("patterns") if args.len() >= 4 && args[2].to_str() == Some("import") => {
+            // `compositor patterns import <file.abr|file.pat> ...`: every pattern inside, saved for Fill with Pattern.
+            let mut total = 0;
+            for path in &args[3..] {
+                let p = Path::new(path);
+                match std::fs::read(p).map_err(anyhow::Error::from).and_then(|d| compositor::abr::patterns(&d)) {
+                    Ok(list) => {
+                        for pat in list {
+                            // Opaque straight RGBA is premultiplied BGRA with the red and blue swapped.
+                            let mut bgra = pat.rgba.clone();
+                            for px in bgra.chunks_exact_mut(4) { px.swap(0, 2); }
+                            let surface = match compositor::raster::argb_from_packed(pat.width as i32, pat.height as i32, bgra) { Ok(s) => s, Err(e) => { eprintln!("skipped {}: {e:#}", pat.name); continue; } };
+                            match compositor::patterns::save(&pat.name, &surface) { Ok(out) => { total += 1; eprintln!("{} ({}x{}) -> {}", pat.name, pat.width, pat.height, out.display()); } Err(e) => eprintln!("skipped {}: {e:#}", pat.name) }
+                        }
+                    }
+                    Err(e) => eprintln!("skipped {}: {e:#}", p.display()),
+                }
+            }
+            eprintln!("imported {total} patterns");
+            Ok(())
+        }
         Some("brushes") if args.len() == 3 => {
             let set = compositor::brush_set::presets();
             std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes", set.len()))

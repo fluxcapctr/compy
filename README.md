@@ -271,6 +271,13 @@ and `brush_stroke` paints along a list of points with any kind (paint, erase, do
 desaturate, blur, heal, pattern), a diameter, hardness, opacity, color and a textured tip by name (the
 state lists `brush_tips`), so it can lay texture, dodge and burn, or stamp a pattern by hand.
 
+**Brush files and the patterns inside them.** The `.abr` loader reads Photoshop 7 through the current
+CC format (versions 6, 7 and 10), and tips wider than 2048 pixels are averaged down on load, since the
+brush never paints wider than 2000. Many brush packs carry patterns as well: `compositor patterns import
+<file.abr ...>` writes every pattern inside as a PNG into `~/.local/share/compositor/patterns/`, where
+Fill with Pattern and the Pattern Stamp find them. `compositor convert-brushes out.abr in.abr` rewrites a
+pack as tips alone, which keeps a pattern-heavy file from being read whole at every start.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

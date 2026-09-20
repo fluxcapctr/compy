@@ -60,7 +60,7 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
     let mut r = Reader { data, pos: 0 };
     let set = stem.to_string();
     // Everything decoded from one file, in samples, counted before each tip's buffer is made.
-    let mut budget: usize = 100_000_000;
+    let mut budget: usize = 400_000_000;
     let version = r.u16()?;
     let mut presets = Vec::new();
     match version {
@@ -95,9 +95,10 @@ pub fn parse(data: &[u8], stem: &str) -> Result<Vec<Rc<Preset>>> {
                 r.pos = start + size;
             }
         }
-        6 => {
+        // Photoshop 7 through CC write 6.x; later CC versions write 7.x and 10.x with the same sections.
+        6 | 7 | 10 => {
             let subversion = r.u16()?;
-            if subversion != 1 && subversion != 2 { bail!("Photoshop brush file version 6.{subversion} is not supported."); }
+            if subversion != 1 && subversion != 2 { bail!("Photoshop brush file version {version}.{subversion} is not supported."); }
             // Skip 8BIM sections until the samples.
             loop {
                 if r.bytes(4)? != b"8BIM" { bail!("the file is not laid out as expected"); }
@@ -147,7 +148,7 @@ fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth:
     let room = end.saturating_sub(r.pos);
     // A raw tip needs its whole size; a packed one at least a row-length table and a byte per row.
     if (compression == 0 && room < w * h * bytes) || (compression == 1 && room < h * 3) { bail!("a brush's pixels run past its record"); }
-    *budget = budget.checked_sub(w * h).ok_or_else(|| anyhow::anyhow!("The file's brushes exceed the 100-megapixel decoding budget."))?;
+    *budget = budget.checked_sub(w * h).ok_or_else(|| anyhow::anyhow!("The file's brushes exceed the 400-megapixel decoding budget."))?;
     let mut raw = vec![0u8; w * h * bytes];
     if compression == 0 {
         raw.copy_from_slice(r.bytes(w * h * bytes)?);
@@ -183,7 +184,115 @@ fn read_tip(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, depth:
         }
     }
     let pixels: Vec<u8> = if bytes == 1 { raw } else { raw.chunks_exact(2).map(|p| p[0]).collect() };
-    Ok(Some((w, h, pixels)))
+    Ok(Some(shrink_tip(w, h, pixels)))
+}
+
+/// The largest tip kept: the brush never paints wider than 2000 pixels, so a 5000-pixel tip only costs
+/// memory. Larger ones are averaged down by a whole factor.
+const TIP_LIMIT: usize = 2048;
+
+fn shrink_tip(w: usize, h: usize, pixels: Vec<u8>) -> (usize, usize, Vec<u8>) {
+    let factor = w.max(h).div_ceil(TIP_LIMIT);
+    if factor <= 1 { return (w, h, pixels); }
+    let (nw, nh) = (w.div_ceil(factor), h.div_ceil(factor));
+    let mut out = vec![0u8; nw * nh];
+    for y in 0..nh {
+        for x in 0..nw {
+            let (mut sum, mut n) = (0u32, 0u32);
+            for sy in y * factor..((y + 1) * factor).min(h) { for sx in x * factor..((x + 1) * factor).min(w) { sum += pixels[sy * w + sx] as u32; n += 1; } }
+            out[y * nw + x] = if n == 0 { 0 } else { (sum / n) as u8 };
+        }
+    }
+    (nw, nh, out)
+}
+
+/// A pattern carried in a brush file's `patt` section: straight RGBA pixels.
+pub struct Pattern { pub name: String, pub width: usize, pub height: usize, pub rgba: Vec<u8> }
+
+/// Every pattern in a version 6 or later brush file (or a `.pat` file, which is the same section alone).
+pub fn patterns(data: &[u8]) -> Result<Vec<Pattern>> {
+    let mut r = Reader { data, pos: 0 };
+    let version = r.u16()?;
+    if !matches!(version, 6 | 7 | 10) { return Ok(Vec::new()); }
+    r.u16()?;
+    let mut out = Vec::new();
+    while r.pos + 12 <= data.len() {
+        if r.bytes(4)? != b"8BIM" { break; }
+        let tag = r.bytes(4)?;
+        let size = r.u32()? as usize;
+        let start = r.pos;
+        if tag == b"patt" {
+            let end = start.checked_add(size).filter(|e| *e <= data.len()).context("the patterns section runs past the end of the file")?;
+            while r.pos + 4 <= end {
+                let len = r.u32()? as usize;
+                let entry_start = r.pos;
+                let entry_end = entry_start.checked_add(len).filter(|e| *e <= end).context("a pattern runs past its section")?;
+                match read_pattern(&mut r, entry_end) {
+                    Ok(Some(p)) => out.push(p),
+                    Ok(None) => {}
+                    Err(e) => eprintln!("pattern skipped: {e:#}"),
+                }
+                r.pos = entry_start + len.div_ceil(4) * 4;
+            }
+        }
+        r.pos = start + size + (size & 1);
+    }
+    Ok(out)
+}
+
+fn read_pattern(r: &mut Reader, end: usize) -> Result<Option<Pattern>> {
+    let version = r.u32()?;
+    if version != 1 { bail!("pattern version {version}"); }
+    let mode = r.u32()?;
+    let (h, w) = (r.u16()? as usize, r.u16()? as usize);
+    let chars = r.u32()? as usize;
+    if chars > 4096 { bail!("a pattern name is too long"); }
+    let mut units = Vec::with_capacity(chars);
+    for _ in 0..chars { units.push(r.u16()?); }
+    let name = String::from_utf16_lossy(&units).trim_end_matches('\0').trim().to_string();
+    let id_len = r.u8()? as usize;
+    r.skip(id_len)?;
+    // The virtual memory array list: version, length, the bounds, then every channel in turn.
+    let vm_version = r.u32()?;
+    if vm_version != 3 { bail!("pattern data version {vm_version}"); }
+    r.u32()?;
+    let (top, left, bottom, right) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+    let channels = r.u32()? as usize;
+    if w == 0 || h == 0 || w > 8192 || h > 8192 { return Ok(None); }
+    let wanted = match mode { 1 => 1, 3 => 3, other => bail!("pattern color mode {other}") };
+    let mut planes: Vec<Vec<u8>> = Vec::new();
+    let mut budget = 200_000_000usize;
+    for _ in 0..channels.min(64) {
+        if planes.len() >= wanted || r.pos + 8 > end { break; }
+        let written = r.u32()?;
+        let len = r.u32()? as usize;
+        let channel_start = r.pos;
+        if written == 0 { continue; }
+        let depth = r.u32()?;
+        let (ct, cl, cb, cr) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+        let depth16 = r.i16()?;
+        let compression = r.u8()?;
+        let _ = (depth, top, left, bottom, right);
+        let tip = read_tip(r, ct, cl, cb, cr, if depth16 == 0 { 8 } else { depth16 }, compression, channel_start + len, &mut budget)?;
+        match tip {
+            Some((tw, th, px)) if tw == w && th == h => planes.push(px),
+            Some((tw, th, px)) => {
+                // A channel bounded differently from the pattern: placed within it.
+                let mut full = vec![0u8; w * h];
+                for y in 0..th.min(h) { for x in 0..tw.min(w) { full[y * w + x] = px[y * tw + x]; } }
+                planes.push(full);
+            }
+            None => bail!("a pattern channel could not be read"),
+        }
+        r.pos = channel_start + len;
+    }
+    if planes.len() < wanted { bail!("the pattern has {} of {wanted} channels", planes.len()); }
+    let mut rgba = vec![255u8; w * h * 4];
+    for i in 0..w * h {
+        if wanted == 1 { let v = planes[0][i]; rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; }
+        else { rgba[i * 4] = planes[0][i]; rgba[i * 4 + 1] = planes[1][i]; rgba[i * 4 + 2] = planes[2][i]; }
+    }
+    Ok(Some(Pattern { name, width: w, height: h, rgba }))
 }
 
 #[cfg(test)]
