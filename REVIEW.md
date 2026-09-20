@@ -435,3 +435,128 @@ only read files, skip that.
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_7.md. No em dashes in your output.
+
+# Round 8 prompt
+
+Paste everything below the line into the review assistant. Rounds 1 to 7 are fixed (see REVIEW_RESULTS.md
+through REVIEW_RESULTS_7.md); this round covers the code written since, commits 663891e through 2f2e459.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux for bugs, eighth pass.
+
+Context: a Linux rebuild of a macOS image editor named Compy, with an in-app assistant (also Compy) that
+drives the document through Claude Code over a Unix socket and an MCP server. The Swift source in
+reference/ is the spec (read-only); the C pixel core in csrc/ is compiled unchanged (do not edit it).
+Read CLAUDE.md and README.md first. REVIEW_RESULTS.md through REVIEW_RESULTS_7.md hold the earlier
+findings, all fixed; do not re-report them, but do check that the round 7 fixes hold (area 1).
+
+Budget: if you are running low on tokens or time, stop, write what you have found so far, and end the
+report with a line that says exactly where you stopped (which numbered area and which file) so the next
+pass can pick up there. A partial report that says where it ended is worth more than an unfinished one.
+
+Safety: do not run the app with COMPOSITOR_GPU set to anything (the GPU path is parked; see
+GPU_HANDOFF.md, and do not re-review it). Do not start the app with --assistant while a real one is open.
+Do not send anything to fal.ai; tests that need the network are ignored. Do not write into
+~/.local/share/compositor/brushes or patterns, or ~/.config/compositor (swatches.json and
+agent-models.json are the user's); tests that touch them set XDG_CONFIG_HOME or XDG_DATA_HOME to a temp
+dir under an ENV_LOCK mutex. Do not run avifenc on anything outside a temp dir.
+
+Cover only what is new since round 7 (git log 72e0b23..2f2e459). Rank by severity, give file:line, the
+input that triggers it, and what goes wrong. Run cargo build and cargo test (178 tests should pass; the
+2 ignored need the network or a downloaded model) and report anything that fails. If you can only read
+files, skip that.
+
+1. The round 7 fixes, as fixes: check each item in the status table of REVIEW_RESULTS_7.md against the
+   current code.
+2. Export Sizes, src/export_sizes.rs: presets() and preset_named (case, spaces, the "story or reel"
+   alias), Fit::from_name, file_name (a title with a slash or a dot, two presets that collapse to the
+   same name), remake (image_size's uniform scale on a document with a non-uniform target, canvas_size
+   pad and crop anchors, Reframe's element rule: type layers and layers whose coverage is under 0.5
+   move, does it read coverage on a rotated or masked layer, an element larger than the target,
+   background with Fit::Pad on a transparent document, a 1x1 preset, a preset larger than the size
+   bound), export_all (a folder that does not exist, one size failing while others succeed, the
+   returned warnings), add_as_artboards (placement to the right of the last board, the canvas growing,
+   names on a clash, the edit wrapper so one undo removes all boards), Document::duplicate (shared
+   caches, ids kept or remade, history empty). The dialog in src/ui/dialogs.rs::export_sizes (tick
+   state, custom size validation, the folder chooser's None meaning artboards) and the Compy tool
+   export_sizes (sizes as objects with missing width, as_artboards ignoring folder).
+3. PSD, src/psd.rs and src/psd_desc.rs: Descriptor parse (nested lists, an unknown item type, a
+   length that runs past the data, a class name of length 0 meaning a 4 char key, unicode strings with
+   odd lengths, Unit and Enum keys, recursion depth on a hostile file), write then parse round trip for
+   every Item variant, read_tysh (the transform matrix applied to position and size, resolution, a
+   font size in points vs pixels, engine_number/engine_values/engine_font_names/engine_string scanning
+   the EngineData for a key that appears twice or inside a string, a type layer with a width or
+   paragraph settings, missing engine data falls back to pixels with a warning), read_lfx2 and
+   effects_from_descriptor (each effect's enabled flag, opacity scale, angle convention, blur vs size,
+   a GrFl gradient with more than two stops or with opacity stops, patterns not exported, Blend If
+   round trip or stated as not carried), effects_descriptor (keys and units Photoshop expects, the
+   descriptor version, the block length padding to 4), the layer record's extra data length with both
+   TySh and lfx2 present, and export with a Path shape layer. Check the round trip in tests/psd.rs
+   asserts what Photoshop would read, not only what this code writes.
+4. Gradient and Pattern Overlay, src/effects.rs: GradientOverlay (angle direction against
+   Photoshop's, radial center and radius, reverse, opacity with the layer's own alpha, a layer partly
+   off canvas, the gradient clipped to the layer's coverage via coverage_box), PatternOverlay (scale 0,
+   a missing pattern name at draw time, the tile origin against the layer's position after a move,
+   HiDPI), paint_one's order of the overlays against Photoshop's stacking (Color, Gradient, Pattern
+   overlays under Inner Shadow and Glow), the Layer Style pages for both, serde defaults for old files,
+   and the effects on a group layer.
+5. History, src/document.rs history_names and step_history (negative and positive steps past the
+   ends, an open edit while stepping, the names of nested edits, the redo list after a new edit),
+   the History dialog (refresh after a step, selecting the current row, a document closed while the
+   window is open, the Alt+H binding). Swatches in src/ui/color_wheel.rs (swatches_path with
+   XDG_CONFIG_HOME unset and HOME unset, a corrupt swatches.json, the 64 cap dropping the oldest,
+   remove of a color that is not there, fill_swatches on every open).
+6. Rotate Canvas and Straighten: rotate_canvas (degrees normalized to (-180, 180], 90 exactly vs
+   89.9999, the canvas size after an arbitrary angle, layer transforms composed with the turn, masks
+   and vector shapes and type layers turned, guides and artboards after the turn, the selection
+   dropped or turned, one undo), straighten (a == b, a vertical line chooses vertical, the crop after
+   the turn, points outside the canvas), the angle dialog, the Rotate Canvas submenu actions.
+7. WebP, GIF, AVIF, Export Layers: export_webp (lossless flag, alpha, a document wider than 16383,
+   the WebP limit), export_gif (the 256 color quantization on a photo, transparency index, alpha
+   threshold, a fully transparent document), export_avif (avifenc missing or failing, quality 0 and
+   100 mapping, the temp PNG cleaned up, a path with spaces, stderr surfaced), export_layers (trim on
+   an empty layer, numbering by written count, hidden layers and groups skipped or flattened, a name
+   with a slash, masks applied or not, effects included or not), the Compy tools export_layers and
+   the quality dialog.
+8. Artboards, src/format (Artboard struct, Layer.artboard on a non-group rejected by validate.rs, old
+   files without the field, negative or zero size), Document::add_artboard (name kept unless it
+   clashes, background None vs transparent), set_artboard_frame (shrinking below the layers, moving
+   layers with the frame or not, undo), artboard_at (the 18 px name strip in document units vs zoom),
+   nudge_artboard, fit_canvas_to_artboards (a board at negative coordinates, the canvas shrinking and
+   layers outside any board), import_as_artboard (a source with its own artboards, ids remade),
+   artboard_from_layers (rotated layers' bounds, one layer, layers from different groups, a layer that
+   is already inside a board), export_artboards (a board partly off canvas, the name as a file name,
+   jpeg on a transparent board, overlapping boards). Renderer: draw_artboard_backgrounds order,
+   artboard_frame, draw_within_artboard's clip on HiDPI and with the frame cache, set_artboard clearing
+   placed, has_artboards turning the checkerboard off, effects of a layer inside a board spilling past
+   the frame, a mask or clipping mask inside a board, blend modes against the board background. Canvas
+   board_drag (begin_board_drag with the Move tool only, drag past the canvas edge, the label overlay
+   at every zoom, a board drag while a transform is in progress). Layers panel kind "artboard" and its
+   glyph. The Compy tools new_artboard (preset lookup, x and y given, transparent), move_artboard
+   (by name vs id, resize with negative width), the PSD exporter with artboards (flattened or
+   stated).
+9. Today's UI changes (commit 2f2e459): the menu in src/ui/mod.rs::menu() and sections(): every
+   action string it references exists in the actions table (including the parameterized
+   filter::, new-adjustment::, align:: and distribute:: ones), nothing that was in the round 7 menu is
+   missing now (diff the two), duplicate entries (Free Transform is in Edit and Layer > Transform,
+   Duplicate Layer and Layer via Copy are the same action: fine if intended, report if any label lies
+   about what its action does), the SHORTCUTS table and README against the new places. center_spins
+   (recursion cost on a wide widget tree, SpinButton inside a Popover child). The color picker in
+   src/ui/color_wheel.rs: region() at the gap and past the strip, pick() with hue 360 wrapping to
+   359.999 (marker at the bottom row), the square image regenerated on every hue drag step (cost at
+   256x256), the RGB entries' connect_changed firing three times during sync_channels (syncing flag),
+   a typed value above 255 or empty, hex typed with 3 digits, set_color keeping the hue on gray,
+   the strip marker position for hue near 360, the marker contrast rule. The layer row cursor
+   (set_cursor_from_name("pointer") on a ListBoxRow: does it override the eye button's and drag
+   handle's cursors), the assistant header mark (compy_mark(16) repainting on theme change), the
+   start page with the logo removed (spacing left behind), install.sh still finding the logo for the
+   icon.
+10. Tests: anything in tests/features_g.rs (export sizes, rotate/straighten/history/webp/layers/
+    overlays, gif/avif, artboards), tests/psd.rs (layer styles round trip) or the unit tests in
+    src/export_sizes.rs, src/psd_desc.rs and src/ui/color_wheel.rs that asserts the wrong value or
+    passes for the wrong reason (a tolerance wide enough to hide a bug, a test that only checks the
+    file exists).
+
+Report only; do not refactor or restyle. Write the report to
+/home/estevens/code/compositor-linux/REVIEW_RESULTS_8.md. No em dashes in your output.
