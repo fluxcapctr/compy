@@ -28,6 +28,7 @@ pub mod path;
 pub mod patterns;
 pub mod png_io;
 pub mod psd;
+pub mod psd_desc;
 pub mod raster;
 pub mod render;
 pub mod selection;

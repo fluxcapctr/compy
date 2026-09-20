@@ -117,6 +117,12 @@ works dropped on the empty window, passed on the command line, or opened from a 
 `install.sh` has registered the types.
 
 **Photoshop files.** File has Export PSD, and a `.psd` opens through Open, a drop or the command line.
+Type layers open editable: the file's own pixels show until the text is changed, and the text, size,
+font (substituted when it is not installed), color, alignment, leading, tracking and paragraph width
+come from Photoshop's type settings. Layer styles come in and go out as Photoshop's own effects
+descriptor (drop and inner shadow, outer and inner glow, bevel, stroke, color overlay); Blend If does
+not travel yet. On export, type is written as pixels, since Photoshop needs its private text engine data
+to edit it.
 The Filter menu also has Gaussian Blur and Motion Blur, which give the layer a transparent margin to spread
 into and trim the rim they did not reach, so a blurred layer grows a little, as in the reference.
 

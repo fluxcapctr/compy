@@ -50,6 +50,10 @@ struct RawLayer {
     mask: Option<(i32, i32, i32, i32, u8, u8)>,
     adjustment: Option<&'static str>,
     unsupported_adjustment: bool,
+    /// A type layer's text and setting, from its TySh block; the pixels in the file stay until it is edited.
+    text: Option<crate::text::TextStyle>,
+    /// Layer effects, from the lfx2 block.
+    effects: Option<crate::effects::Effects>,
 }
 
 /// Unpacks PackBits runs into exactly `out.len()` bytes.
@@ -239,6 +243,8 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 let mut section = 0u32;
                 let mut adjustment = None;
                 let mut unsupported_adjustment = false;
+                let mut text = None;
+                let mut effects = None;
                 while r.pos + 12 <= extra_end {
                     let sig = r.bytes(4)?;
                     if sig != b"8BIM" && sig != b"8B64" { break; }
@@ -255,6 +261,8 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                             if !unicode.is_empty() { name = unicode.trim_end_matches('\0').to_string(); }
                         }
                         b"lsct" => { section = r.u32()?; }
+                        b"TySh" => { match read_tysh(&r.data[astart..(astart + alen).min(r.data.len())], resolution) { Ok(t) => text = Some(t), Err(e) => warnings.push(format!("type layer \"{name}\" opened as pixels: {e:#}")) } }
+                        b"lfx2" => { match read_lfx2(&r.data[astart..(astart + alen).min(r.data.len())]) { Ok(e) => effects = e, Err(e) => warnings.push(format!("layer style on \"{name}\" was not read: {e:#}")) } }
                         b"brit" | b"blnc" | b"phfl" | b"vibA" | b"mixr" | b"thrs" | b"post" | b"nvrt" | b"selc" | b"clrL" | b"blwh" | b"SoCo" | b"GdFl" | b"PtFl" => { unsupported_adjustment = true; }
                         other => { if let Some((_, kind)) = ADJUSTMENT_KEYS.iter().find(|(k, _)| *k == other) { adjustment = Some(*kind); } }
                     }
@@ -262,10 +270,10 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                     r.skip(alen + (alen & 1))?;
                 }
                 r.pos = extra_end;
-                records.push((top, left, bottom, right, channel_specs, blend, opacity, clipping, flags, name, section, mask, adjustment, unsupported_adjustment));
+                records.push((top, left, bottom, right, channel_specs, blend, opacity, clipping, flags, name, section, mask, adjustment, unsupported_adjustment, text, effects));
             }
             // Channel image data follows, in the same order.
-            for (top, left, bottom, right, channel_specs, blend, opacity, clipping, flags, name, section, mask, adjustment, unsupported_adjustment) in records {
+            for (top, left, bottom, right, channel_specs, blend, opacity, clipping, flags, name, section, mask, adjustment, unsupported_adjustment, text, effects) in records {
                 let mut channels = Vec::new();
                 for (id, len) in channel_specs {
                     let start = r.pos;
@@ -283,7 +291,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                     channels.push((id, samples));
                     r.pos = start + len;
                 }
-                raw_layers.push(RawLayer { rect: (top, left, bottom, right), channels, blend, opacity, clipping, hidden: flags & 2 != 0, name, section, mask, adjustment, unsupported_adjustment });
+                raw_layers.push(RawLayer { rect: (top, left, bottom, right), channels, blend, opacity, clipping, hidden: flags & 2 != 0, name, section, mask, adjustment, unsupported_adjustment, text, effects });
             }
         }
     }
@@ -370,7 +378,14 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 }
                 images.insert(id, from_straight_rgba(&rgba, w as usize, h as usize)?);
                 layer.image_file = Some(format!("{}.png", upper(id)));
+                if let Some(style) = &raw.text {
+                    // Editable again: the file's own pixels show until the text is changed, then the app's
+                    // rendering takes over (the font may be substituted when it is not installed).
+                    layer.text = Some(style.to_record());
+                    if !crate::text::families().iter().any(|f| f.eq_ignore_ascii_case(&style.family)) { warnings.push(format!("type layer \"{}\" uses the font {}, which is not installed; editing it will substitute another", raw.name, style.family)); }
+                }
             }
+            if let Some(effects) = &raw.effects { layer.effects = Some(effects.to_record()); }
             if let Some(m) = raw.mask {
                 let over = if is_adjustment { (0, 0, height, width) } else { raw.rect };
                 if let Some(mask) = build_mask(&raw, m, over, &mut warnings)? { masks.insert(id, mask); layer.mask_file = Some(format!("{}.mask.png", upper(id))); if m.5 & 2 != 0 { layer.mask_enabled = Some(false); } }
@@ -480,6 +495,8 @@ pub fn write(document: &mut crate::document::Document, path: &Path) -> Result<Ve
             } else if layer.adjustment.is_some() {
                 warnings.push(format!("adjustment layer \"{}\" was left out; the merged image includes its effect", layer.name));
             } else if let Some(placed) = rasterize(document, &layer)? {
+                if layer.text.is_some() { warnings.push(format!("type layer \"{}\" was written as pixels; Photoshop shows it but cannot edit its text", layer.name)); }
+                if layer.effects.as_ref().and_then(crate::effects::Effects::from_record).is_some_and(|e| e.blend_if().is_some()) { warnings.push(format!("Blend If on \"{}\" was left out; Photoshop keeps that in blending ranges, which are not written yet", layer.name)); }
                 recs.push(Rec::Pixel(layer, placed));
             } else {
                 warnings.push(format!("blank layer \"{}\" was left out", layer.name));
@@ -562,6 +579,15 @@ pub fn write(document: &mut crate::document::Document, path: &Path) -> Result<Ve
         extra.bytes(b"8BIM"); extra.bytes(b"luni"); extra.u32(4 + units.len() as u32 * 2 + if units.len() % 2 == 1 { 2 } else { 0 });
         extra.u32(units.len() as u32); for u in &units { extra.u16(*u); } if units.len() % 2 == 1 { extra.u16(0); }
         if section != 0 { extra.bytes(b"8BIM"); extra.bytes(b"lsct"); extra.u32(12); extra.u32(section); extra.bytes(b"8BIM"); extra.bytes(b"pass"); }
+        // Layer effects go out as Photoshop's own lfx2 descriptor.
+        if let Some(effects) = layer.and_then(|l| l.effects.as_ref()).and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) {
+            let mut body = Vec::new();
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(&16u32.to_be_bytes());
+            body.extend_from_slice(&crate::psd_desc::write(&effects_descriptor(&effects)));
+            while body.len() % 4 != 0 { body.push(0); }
+            extra.bytes(b"8BIM"); extra.bytes(b"lfx2"); extra.u32(body.len() as u32); extra.bytes(&body);
+        }
         records.u32(extra.out.len() as u32);
         records.bytes(&extra.out);
         for (_, c) in chans { channel_data.bytes(&c); }
@@ -639,3 +665,222 @@ fn rasterize_mask(document: &mut crate::document::Document, layer: &Layer) -> Re
 
 #[allow(dead_code)]
 fn read_all(path: &Path) -> Result<Vec<u8>> { let mut v = Vec::new(); std::fs::File::open(path)?.read_to_end(&mut v)?; Ok(v) }
+
+// MARK: Layer effects and type, in Photoshop's descriptors
+
+use crate::effects::{Bevel, Effects, Glow, Overlay, Shadow, Stroke};
+use crate::psd_desc::{Descriptor, Item, rgb};
+
+fn prc(v: f64) -> Item { Item::Unit("#Prc".into(), v) }
+fn pxl(v: f64) -> Item { Item::Unit("#Pxl".into(), v) }
+fn ang(v: f64) -> Item { Item::Unit("#Ang".into(), v) }
+fn blend_item(key: &str) -> Item { Item::Enum("BlnM".into(), key.into()) }
+
+/// The lfx2 descriptor for a layer's effects, as Photoshop lays it out.
+pub fn effects_descriptor(e: &Effects) -> Descriptor {
+    let mut d = Descriptor::new("null");
+    d.push("Scl ", prc(100.0)).push("masterFXSwitch", Item::Bool(true));
+    let shadow = |s: &Shadow, drop: bool| {
+        let mut o = Descriptor::new(if drop { "DrSh" } else { "IrSh" });
+        o.push("enab", Item::Bool(s.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Md  ", blend_item("Mltp")).push("Clr ", rgb(s.color)).push("Opct", prc(s.opacity * 100.0)).push("uglg", Item::Bool(false)).push("lagl", ang(s.angle)).push("Dstn", pxl(s.distance)).push("Ckmt", pxl(0.0)).push("blur", pxl(s.size)).push("Nose", prc(0.0)).push("AntA", Item::Bool(false));
+        if drop { o.push("layerConceals", Item::Bool(true)); }
+        Item::Desc(o)
+    };
+    let glow = |g: &Glow, outer: bool| {
+        let mut o = Descriptor::new(if outer { "OrGl" } else { "IrGl" });
+        o.push("enab", Item::Bool(g.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Md  ", blend_item("Scrn")).push("Clr ", rgb(g.color)).push("Opct", prc(g.opacity * 100.0)).push("GlwT", Item::Enum("BETE".into(), "SfBL".into())).push("Ckmt", pxl(0.0)).push("blur", pxl(g.size)).push("Nose", prc(0.0)).push("ShdN", prc(0.0)).push("AntA", Item::Bool(false)).push("Inpr", prc(50.0));
+        if !outer { o.push("glwS", Item::Enum("IGSr".into(), "SrcE".into())); }
+        Item::Desc(o)
+    };
+    if let Some(s) = &e.drop_shadow { d.push("DrSh", shadow(s, true)); }
+    if let Some(s) = &e.inner_shadow { d.push("IrSh", shadow(s, false)); }
+    if let Some(g) = &e.outer_glow { d.push("OrGl", glow(g, true)); }
+    if let Some(g) = &e.inner_glow { d.push("IrGl", glow(g, false)); }
+    if let Some(b) = &e.bevel {
+        let mut o = Descriptor::new("ebbl");
+        o.push("enab", Item::Bool(b.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("hglM", blend_item("Scrn")).push("hglC", rgb([1.0; 3])).push("hglO", prc(b.highlight_opacity * 100.0)).push("sdwM", blend_item("Mltp")).push("sdwC", rgb([0.0; 3])).push("sdwO", prc(b.shadow_opacity * 100.0)).push("bvlT", Item::Enum("bvlT".into(), "SfBL".into())).push("bvlS", Item::Enum("BESl".into(), match b.style { 1 => "OtrB", 2 => "Embs", _ => "InrB" }.into())).push("uglg", Item::Bool(false)).push("lagl", ang(b.angle)).push("Lald", ang(b.altitude)).push("srgR", prc(b.depth)).push("blur", pxl(b.size)).push("bvlD", Item::Enum("BESs".into(), "In  ".into())).push("Sftn", pxl(0.0)).push("useShape", Item::Bool(false)).push("useTexture", Item::Bool(false));
+        d.push("ebbl", Item::Desc(o));
+    }
+    if let Some(o) = &e.color_overlay {
+        let mut f = Descriptor::new("SoFi");
+        f.push("enab", Item::Bool(o.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Md  ", blend_item("Nrml")).push("Opct", prc(o.opacity * 100.0)).push("Clr ", rgb(o.color));
+        d.push("SoFi", Item::Desc(f));
+    }
+    if let Some(s) = &e.stroke {
+        let mut f = Descriptor::new("FrFX");
+        f.push("enab", Item::Bool(s.enabled)).push("present", Item::Bool(true)).push("showInDialog", Item::Bool(true)).push("Styl", Item::Enum("FStl".into(), match s.position { 1 => "InsF", 2 => "CtrF", _ => "OutF" }.into())).push("PntT", Item::Enum("FrFl".into(), "SClr".into())).push("Md  ", blend_item("Nrml")).push("Opct", prc(s.opacity * 100.0)).push("Sz  ", pxl(s.size)).push("Clr ", rgb(s.color));
+        d.push("FrFX", Item::Desc(f));
+    }
+    d
+}
+
+/// The effects an lfx2 descriptor describes; None when it carries nothing this app draws.
+pub fn effects_from_descriptor(d: &Descriptor) -> Option<Effects> {
+    let master = d.boolean("masterFXSwitch").unwrap_or(true);
+    let scale = d.number("Scl ").unwrap_or(100.0) / 100.0;
+    let on = |o: &Descriptor| master && o.boolean("enab").unwrap_or(true);
+    let mut e = Effects::default();
+    let shadow = |o: &Descriptor| Shadow { enabled: on(o), color: o.color("Clr ").unwrap_or([0.0; 3]), opacity: o.number("Opct").unwrap_or(75.0) / 100.0, angle: o.number("lagl").unwrap_or(120.0), distance: o.number("Dstn").unwrap_or(5.0) * scale, size: o.number("blur").unwrap_or(5.0) * scale };
+    let glow = |o: &Descriptor, outer: bool| Glow { enabled: on(o), color: o.color("Clr ").unwrap_or(if outer { [1.0, 1.0, 0.75] } else { [1.0, 1.0, 0.75] }), opacity: o.number("Opct").unwrap_or(75.0) / 100.0, size: o.number("blur").unwrap_or(5.0) * scale };
+    if let Some(o) = d.desc("DrSh") { e.drop_shadow = Some(shadow(o)); }
+    if let Some(o) = d.desc("IrSh") { e.inner_shadow = Some(shadow(o)); }
+    if let Some(o) = d.desc("OrGl") { e.outer_glow = Some(glow(o, true)); }
+    if let Some(o) = d.desc("IrGl") { e.inner_glow = Some(glow(o, false)); }
+    if let Some(o) = d.desc("ebbl") {
+        let style = match o.enum_value("bvlS") { Some("OtrB") => 1, Some("Embs") | Some("PlEb") => 2, _ => 0 };
+        e.bevel = Some(Bevel { enabled: on(o), style, depth: o.number("srgR").unwrap_or(100.0), size: o.number("blur").unwrap_or(5.0) * scale, angle: o.number("lagl").unwrap_or(120.0), altitude: o.number("Lald").unwrap_or(30.0), highlight_opacity: o.number("hglO").unwrap_or(75.0) / 100.0, shadow_opacity: o.number("sdwO").unwrap_or(75.0) / 100.0 });
+    }
+    if let Some(o) = d.desc("SoFi") { e.color_overlay = Some(Overlay { enabled: on(o), color: o.color("Clr ").unwrap_or([1.0, 0.0, 0.0]), opacity: o.number("Opct").unwrap_or(100.0) / 100.0 }); }
+    if let Some(o) = d.desc("FrFX") {
+        let position = match o.enum_value("Styl") { Some("InsF") => 1, Some("CtrF") => 2, _ => 0 };
+        e.stroke = Some(Stroke { enabled: on(o), size: o.number("Sz  ").unwrap_or(3.0) * scale, position, color: o.color("Clr ").unwrap_or([1.0, 0.0, 0.0]), opacity: o.number("Opct").unwrap_or(100.0) / 100.0 });
+    }
+    if e == Effects::default() { None } else { Some(e) }
+}
+
+/// The lfx2 block: version, descriptor version, descriptor.
+fn read_lfx2(block: &[u8]) -> Result<Option<Effects>> {
+    if block.len() < 8 { bail!("the block is too short"); }
+    let descriptor_version = u32::from_be_bytes(block[4..8].try_into().unwrap());
+    if descriptor_version != 16 { bail!("descriptor version {descriptor_version}"); }
+    let (d, _) = crate::psd_desc::parse(&block[8..])?;
+    Ok(effects_from_descriptor(&d))
+}
+
+/// The TySh block: the type's transform, its descriptor (text and engine data), and the warp.
+fn read_tysh(block: &[u8], resolution: f64) -> Result<crate::text::TextStyle> {
+    if block.len() < 2 + 48 + 2 + 4 { bail!("the block is too short"); }
+    let version = u16::from_be_bytes([block[0], block[1]]);
+    if version != 1 { bail!("type tool version {version}"); }
+    let f = |i: usize| f64::from_be_bytes(block[2 + i * 8..10 + i * 8].try_into().unwrap());
+    let (xx, yy) = (f(0), f(3));
+    let text_version = u16::from_be_bytes([block[50], block[51]]);
+    if text_version != 50 { bail!("text version {text_version}"); }
+    let (d, _) = crate::psd_desc::parse(&block[56..])?;
+    let text = d.text("Txt ").unwrap_or("").replace('\r', "\n");
+    let engine = d.data("EngineData").unwrap_or(&[]);
+    let mut style = crate::text::TextStyle { text, ..crate::text::TextStyle::default() };
+    // Points at the document's resolution, through the type's own scale.
+    let scale = if yy.abs() > 1e-6 { yy.abs() } else if xx.abs() > 1e-6 { xx.abs() } else { 1.0 };
+    let to_px = scale * resolution / 72.0;
+    if let Some(size) = engine_number(engine, b"/FontSize") { style.size = (size * to_px).clamp(1.0, 2000.0); }
+    if let Some(values) = engine_values(engine, b"/FillColor") { if values.len() >= 4 { style.color = [values[1].clamp(0.0, 1.0), values[2].clamp(0.0, 1.0), values[3].clamp(0.0, 1.0)]; } }
+    let font_index = engine_number(engine, b"/Font ").unwrap_or(0.0).max(0.0) as usize;
+    if let Some(name) = engine_font_names(engine).get(font_index) {
+        let lower = name.to_lowercase();
+        style.bold = lower.contains("bold") || lower.contains("black") || lower.contains("heavy") || engine_bool(engine, b"/FauxBold");
+        style.italic = lower.contains("italic") || lower.contains("oblique") || engine_bool(engine, b"/FauxItalic");
+        // "Helvetica-BoldOblique" and "HelveticaNeue-Light": the family is what comes before the dash, split on capitals.
+        let family = name.split('-').next().unwrap_or(name).to_string();
+        let mut spaced = String::new();
+        for (i, c) in family.chars().enumerate() { if i > 0 && c.is_uppercase() && !spaced.ends_with(' ') { spaced.push(' '); } spaced.push(c); }
+        style.family = if crate::text::families().iter().any(|f| f.eq_ignore_ascii_case(&family)) { family } else { spaced };
+    }
+    if !engine_bool(engine, b"/AutoLeading") { if let Some(leading) = engine_number(engine, b"/Leading") { if let Some(size) = engine_number(engine, b"/FontSize") { if size > 0.0 { style.leading = (leading / size).clamp(0.5, 5.0); } } } }
+    if let Some(tracking) = engine_number(engine, b"/Tracking") { style.tracking = tracking / 1000.0 * style.size; }
+    style.align = match engine_number(engine, b"/Justification").unwrap_or(0.0) as i32 { 1 => 2, 2 => 1, _ => 0 };
+    if engine_number(engine, b"/ShapeType").unwrap_or(0.0) as i32 == 1 { if let Some(b) = engine_values(engine, b"/BoxBounds") { if b.len() >= 4 { let w = (b[2] - b[0]).abs() * to_px; if w >= 1.0 { style.width = Some(w.round()); } } } }
+    Ok(style)
+}
+
+/// The number after `key` in engine data ("/FontSize 48.0").
+fn engine_number(data: &[u8], key: &[u8]) -> Option<f64> {
+    let at = find(data, key, 0)?;
+    let rest = &data[at + key.len()..];
+    let text: String = rest.iter().skip_while(|b| **b == b' ').take_while(|b| b.is_ascii_digit() || **b == b'.' || **b == b'-').map(|b| *b as char).collect();
+    text.parse().ok()
+}
+
+fn engine_bool(data: &[u8], key: &[u8]) -> bool {
+    find(data, key, 0).is_some_and(|at| data[at + key.len()..].iter().skip_while(|b| **b == b' ').take(4).map(|b| *b as char).collect::<String>() == "true")
+}
+
+/// The numbers in the first "[ ... ]" after `key`.
+fn engine_values(data: &[u8], key: &[u8]) -> Option<Vec<f64>> {
+    let at = find(data, key, 0)?;
+    let open = find(data, b"[", at)?;
+    let close = find(data, b"]", open)?;
+    Some(String::from_utf8_lossy(&data[open + 1..close]).split_whitespace().filter_map(|t| t.parse().ok()).collect())
+}
+
+/// The font names in the FontSet, in order.
+fn engine_font_names(data: &[u8]) -> Vec<String> {
+    let Some(start) = find(data, b"/FontSet", 0) else { return Vec::new() };
+    let mut names = Vec::new();
+    let mut at = start;
+    while let Some(n) = find(data, b"/Name (", at) {
+        let open = n + b"/Name (".len();
+        // Up to the closing parenthesis that is not escaped.
+        let mut i = open;
+        while i < data.len() && !(data[i] == b')' && data[i - 1] != b'\\') { i += 1; }
+        names.push(engine_string(&data[open..i.min(data.len())]));
+        at = i;
+        if names.len() > 256 { break; }
+    }
+    names
+}
+
+/// A string in engine data: UTF-16 with a byte order mark, escapes undone; or plain bytes.
+fn engine_string(raw: &[u8]) -> String {
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() { if raw[i] == b'\\' && i + 1 < raw.len() { bytes.push(raw[i + 1]); i += 2; } else { bytes.push(raw[i]); i += 1; } }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
+    } else { String::from_utf8_lossy(&bytes).to_string() }
+}
+
+fn find(data: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= data.len() { return None; }
+    data[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn effects_round_trip_through_lfx2_and_type_reads_from_tysh() {
+        let mut e = Effects::default();
+        e.drop_shadow = Some(Shadow { enabled: true, color: [0.1, 0.2, 0.3], opacity: 0.6, angle: 135.0, distance: 7.0, size: 9.0 });
+        e.stroke = Some(Stroke { enabled: true, size: 4.0, position: 1, color: [1.0, 1.0, 0.0], opacity: 0.8 });
+        e.bevel = Some(Bevel { enabled: true, style: 2, depth: 150.0, size: 6.0, angle: 90.0, altitude: 45.0, highlight_opacity: 0.5, shadow_opacity: 0.4 });
+        e.color_overlay = Some(Overlay { enabled: false, color: [0.0, 1.0, 0.0], opacity: 0.3 });
+        let bytes = crate::psd_desc::write(&effects_descriptor(&e));
+        let mut block = vec![0, 0, 0, 0, 0, 0, 0, 16];
+        block.extend_from_slice(&bytes);
+        let back = read_lfx2(&block).unwrap().unwrap();
+        let s = back.drop_shadow.unwrap();
+        assert!((s.color[0] - 0.1).abs() < 1e-9 && (s.opacity - 0.6).abs() < 1e-9 && s.angle == 135.0 && s.distance == 7.0 && s.size == 9.0);
+        let st = back.stroke.unwrap();
+        assert!(st.position == 1 && st.size == 4.0 && (st.opacity - 0.8).abs() < 1e-9);
+        let b = back.bevel.unwrap();
+        assert!(b.style == 2 && b.depth == 150.0 && b.altitude == 45.0 && (b.highlight_opacity - 0.5).abs() < 1e-9);
+        assert!(!back.color_overlay.unwrap().enabled);
+        // A TySh block: the transform, the text descriptor with engine data, and a warp.
+        let mut d = Descriptor::new("TxLr");
+        d.push("Txt ", Item::Text("Hello\rWorld".into()));
+        let mut name = vec![0xFEu8, 0xFF];
+        for u in "Helvetica-BoldOblique".encode_utf16() { name.extend_from_slice(&u.to_be_bytes()); }
+        let mut engine = b"<< /EngineDict << /StyleRun << /RunArray [ << /StyleSheet << /StyleSheetData << /Font 0 /FontSize 24.0 /AutoLeading false /Leading 36.0 /Tracking 50 /FillColor << /Type 1 /Values [ 1.0 0.5 0.25 0.0 ] >> >> >> >> ] >> /ParagraphRun << /RunArray [ << /ParagraphSheet << /Properties << /Justification 2 >> >> >> ] >> >> /ResourceDict << /FontSet [ << /Name (".to_vec();
+        engine.extend_from_slice(&name);
+        engine.extend_from_slice(b") /Script 0 >> ] >> /Rendered << /Shapes << /Children [ << /ShapeType 1 /Cookie << /Photoshop << /ShapeType 1 /BoxBounds [ 0.0 0.0 200.0 50.0 ] >> >> >> ] >> >> >>");
+        d.push("EngineData", Item::Data(engine));
+        let mut block = vec![0u8, 1];
+        for v in [2.0f64, 0.0, 0.0, 2.0, 10.0, 20.0] { block.extend_from_slice(&v.to_be_bytes()); }
+        block.extend_from_slice(&50u16.to_be_bytes());
+        block.extend_from_slice(&16u32.to_be_bytes());
+        block.extend_from_slice(&crate::psd_desc::write(&d));
+        let style = read_tysh(&block, 144.0).unwrap();
+        assert_eq!(style.text, "Hello\nWorld");
+        assert_eq!(style.size, 24.0 * 2.0 * 2.0, "points through the transform and the resolution");
+        assert!((style.color[0] - 0.5).abs() < 1e-9 && (style.color[1] - 0.25).abs() < 1e-9);
+        assert!(style.bold && style.italic);
+        assert_eq!(style.family, "Helvetica");
+        assert!((style.leading - 1.5).abs() < 1e-9);
+        assert!((style.tracking - 0.05 * 96.0).abs() < 1e-9);
+        assert_eq!(style.align, 1);
+        assert_eq!(style.width, Some(800.0));
+    }
+}

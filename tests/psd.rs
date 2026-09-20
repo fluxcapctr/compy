@@ -143,3 +143,35 @@ fn refuses_what_it_cannot_read() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&not_psd);
 }
+
+#[test]
+fn layer_styles_survive_a_psd_round_trip_and_type_is_flagged() {
+    use compositor::effects::{Effects, Shadow, Stroke};
+    let mut fixture = Fixture::new("psd-fx", 40, 30);
+    fixture.add(Spec { name: "Back", size: (40.0, 30.0), pixels: Some(solid(40, 30, WHITE)), ..Default::default() });
+    fixture.add(Spec { name: "Red", origin: (10.0, 5.0), size: (20.0, 20.0), pixels: Some(solid(20, 20, RED)), ..Default::default() });
+    let mut document = Document::new(fixture.load().unwrap()).unwrap();
+    let red = document.renderer.layers().iter().find(|l| l.name == "Red").unwrap().id;
+    let mut e = Effects::default();
+    e.drop_shadow = Some(Shadow { enabled: true, color: [0.0, 0.0, 0.0], opacity: 0.5, angle: 120.0, distance: 3.0, size: 4.0 });
+    e.stroke = Some(Stroke { enabled: true, size: 2.0, position: 0, color: [0.0, 0.0, 1.0], opacity: 1.0 });
+    document.set_effects(red, Some(&e)).unwrap();
+    let style = compositor::text::TextStyle { text: "Hi".into(), size: 12.0, ..compositor::text::TextStyle::default() };
+    document.add_text_layer(&style, 2.0, 2.0).unwrap();
+    let path = temp("fx.psd");
+    let warnings = document.export_psd(&path).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("written as pixels")), "{warnings:?}");
+    let (project, warnings) = psd::read(&path).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let back = project.manifest.layers.iter().find(|l| l.name == "Red").unwrap();
+    let effects = Effects::from_record(back.effects.as_ref().expect("the style came back")).unwrap();
+    let shadow = effects.drop_shadow.unwrap();
+    assert!(shadow.enabled && (shadow.opacity - 0.5).abs() < 1e-9 && shadow.distance == 3.0 && shadow.size == 4.0);
+    let stroke = effects.stroke.unwrap();
+    assert!(stroke.size == 2.0 && stroke.position == 0 && stroke.color == [0.0, 0.0, 1.0]);
+    // Reopened, the style renders: the stroke's blue sits just outside the red square.
+    let mut reopened = Document::new(project).unwrap();
+    let (px, w) = flat(&mut reopened);
+    assert_pixel(&px, w, 9, 15, [0, 0, 255, 255], 8);
+    let _ = std::fs::remove_file(&path);
+}
