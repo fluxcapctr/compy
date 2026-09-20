@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use cairo::ImageSurface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, Curves, ColorBalance, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground, Fade }
+pub enum Kind { AddNoise, Grain, LensCorrection, GradientMap, Levels, Curves, ColorBalance, ContentAwareFill, SpotHeal, Exposure, HueSaturation, GaussianBlur, MotionBlur, Invert, RemoveBackground, Fade, UnsharpMask, SmartSharpen, BrightnessContrast, Vibrance, BlackWhite, PhotoFilter, Threshold, Posterize }
 
 impl Kind {
     pub fn name(self) -> &'static str {
@@ -19,6 +19,8 @@ impl Kind {
             Kind::SpotHeal => "Heal Selection", Kind::Exposure => "Exposure", Kind::HueSaturation => "Hue/Saturation",
             Kind::GaussianBlur => "Gaussian Blur", Kind::MotionBlur => "Motion Blur", Kind::Invert => "Invert", Kind::RemoveBackground => "Remove Background",
             Kind::Curves => "Curves", Kind::ColorBalance => "Color Balance", Kind::Fade => "Fade",
+            Kind::UnsharpMask => "Unsharp Mask", Kind::SmartSharpen => "Smart Sharpen", Kind::BrightnessContrast => "Brightness/Contrast", Kind::Vibrance => "Vibrance",
+            Kind::BlackWhite => "Black & White", Kind::PhotoFilter => "Photo Filter", Kind::Threshold => "Threshold", Kind::Posterize => "Posterize",
         }
     }
     /// Filters that work on the selection itself rather than the layer's colors, and need one.
@@ -26,7 +28,7 @@ impl Kind {
     /// The room a blur needs around the layer to spread into: about three standard deviations, or half a
     /// streak (`FilterEdit.blurMargin`).
     pub fn margin(self, settings: &Settings) -> usize {
-        match self { Kind::GaussianBlur => (settings.radius * 3.0 + 2.0).ceil() as usize, Kind::MotionBlur => (settings.distance / 2.0 + 2.0).ceil() as usize, _ => 0 }
+        match self { Kind::GaussianBlur => (settings.radius * 3.0 + 2.0).ceil() as usize, Kind::MotionBlur => (settings.distance / 2.0 + 2.0).ceil() as usize, Kind::UnsharpMask | Kind::SmartSharpen => (settings.sharpen.radius * 3.0 + 2.0).ceil() as usize, _ => 0 }
     }
 }
 
@@ -57,11 +59,18 @@ pub struct Settings {
     /// Motion Blur streak length in layer pixels, 1 to 2000.
     pub distance: f64,
     pub matte: crate::matte::MatteSettings,
+    pub sharpen: Sharpen,
+    pub brightness: BrightnessContrast,
+    pub vibrance: Vibrance,
+    pub black_white: BlackWhite,
+    pub photo_filter: PhotoFilter,
+    pub threshold: Threshold,
+    pub posterize: Posterize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { curves: Curves::default(), balance: ColorBalance::default(), fade: 1.0, amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default() }
+        Settings { curves: Curves::default(), balance: ColorBalance::default(), fade: 1.0, amount: 10.0, gaussian: false, monochromatic: false, distortion: 0.0, grain: Grain::default(), gradient: GradientMap::default(), levels: Levels::default(), heal_mode: 0, seed: 0, exposure: Exposure::default(), hue_saturation: HueSaturation::default(), radius: 1.0, angle: 0.0, distance: 10.0, matte: Default::default(), sharpen: Sharpen::default(), brightness: BrightnessContrast::default(), vibrance: Vibrance::default(), black_white: BlackWhite::default(), photo_filter: PhotoFilter::default(), threshold: Threshold::default(), posterize: Posterize::default() }
     }
 }
 
@@ -78,7 +87,170 @@ impl Settings {
         s.matte = s.matte.normalized();
         s.fade = clamp(s.fade, 0.0, 1.0, 1.0);
         s.balance = s.balance.normalized();
+        s.sharpen = s.sharpen.normalized();
+        s.brightness = s.brightness.normalized();
+        s.vibrance = s.vibrance.normalized();
+        s.black_white = s.black_white.normalized();
+        s.photo_filter = s.photo_filter.normalized();
+        s.threshold = s.threshold.normalized();
+        s.posterize = s.posterize.normalized();
         s
+    }
+}
+
+/// Unsharp Mask and Smart Sharpen: the layer minus its blur, scaled by `amount` percent, added back
+/// where the difference passes `threshold` (Unsharp Mask) or on luminosity alone with small
+/// differences held back by `noise` (Smart Sharpen).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sharpen { pub amount: f64, pub radius: f64, pub threshold: f64, pub noise: f64 }
+impl Default for Sharpen { fn default() -> Self { Sharpen { amount: 100.0, radius: 1.0, threshold: 0.0, noise: 10.0 } } }
+impl Sharpen {
+    pub fn normalized(&self) -> Sharpen { Sharpen { amount: clamp(self.amount, 1.0, 500.0, 100.0), radius: clamp(self.radius, 0.1, 250.0, 1.0), threshold: clamp(self.threshold, 0.0, 255.0, 0.0), noise: clamp(self.noise, 0.0, 100.0, 10.0) } }
+}
+
+/// Brightness (-150 to 150) and Contrast (-50 to 100), as the Brightness/Contrast adjustment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrightnessContrast { pub brightness: f64, pub contrast: f64 }
+impl Default for BrightnessContrast { fn default() -> Self { BrightnessContrast { brightness: 0.0, contrast: 0.0 } } }
+impl BrightnessContrast {
+    pub fn normalized(&self) -> BrightnessContrast { BrightnessContrast { brightness: clamp(self.brightness, -150.0, 150.0, 0.0), contrast: clamp(self.contrast, -50.0, 100.0, 0.0) } }
+    pub fn is_identity(&self) -> bool { let n = self.normalized(); n.brightness == 0.0 && n.contrast == 0.0 }
+    /// One table for every channel: brightness lifts the midtones (a gamma-like curve that keeps black and
+    /// white in place), contrast steepens or flattens around the middle gray.
+    pub fn table(&self) -> [f32; 256] {
+        let n = self.normalized();
+        let factor = if n.contrast >= 0.0 { 1.0 + n.contrast / 100.0 * 1.5 } else { 1.0 + n.contrast / 100.0 };
+        let gamma = 2f64.powf(-n.brightness / 150.0 * 1.6);
+        let mut t = [0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let x = (i as f64 / 255.0).powf(gamma);
+            *v = ((x - 0.5) * factor + 0.5).clamp(0.0, 1.0) as f32;
+        }
+        t
+    }
+}
+
+/// Vibrance (boosts the least saturated colors most, skin least) and Saturation (everything alike).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vibrance { pub vibrance: f64, pub saturation: f64 }
+impl Default for Vibrance { fn default() -> Self { Vibrance { vibrance: 0.0, saturation: 0.0 } } }
+impl Vibrance {
+    pub fn normalized(&self) -> Vibrance { Vibrance { vibrance: clamp(self.vibrance, -100.0, 100.0, 0.0), saturation: clamp(self.saturation, -100.0, 100.0, 0.0) } }
+    pub fn is_identity(&self) -> bool { let n = self.normalized(); n.vibrance == 0.0 && n.saturation == 0.0 }
+    pub fn pixel(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let n = self.normalized();
+        let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
+        let luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+        let sat = max - min;
+        // Skin (orange hues) is protected: red dominant with green between red and blue.
+        let skin = if rgb[0] > rgb[1] && rgb[1] > rgb[2] { 1.0 - ((rgb[0] - rgb[2]).min(1.0)) * 0.5 } else { 1.0 };
+        let boost = n.vibrance / 100.0 * (1.0 - sat).max(0.0) * skin + n.saturation / 100.0;
+        let f = (1.0 + boost).max(0.0);
+        [luma + (rgb[0] - luma) * f, luma + (rgb[1] - luma) * f, luma + (rgb[2] - luma) * f].map(|v| v.clamp(0.0, 1.0))
+    }
+}
+
+/// Black & White: how bright each hue family comes out, in percent (Photoshop's defaults).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlackWhite { pub reds: f64, pub yellows: f64, pub greens: f64, pub cyans: f64, pub blues: f64, pub magentas: f64 }
+impl Default for BlackWhite { fn default() -> Self { BlackWhite { reds: 40.0, yellows: 60.0, greens: 40.0, cyans: 60.0, blues: 20.0, magentas: 80.0 } } }
+impl BlackWhite {
+    pub fn normalized(&self) -> BlackWhite {
+        let c = |v: f64, d: f64| clamp(v, -200.0, 300.0, d);
+        BlackWhite { reds: c(self.reds, 40.0), yellows: c(self.yellows, 60.0), greens: c(self.greens, 40.0), cyans: c(self.cyans, 60.0), blues: c(self.blues, 20.0), magentas: c(self.magentas, 80.0) }
+    }
+    /// The gray for a straight color: the darkest channel, plus the middle one's rise weighted by the mixed
+    /// hue it makes with the brightest, plus the brightest channel's rise weighted by its own hue.
+    pub fn gray(&self, rgb: [f64; 3]) -> f64 {
+        let n = self.normalized();
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let mid = r + g + b - max - min;
+        let (primary, secondary) = if r >= g && r >= b { (n.reds, if g >= b { n.yellows } else { n.magentas }) }
+            else if g >= r && g >= b { (n.greens, if r >= b { n.yellows } else { n.cyans }) }
+            else { (n.blues, if g >= r { n.cyans } else { n.magentas }) };
+        (min + (mid - min) * secondary / 100.0 + (max - mid) * primary / 100.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Photo Filter: a colored filter over the lens, at a density, keeping the brightness or not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotoFilter { pub color: [f64; 3], pub density: f64, pub preserve_luminosity: bool }
+impl Default for PhotoFilter { fn default() -> Self { PhotoFilter { color: [0.925, 0.541, 0.0], density: 25.0, preserve_luminosity: true } } }
+impl PhotoFilter {
+    pub fn normalized(&self) -> PhotoFilter { PhotoFilter { color: self.color.map(|c| clamp(c, 0.0, 1.0, 0.5)), density: clamp(self.density, 1.0, 100.0, 25.0), preserve_luminosity: self.preserve_luminosity } }
+    pub fn pixel(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let n = self.normalized();
+        let d = n.density / 100.0;
+        let mut out = [rgb[0] * (1.0 - d) + rgb[0] * n.color[0] * d, rgb[1] * (1.0 - d) + rgb[1] * n.color[1] * d, rgb[2] * (1.0 - d) + rgb[2] * n.color[2] * d];
+        if n.preserve_luminosity {
+            let before = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+            let after = 0.299 * out[0] + 0.587 * out[1] + 0.114 * out[2];
+            if after > 1e-6 { let k = before / after; out = out.map(|v| v * k); }
+        }
+        out.map(|v| v.clamp(0.0, 1.0))
+    }
+}
+
+/// Threshold: white at and above `level`, black below, by luminosity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Threshold { pub level: f64 }
+impl Default for Threshold { fn default() -> Self { Threshold { level: 128.0 } } }
+impl Threshold { pub fn normalized(&self) -> Threshold { Threshold { level: clamp(self.level, 1.0, 255.0, 128.0).round() } } }
+
+/// Posterize: each channel snapped to `levels` values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Posterize { pub levels: f64 }
+impl Default for Posterize { fn default() -> Self { Posterize { levels: 4.0 } } }
+impl Posterize {
+    pub fn normalized(&self) -> Posterize { Posterize { levels: clamp(self.levels, 2.0, 255.0, 4.0).round() } }
+    pub fn table(&self) -> [f32; 256] {
+        let q = self.normalized().levels;
+        let mut t = [0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() { *v = ((i as f64 * q / 256.0).floor() / (q - 1.0)).clamp(0.0, 1.0) as f32; }
+        t
+    }
+}
+
+/// Runs `f` on every pixel's straight color (0 to 1), keeping its alpha; premultiplied BGRA in and out.
+pub fn map_straight(pixels: &mut [u8], f: impl Fn([f64; 3]) -> [f64; 3]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a == 0 { continue; }
+        let straight = [((p[2] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0, ((p[1] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0, ((p[0] as u32 * 255 + a / 2) / a).min(255) as f64 / 255.0];
+        let out = f(straight).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u32);
+        p[2] = ((out[0] * a + 127) / 255) as u8;
+        p[1] = ((out[1] * a + 127) / 255) as u8;
+        p[0] = ((out[2] * a + 127) / 255) as u8;
+    }
+}
+
+/// Unsharp Mask on premultiplied pixels: the difference from a blur, scaled, added back where it passes
+/// the threshold. `luminosity_only` (Smart Sharpen) sharpens brightness and leaves color alone, with the
+/// smallest differences held back by `noise` percent so grain does not sharpen with the edges.
+pub fn sharpen(pixels: &mut [u8], w: usize, h: usize, s: &Sharpen, luminosity_only: bool) {
+    let s = s.normalized();
+    let mut blurred = pixels.to_vec();
+    crate::blur::gaussian(&mut blurred, w, h, 4, s.radius);
+    let amount = s.amount / 100.0;
+    for (p, b) in pixels.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
+        if p[3] == 0 { continue; }
+        if luminosity_only {
+            let lp = 0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64;
+            let lb = 0.114 * b[0] as f64 + 0.587 * b[1] as f64 + 0.299 * b[2] as f64;
+            let diff = lp - lb;
+            // Reduce Noise: differences below a few levels fade out rather than switch off.
+            let gate = (s.noise / 100.0) * 12.0;
+            let keep = if gate <= 0.0 { 1.0 } else { (diff.abs() / gate).min(1.0) };
+            let add = diff * amount * keep;
+            for k in 0..3 { p[k] = (p[k] as f64 + add).round().clamp(0.0, p[3] as f64) as u8; }
+        } else {
+            for k in 0..3 {
+                let diff = p[k] as f64 - b[k] as f64;
+                if diff.abs() < s.threshold { continue; }
+                p[k] = (p[k] as f64 + diff * amount).round().clamp(0.0, p[3] as f64) as u8;
+            }
+        }
     }
 }
 
@@ -310,6 +482,14 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
         Kind::Curves => Adjustment::Curves(settings.curves.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
         Kind::ColorBalance => settings.balance.apply(&mut pixels),
         Kind::Fade => bail!("Fade runs through the document, not as a pixel filter."),
+        Kind::UnsharpMask => sharpen(&mut pixels, w, h, &settings.sharpen, false),
+        Kind::SmartSharpen => sharpen(&mut pixels, w, h, &settings.sharpen, true),
+        Kind::BrightnessContrast => Adjustment::BrightnessContrast(settings.brightness.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::Vibrance => Adjustment::Vibrance(settings.vibrance.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::BlackWhite => Adjustment::BlackWhite(settings.black_white.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::PhotoFilter => Adjustment::PhotoFilter(settings.photo_filter.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::Threshold => Adjustment::Threshold(settings.threshold.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
+        Kind::Posterize => Adjustment::Posterize(settings.posterize.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
         Kind::HueSaturation => Adjustment::HueSaturation(settings.hue_saturation.clone()).apply(&mut pixels, w, h, (0.0, 0.0), 1.0),
     }
     if let Some(mask) = &coverage {
@@ -623,18 +803,30 @@ pub enum Adjustment {
     GradientMap(GradientMap),
     Grain { grain: Grain, seed: u32 },
     HueSaturation(HueSaturation),
+    BrightnessContrast(BrightnessContrast),
+    Vibrance(Vibrance),
+    BlackWhite(BlackWhite),
+    PhotoFilter(PhotoFilter),
+    Threshold(Threshold),
+    Posterize(Posterize),
 }
 
 impl Adjustment {
     pub fn kind_name(&self) -> &'static str {
-        match self { Adjustment::Levels(_) => "Levels", Adjustment::Curves(_) => "Curves", Adjustment::Exposure(_) => "Exposure", Adjustment::GradientMap(_) => "Gradient Map", Adjustment::Grain { .. } => "Grain", Adjustment::HueSaturation(_) => "Hue/Saturation" }
+        match self {
+            Adjustment::Levels(_) => "Levels", Adjustment::Curves(_) => "Curves", Adjustment::Exposure(_) => "Exposure", Adjustment::GradientMap(_) => "Gradient Map", Adjustment::Grain { .. } => "Grain", Adjustment::HueSaturation(_) => "Hue/Saturation",
+            Adjustment::BrightnessContrast(_) => "Brightness/Contrast", Adjustment::Vibrance(_) => "Vibrance", Adjustment::BlackWhite(_) => "Black & White", Adjustment::PhotoFilter(_) => "Photo Filter", Adjustment::Threshold(_) => "Threshold", Adjustment::Posterize(_) => "Posterize",
+        }
     }
 
     pub fn from_kind(kind: &str) -> Option<Adjustment> {
         Some(match kind {
             "Levels" => Adjustment::Levels(Levels::default()), "Curves" => Adjustment::Curves(Curves::default()), "Exposure" => Adjustment::Exposure(Exposure::default()),
             "Gradient Map" => Adjustment::GradientMap(GradientMap::default()), "Grain" => Adjustment::Grain { grain: Grain::default(), seed: 0 },
-            "Hue/Saturation" => Adjustment::HueSaturation(HueSaturation::default()), _ => return None,
+            "Hue/Saturation" => Adjustment::HueSaturation(HueSaturation::default()),
+            "Brightness/Contrast" => Adjustment::BrightnessContrast(BrightnessContrast::default()), "Vibrance" => Adjustment::Vibrance(Vibrance::default()),
+            "Black & White" => Adjustment::BlackWhite(BlackWhite::default()), "Photo Filter" => Adjustment::PhotoFilter(PhotoFilter::default()),
+            "Threshold" => Adjustment::Threshold(Threshold::default()), "Posterize" => Adjustment::Posterize(Posterize::default()), _ => return None,
         })
     }
 
@@ -692,6 +884,20 @@ impl Adjustment {
                 }
                 Adjustment::HueSaturation(hs)
             }
+            "Brightness/Contrast" => { let v = s.get("brightnessContrast"); Adjustment::BrightnessContrast(BrightnessContrast { brightness: num(v.and_then(|v| v.get("brightness")), 0.0), contrast: num(v.and_then(|v| v.get("contrast")), 0.0) }.normalized()) }
+            "Vibrance" => { let v = s.get("vibranceSettings"); Adjustment::Vibrance(Vibrance { vibrance: num(v.and_then(|v| v.get("vibrance")), 0.0), saturation: num(v.and_then(|v| v.get("saturation")), 0.0) }.normalized()) }
+            "Black & White" => {
+                let v = s.get("blackWhite");
+                let d = BlackWhite::default();
+                Adjustment::BlackWhite(BlackWhite { reds: num(v.and_then(|v| v.get("reds")), d.reds), yellows: num(v.and_then(|v| v.get("yellows")), d.yellows), greens: num(v.and_then(|v| v.get("greens")), d.greens), cyans: num(v.and_then(|v| v.get("cyans")), d.cyans), blues: num(v.and_then(|v| v.get("blues")), d.blues), magentas: num(v.and_then(|v| v.get("magentas")), d.magentas) }.normalized())
+            }
+            "Photo Filter" => {
+                let v = s.get("photoFilter");
+                let d = PhotoFilter::default();
+                Adjustment::PhotoFilter(PhotoFilter { color: color(v.and_then(|v| v.get("color")), d.color), density: num(v.and_then(|v| v.get("density")), d.density), preserve_luminosity: v.and_then(|v| v.get("preserveLuminosity")).and_then(Value::as_bool).unwrap_or(true) }.normalized())
+            }
+            "Threshold" => Adjustment::Threshold(Threshold { level: num(s.get("threshold").and_then(|v| v.get("level")), 128.0) }.normalized()),
+            "Posterize" => Adjustment::Posterize(Posterize { levels: num(s.get("posterize").and_then(|v| v.get("levels")), 4.0) }.normalized()),
             _ => return None,
         })
     }
@@ -708,7 +914,14 @@ impl Adjustment {
         let object = |v: Option<&Value>| v.is_none_or(Value::is_object);
         let mut ok = within(s.get("hue"), -360.0, 360.0) && within(s.get("saturation"), -100.0, 100.0) && within(s.get("lightness"), -100.0, 100.0) && boolean(s.get("colorize"));
         ok &= object(s.get("hsvSettings")) && object(s.get("levels")) && object(s.get("curves")) && object(s.get("exposureSettings")) && object(s.get("gradientMapSettings")) && object(s.get("grainSettings"));
+        ok &= object(s.get("brightnessContrast")) && object(s.get("vibranceSettings")) && object(s.get("blackWhite")) && object(s.get("photoFilter")) && object(s.get("threshold")) && object(s.get("posterize"));
         if !ok { return false; }
+        if let Some(v) = s.get("brightnessContrast") { ok &= within(v.get("brightness"), -150.0, 150.0) && within(v.get("contrast"), -50.0, 100.0); }
+        if let Some(v) = s.get("vibranceSettings") { ok &= within(v.get("vibrance"), -100.0, 100.0) && within(v.get("saturation"), -100.0, 100.0); }
+        if let Some(v) = s.get("blackWhite") { ok &= ["reds", "yellows", "greens", "cyans", "blues", "magentas"].iter().all(|k| within(v.get(*k), -200.0, 300.0)); }
+        if let Some(v) = s.get("photoFilter") { ok &= within(v.get("density"), 1.0, 100.0) && boolean(v.get("preserveLuminosity")); if let Some(c) = v.get("color") { ok &= c.is_object() && ["red", "green", "blue"].iter().all(|k| within(c.get(*k), 0.0, 1.0)); } }
+        if let Some(v) = s.get("threshold") { ok &= within(v.get("level"), 1.0, 255.0); }
+        if let Some(v) = s.get("posterize") { ok &= within(v.get("levels"), 2.0, 255.0); }
         if let Some(v) = s.get("hsvSettings") {
             ok &= v.get("range").is_none_or(|r| r.as_str().is_some_and(|r| COLOR_RANGES.contains(&r) || r == "Master")) && boolean(v.get("colorize")) && boolean(v.get("invertRange"));
             for key in ["adjustments", "bands"] { ok &= v.get(key).is_none_or(|d| d.is_array() || d.is_object()); }
@@ -767,6 +980,12 @@ impl Adjustment {
                 let bands: Vec<Value> = COLOR_RANGES.iter().flat_map(|r| { let b = h.band(r); [json!(r), json!({"falloffStart": b.falloff_start, "rangeStart": b.range_start, "rangeEnd": b.range_end, "falloffEnd": b.falloff_end})] }).collect();
                 settings.insert("hsvSettings".into(), json!({"range": h.range, "colorize": h.colorize, "invertRange": h.invert_range, "adjustments": adjustments, "bands": bands}));
             }
+            Adjustment::BrightnessContrast(b) => { settings.insert("brightnessContrast".into(), json!({"brightness": b.brightness, "contrast": b.contrast})); }
+            Adjustment::Vibrance(v) => { settings.insert("vibranceSettings".into(), json!({"vibrance": v.vibrance, "saturation": v.saturation})); }
+            Adjustment::BlackWhite(b) => { settings.insert("blackWhite".into(), json!({"reds": b.reds, "yellows": b.yellows, "greens": b.greens, "cyans": b.cyans, "blues": b.blues, "magentas": b.magentas})); }
+            Adjustment::PhotoFilter(p) => { settings.insert("photoFilter".into(), json!({"color": {"red": p.color[0], "green": p.color[1], "blue": p.color[2]}, "density": p.density, "preserveLuminosity": p.preserve_luminosity})); }
+            Adjustment::Threshold(t) => { settings.insert("threshold".into(), json!({"level": t.level})); }
+            Adjustment::Posterize(p) => { settings.insert("posterize".into(), json!({"levels": p.levels})); }
         }
         crate::format::Adjustment { kind: self.kind_name().to_string(), settings }
     }
@@ -804,6 +1023,12 @@ impl Adjustment {
                 ffi::grain(pixels, w, h, stride, grain.amount, grain.size, grain.roughness, *seed, origin, units_per_pixel);
                 ffi::swap_red_blue(pixels, stride, w, h);
             }
+            Adjustment::BrightnessContrast(b) => { if b.is_identity() { return; } let t = b.table(); apply_tables(pixels, w * h, &[t, t, t]); }
+            Adjustment::Vibrance(v) => { if v.is_identity() { return; } map_straight(pixels, |rgb| v.pixel(rgb)); }
+            Adjustment::BlackWhite(b) => { map_straight(pixels, |rgb| { let g = b.gray(rgb); [g, g, g] }); }
+            Adjustment::PhotoFilter(p) => { map_straight(pixels, |rgb| p.pixel(rgb)); }
+            Adjustment::Threshold(t) => { let level = t.normalized().level / 255.0; map_straight(pixels, |rgb| { let l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]; if l >= level { [1.0; 3] } else { [0.0; 3] } }); }
+            Adjustment::Posterize(p) => { let t = p.table(); apply_tables(pixels, w * h, &[t, t, t]); }
             Adjustment::HueSaturation(hs) => {
                 if hs.is_identity() { return; }
                 let dim = 33usize;

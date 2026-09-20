@@ -47,6 +47,8 @@ impl FilterDialog {
         let (kind, mut settings) = (match &adjustment {
             filters::Adjustment::Levels(_) => Kind::Levels, filters::Adjustment::Curves(_) => Kind::Curves, filters::Adjustment::Exposure(_) => Kind::Exposure,
             filters::Adjustment::GradientMap(_) => Kind::GradientMap, filters::Adjustment::Grain { .. } => Kind::Grain, filters::Adjustment::HueSaturation(_) => Kind::HueSaturation,
+            filters::Adjustment::BrightnessContrast(_) => Kind::BrightnessContrast, filters::Adjustment::Vibrance(_) => Kind::Vibrance, filters::Adjustment::BlackWhite(_) => Kind::BlackWhite,
+            filters::Adjustment::PhotoFilter(_) => Kind::PhotoFilter, filters::Adjustment::Threshold(_) => Kind::Threshold, filters::Adjustment::Posterize(_) => Kind::Posterize,
         }, Settings::default());
         match &adjustment {
             filters::Adjustment::Levels(l) => settings.levels = l.clone(),
@@ -55,6 +57,12 @@ impl FilterDialog {
             filters::Adjustment::Grain { grain, seed } => { settings.grain = grain.clone(); settings.seed = *seed; }
             filters::Adjustment::HueSaturation(h) => settings.hue_saturation = h.clone(),
             filters::Adjustment::Curves(c) => settings.curves = c.clone(),
+            filters::Adjustment::BrightnessContrast(b) => settings.brightness = b.clone(),
+            filters::Adjustment::Vibrance(v) => settings.vibrance = v.clone(),
+            filters::Adjustment::BlackWhite(b) => settings.black_white = b.clone(),
+            filters::Adjustment::PhotoFilter(p) => settings.photo_filter = p.clone(),
+            filters::Adjustment::Threshold(t) => settings.threshold = t.clone(),
+            filters::Adjustment::Posterize(p) => settings.posterize = p.clone(),
         }
         let canvas = gtk::DrawingArea::new();
         let this = Rc::new(FilterDialog {
@@ -342,6 +350,52 @@ impl FilterDialog {
             Kind::GaussianBlur => {
                 self.slider(&grid, 0, "Radius", 0.1, 250.0, 0.1, s.radius, |s, v| s.radius = v, self);
             }
+            Kind::UnsharpMask => {
+                self.slider(&grid, 0, "Amount %", 1.0, 500.0, 1.0, s.sharpen.amount, |s, v| s.sharpen.amount = v, self);
+                self.slider(&grid, 1, "Radius", 0.1, 250.0, 0.1, s.sharpen.radius, |s, v| s.sharpen.radius = v, self);
+                self.slider(&grid, 2, "Threshold", 0.0, 255.0, 1.0, s.sharpen.threshold, |s, v| s.sharpen.threshold = v, self);
+            }
+            Kind::SmartSharpen => {
+                self.slider(&grid, 0, "Amount %", 1.0, 500.0, 1.0, s.sharpen.amount, |s, v| s.sharpen.amount = v, self);
+                self.slider(&grid, 1, "Radius", 0.1, 250.0, 0.1, s.sharpen.radius, |s, v| s.sharpen.radius = v, self);
+                self.slider(&grid, 2, "Reduce Noise %", 0.0, 100.0, 1.0, s.sharpen.noise, |s, v| s.sharpen.noise = v, self);
+                grid.attach(&gtk::Label::builder().label("Sharpens brightness only, so colors stay put and grain stays quiet.").xalign(0.0).css_classes(["dim-label"]).build(), 0, 3, 3, 1);
+            }
+            Kind::BrightnessContrast => {
+                self.slider(&grid, 0, "Brightness", -150.0, 150.0, 1.0, s.brightness.brightness, |s, v| s.brightness.brightness = v, self);
+                self.slider(&grid, 1, "Contrast", -50.0, 100.0, 1.0, s.brightness.contrast, |s, v| s.brightness.contrast = v, self);
+            }
+            Kind::Vibrance => {
+                self.slider(&grid, 0, "Vibrance", -100.0, 100.0, 1.0, s.vibrance.vibrance, |s, v| s.vibrance.vibrance = v, self);
+                self.slider(&grid, 1, "Saturation", -100.0, 100.0, 1.0, s.vibrance.saturation, |s, v| s.vibrance.saturation = v, self);
+            }
+            Kind::BlackWhite => {
+                self.slider(&grid, 0, "Reds", -200.0, 300.0, 1.0, s.black_white.reds, |s, v| s.black_white.reds = v, self);
+                self.slider(&grid, 1, "Yellows", -200.0, 300.0, 1.0, s.black_white.yellows, |s, v| s.black_white.yellows = v, self);
+                self.slider(&grid, 2, "Greens", -200.0, 300.0, 1.0, s.black_white.greens, |s, v| s.black_white.greens = v, self);
+                self.slider(&grid, 3, "Cyans", -200.0, 300.0, 1.0, s.black_white.cyans, |s, v| s.black_white.cyans = v, self);
+                self.slider(&grid, 4, "Blues", -200.0, 300.0, 1.0, s.black_white.blues, |s, v| s.black_white.blues = v, self);
+                self.slider(&grid, 5, "Magentas", -200.0, 300.0, 1.0, s.black_white.magentas, |s, v| s.black_white.magentas = v, self);
+            }
+            Kind::PhotoFilter => {
+                grid.attach(&gtk::Label::builder().label("Filter").xalign(0.0).build(), 0, 0, 1, 1);
+                let presets: [(&str, [f64; 3]); 8] = [("Warming (85)", [0.925, 0.541, 0.0]), ("Warming (81)", [0.922, 0.694, 0.0]), ("Cooling (80)", [0.0, 0.427, 1.0]), ("Cooling (82)", [0.0, 0.706, 1.0]), ("Red", [0.918, 0.098, 0.106]), ("Yellow", [0.976, 0.910, 0.0]), ("Green", [0.098, 0.694, 0.298]), ("Sepia", [0.675, 0.475, 0.16])];
+                let names: Vec<&str> = presets.iter().map(|p| p.0).collect();
+                let preset = gtk::DropDown::from_strings(&names);
+                if let Some(i) = presets.iter().position(|p| p.1 == s.photo_filter.color) { preset.set_selected(i as u32); }
+                { let this = self.clone(); preset.connect_selected_notify(move |d| { this.settings.borrow_mut().photo_filter.color = presets[d.selected() as usize].1; this.schedule(); }); }
+                grid.attach(&preset, 1, 0, 2, 1);
+                self.slider(&grid, 1, "Density %", 1.0, 100.0, 1.0, s.photo_filter.density, |s, v| s.photo_filter.density = v, self);
+                let keep = gtk::CheckButton::builder().label("Preserve Luminosity").active(s.photo_filter.preserve_luminosity).build();
+                { let this = self.clone(); keep.connect_toggled(move |c| { this.settings.borrow_mut().photo_filter.preserve_luminosity = c.is_active(); this.schedule(); }); }
+                grid.attach(&keep, 1, 2, 2, 1);
+            }
+            Kind::Threshold => {
+                self.slider(&grid, 0, "Level", 1.0, 255.0, 1.0, s.threshold.level, |s, v| s.threshold.level = v, self);
+            }
+            Kind::Posterize => {
+                self.slider(&grid, 0, "Levels", 2.0, 255.0, 1.0, s.posterize.levels, |s, v| s.posterize.levels = v, self);
+            }
             Kind::MotionBlur => {
                 self.slider(&grid, 0, "Angle", -90.0, 90.0, 1.0, s.angle, |s, v| s.angle = v, self);
                 self.slider(&grid, 1, "Distance", 1.0, 2000.0, 1.0, s.distance, |s, v| s.distance = v, self);
@@ -553,6 +607,12 @@ impl FilterDialog {
             filters::Adjustment::GradientMap(_) => filters::Adjustment::GradientMap(s.gradient.clone()),
             filters::Adjustment::Grain { .. } => filters::Adjustment::Grain { grain: s.grain.clone(), seed: s.seed },
             filters::Adjustment::HueSaturation(_) => filters::Adjustment::HueSaturation(s.hue_saturation.clone()),
+            filters::Adjustment::BrightnessContrast(_) => filters::Adjustment::BrightnessContrast(s.brightness.clone()),
+            filters::Adjustment::Vibrance(_) => filters::Adjustment::Vibrance(s.vibrance.clone()),
+            filters::Adjustment::BlackWhite(_) => filters::Adjustment::BlackWhite(s.black_white.clone()),
+            filters::Adjustment::PhotoFilter(_) => filters::Adjustment::PhotoFilter(s.photo_filter.clone()),
+            filters::Adjustment::Threshold(_) => filters::Adjustment::Threshold(s.threshold.clone()),
+            filters::Adjustment::Posterize(_) => filters::Adjustment::Posterize(s.posterize.clone()),
         })
     }
 

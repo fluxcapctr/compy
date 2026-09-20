@@ -203,7 +203,7 @@ pub struct Adjustment {
     pub settings: serde_json::Map<String, serde_json::Value>,
 }
 
-pub const ADJUSTMENT_KINDS: [&str; 6] = ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain"];
+pub const ADJUSTMENT_KINDS: [&str; 12] = ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain", "Brightness/Contrast", "Vibrance", "Black & White", "Photo Filter", "Threshold", "Posterize"];
 
 /// Swift writes UUIDs in uppercase; so do we, so files round-trip byte for byte where it matters.
 fn upper_uuid<S: Serializer>(id: &Uuid, s: S) -> Result<S::Ok, S::Error> { s.serialize_str(&id.hyphenated().to_string().to_uppercase()) }

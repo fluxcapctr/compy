@@ -222,6 +222,23 @@ height and resolution, and Open. Return with
 the Move tool puts the transform handles away until the next click; View > Transform Controls
 (Ctrl+Shift+H) turns them off altogether. F1 lists every shortcut.
 
+**Sharpening, simple adjustments, Dodge and Burn, Stroke, Color Range, Align.** Filter > Unsharp Mask
+(amount, radius, threshold) and Smart Sharpen (amount, radius, reduce noise; it sharpens brightness only,
+so colors and grain stay put). Image > Brightness/Contrast, Vibrance (saturation that spares skin and
+already vivid colors), Black & White (how bright each hue family comes out, at Photoshop's defaults),
+Photo Filter (warming, cooling and color presets with a density, preserving luminosity), Threshold and
+Posterize, each also a New Adjustment Layer kind that saves in the project. The Dodge tool (O) lightens,
+Burn darkens and Sponge saturates or desaturates under the brush tip, weighted to the shadows, midtones
+or highlights, with the brush opacity as exposure. Edit > Stroke outlines the selection in the foreground
+color at a width, inside, centered or outside the edge (on a mask it paints white or black). Select > Color
+Range selects every pixel within a fuzziness of the foreground color, from the composite or the active
+layer. Layer > Align moves the selected layers' edges or centers to the selection's bounds, or the canvas,
+and Distribute spaces three or more evenly. Compy has all of these as tools: filter kinds `unsharp_mask`,
+`smart_sharpen`, `brightness_contrast`, `vibrance`, `black_white`, `photo_filter`, `threshold`,
+`posterize`, adjustment_layer with the same kinds, `stroke_selection`, `select_color_range`,
+`align_layers` and `distribute_layers`. Script flags: `--filter unsharp|sharpen|brightness|vibrance|bw|photo|threshold|posterize`,
+`--tool dodge`.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

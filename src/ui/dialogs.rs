@@ -129,6 +129,33 @@ pub fn amount(parent: &gtk::Window, title: &str, label: &str, done: impl Fn(i32)
     window.present();
 }
 
+/// Edit > Stroke: width, where the line sits on the selection edge, and opacity; the color is the foreground.
+pub fn stroke(parent: &gtk::Window, done: impl Fn(f64, u32, f64) + 'static) {
+    let (window, grid, ok) = dialog(parent, "Stroke");
+    let width = spin(&grid, 0, "Width (px)", 1.0, 250.0, 1.0, 3.0, 0);
+    grid.attach(&gtk::Label::builder().label("Location").xalign(0.0).build(), 0, 1, 1, 1);
+    let position = gtk::DropDown::from_strings(&["Inside", "Center", "Outside"]);
+    position.set_selected(1);
+    grid.attach(&position, 1, 1, 1, 1);
+    let opacity = spin(&grid, 2, "Opacity %", 1.0, 100.0, 1.0, 100.0, 0);
+    grid.attach(&gtk::Label::builder().label("Painted in the foreground color on the active layer.").xalign(0.0).css_classes(["dim-label"]).build(), 0, 3, 2, 1);
+    let w = window.clone();
+    ok.connect_clicked(move |_| { done(width.value(), position.selected(), opacity.value() / 100.0); w.close(); });
+    window.present();
+}
+
+/// Select > Color Range: how far from the foreground color still counts, and what to sample.
+pub fn color_range(parent: &gtk::Window, done: impl Fn(f64, bool) + 'static) {
+    let (window, grid, ok) = dialog(parent, "Color Range");
+    let fuzziness = spin(&grid, 0, "Fuzziness", 0.0, 200.0, 1.0, 40.0, 0);
+    let all = gtk::CheckButton::builder().label("Sample all layers").active(true).build();
+    grid.attach(&all, 1, 1, 1, 1);
+    grid.attach(&gtk::Label::builder().label("Selects every pixel near the foreground color; pick it with the Eyedropper first.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build(), 0, 2, 2, 1);
+    let w = window.clone();
+    ok.connect_clicked(move |_| { done(fuzziness.value(), all.is_active()); w.close(); });
+    window.present();
+}
+
 /// A text field, for renaming.
 pub fn text(parent: &gtk::Window, title: &str, label: &str, initial: &str, done: impl Fn(String) + 'static) {
     let (window, grid, ok) = dialog(parent, title);

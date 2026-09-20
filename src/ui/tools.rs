@@ -7,10 +7,10 @@ use gtk::glib;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Gradient, Pen, Type, Shape, Hand, Zoom }
+pub enum Tool { Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Blur, Dodge, Gradient, Pen, Type, Shape, Hand, Zoom }
 
 impl Tool {
-    pub const ALL: [Tool; 17] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Gradient, Tool::Pen, Tool::Type, Tool::Shape, Tool::Hand, Tool::Zoom];
+    pub const ALL: [Tool; 18] = [Tool::Move, Tool::Marquee, Tool::Lasso, Tool::Wand, Tool::Crop, Tool::Eyedropper, Tool::Brush, Tool::Eraser, Tool::Heal, Tool::Clone, Tool::Blur, Tool::Dodge, Tool::Gradient, Tool::Pen, Tool::Type, Tool::Shape, Tool::Hand, Tool::Zoom];
     pub fn help(self) -> &'static str {
         match self {
             Tool::Move => "Move / Transform (V): drag to move; handles scale, the top handle rotates; Shift constrains; Alt scales from the center; Ctrl-click picks the layer under the pointer; arrow keys nudge",
@@ -22,6 +22,7 @@ impl Tool {
             Tool::Heal => "Spot Healing Brush (J): paint over a blemish; it is rebuilt from its surroundings",
             Tool::Clone => "Clone Stamp (S): Alt-click a source, then paint copies of it",
             Tool::Blur => "Smear (R): Liquify pushes pixels, Blur softens, Smudge drags color",
+            Tool::Dodge => "Dodge / Burn / Sponge (O): paint to lighten, darken, or change the saturation; the options pick the mode and the tonal range; brush opacity is the exposure",
             Tool::Crop => "Crop (C): drag a frame, then Return crops the canvas to it; edges snap to layers; Alt keeps the center; Escape cancels",
             Tool::Eyedropper => "Eyedropper (I): click to pick the foreground color from the canvas; Alt-click sets the background color",
             Tool::Gradient => "Gradient (G): drag a line to fill the layer (or its mask) with a gradient inside the selection; Shift snaps the angle",
@@ -34,8 +35,8 @@ impl Tool {
     }
     /// The tool's name with its key, as the rail's tooltip shows it: "Move (V)".
     pub fn name(self) -> &'static str { self.help().split(':').next().unwrap_or("") }
-    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Gradient => 'g', Tool::Pen => 'p', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
-    pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur) }
+    pub fn key(self) -> char { match self { Tool::Move => 'v', Tool::Marquee => 'm', Tool::Lasso => 'l', Tool::Wand => 'w', Tool::Crop => 'c', Tool::Eyedropper => 'i', Tool::Brush => 'b', Tool::Eraser => 'e', Tool::Heal => 'j', Tool::Clone => 's', Tool::Blur => 'r', Tool::Dodge => 'o', Tool::Gradient => 'g', Tool::Pen => 'p', Tool::Type => 't', Tool::Shape => 'u', Tool::Hand => 'h', Tool::Zoom => 'z' } }
+    pub fn is_brush(self) -> bool { matches!(self, Tool::Brush | Tool::Eraser | Tool::Heal | Tool::Clone | Tool::Blur | Tool::Dodge) }
     pub fn is_selection(self) -> bool { matches!(self, Tool::Marquee | Tool::Lasso | Tool::Wand) }
 }
 
@@ -404,6 +405,19 @@ impl OptionsBar {
         { let doc = doc.clone(); blur_mode.connect_selected_notify(move |m| { if let Ok(mut d) = doc.try_borrow_mut() { d.blur_mode = m.selected(); } }); }
         blur.append(&blur_mode);
         extra.add_named(&blur, Some("blur"));
+        let dodge = row();
+        dodge.append(&gtk::Label::new(Some("Mode")));
+        let dodge_mode = gtk::DropDown::from_strings(&["Dodge", "Burn", "Saturate", "Desaturate"]);
+        dodge_mode.set_tooltip_text(Some("Dodge lightens, Burn darkens; Saturate and Desaturate are the Sponge"));
+        { let doc = doc.clone(); dodge_mode.connect_selected_notify(move |m| { if let Ok(mut d) = doc.try_borrow_mut() { d.dodge_mode = m.selected(); } }); }
+        dodge.append(&dodge_mode);
+        dodge.append(&gtk::Label::new(Some("Range")));
+        let dodge_range = gtk::DropDown::from_strings(&["Shadows", "Midtones", "Highlights"]);
+        dodge_range.set_selected(1);
+        dodge_range.set_tooltip_text(Some("Which tones Dodge and Burn work on most"));
+        { let doc = doc.clone(); dodge_range.connect_selected_notify(move |m| { if let Ok(mut d) = doc.try_borrow_mut() { d.dodge_range = m.selected(); } }); }
+        dodge.append(&dodge_range);
+        extra.add_named(&dodge, Some("dodge"));
         let heal = row();
         heal.append(&gtk::Label::new(Some("Type")));
         let mode = gtk::DropDown::from_strings(&["Content-Aware", "Create Texture", "Proximity Match"]);
@@ -547,7 +561,7 @@ impl OptionsBar {
                 self.widget.set_visible_child_name("brushes");
                 if let Some(brushes) = self.widget.child_by_name("brushes") {
                     if let Some(extra) = brushes.last_child().and_downcast::<gtk::Stack>() {
-                        extra.set_visible_child_name(match t { Tool::Brush => "brush", Tool::Eraser => "eraser", Tool::Heal => "heal", Tool::Clone => "clone", _ => "blur" });
+                        extra.set_visible_child_name(match t { Tool::Brush => "brush", Tool::Eraser => "eraser", Tool::Heal => "heal", Tool::Clone => "clone", Tool::Dodge => "dodge", _ => "blur" });
                     }
                 }
             }

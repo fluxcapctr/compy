@@ -235,6 +235,15 @@ fn draw(tool: Tool, cr: &cairo::Context) {
             cr.close_path();
             cr.fill().ok();
         }
+        Tool::Dodge => {
+            // A lollipop, as Photoshop draws Dodge: a ring on a stick.
+            cr.set_line_width(2.0);
+            cr.arc(10.0, 7.0, 4.5, 0.0, TAU);
+            cr.stroke().ok();
+            cr.set_line_width(2.4);
+            cr.move_to(10.0, 11.5); cr.line_to(10.0, 18.0);
+            cr.stroke().ok();
+        }
         Tool::Zoom => {
             cr.set_line_width(2.2);
             cr.arc(8.5, 8.5, 5.2, 0.0, TAU);

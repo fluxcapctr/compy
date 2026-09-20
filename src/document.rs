@@ -1425,6 +1425,8 @@ pub enum StrokeKind {
     /// The sample is taken when the stroke starts, from the active layer or every visible layer.
     Clone { offset: (f64, f64), all_layers: bool },
     Blur,
+    Dodge { burn: bool, range: u8 },
+    Sponge { desaturate: bool },
 }
 
 impl Document {
@@ -1536,6 +1538,8 @@ impl Document {
                 let sample = self.sample(false)?;
                 crate::brush::Kind::Blur { sample: std::rc::Rc::new(crate::blur::LazyBlur::new(sample.pixels, sample.width, sample.height, sigma)) }
             }
+            StrokeKind::Dodge { burn, range } => crate::brush::Kind::Dodge { burn, range },
+            StrokeKind::Sponge { desaturate } => crate::brush::Kind::Sponge { desaturate },
         };
         let size = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
         let canvas = (self.width() as f64, self.height() as f64);
@@ -2878,6 +2882,147 @@ impl Document {
     }
 
     /// Expand (positive) or Contract (negative) the selection by whole pixels.
+    /// Edit > Stroke: a line of `width` pixels in `color` along the selection's edge, inside it
+    /// (`position` 0), centered on it (1) or outside it (2), at `opacity`, painted onto the active layer
+    /// (or its mask when that is the target).
+    pub fn stroke_selection(&mut self, width: f64, color: [f64; 3], position: u32, opacity: f64) -> Result<()> {
+        let Some(current) = self.selection.clone() else { bail!("Make a selection first.") };
+        if current.is_empty() { bail!("Make a selection first."); }
+        if !(1.0..=250.0).contains(&width) { bail!("The stroke width runs from 1 to 250 pixels."); }
+        let w = width.round() as i32;
+        let band = match position {
+            0 => { let inner = current.resized(-w)?; current.combined(&inner, Mode::Subtract)? }
+            2 => { let outer = current.resized(w)?; outer.combined(&current, Mode::Subtract)? }
+            _ => { let half = (w / 2).max(1); let outer = current.resized(half)?; let inner = current.resized(-(w - half))?; outer.combined(&inner, Mode::Subtract)? }
+        };
+        let opacity = opacity.clamp(0.0, 1.0);
+        if let Some((id, mask, grid)) = self.active_mask() {
+            // On a mask the stroke is white or black through the band, as Fill would paint it.
+            let _ = (id, mask, grid);
+            self.begin_edit("Stroke");
+            let saved = self.selection.replace(band);
+            let result = self.fill(color);
+            self.selection = saved;
+            return match result { Ok(()) => { self.end_edit(); Ok(()) } Err(e) => { self.abort_edit(); Err(e) } };
+        }
+        let Some(id) = self.active else { bail!("Select a layer first.") };
+        let layer = self.renderer.layer(id).clone();
+        if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
+        let (gw, gh) = self.renderer.image_size(id).unwrap_or((layer.transform.size.0.round().max(1.0) as i32, layer.transform.size.1.round().max(1.0) as i32));
+        let result = new_argb(gw, gh)?;
+        {
+            let cr = Context::new(&result)?;
+            if let Some(image) = self.renderer.image(id) { cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
+            let coverage = band.coverage_on_layer(&layer.transform, gw, gh)?;
+            cr.set_source_rgba(color[0], color[1], color[2], opacity);
+            cr.mask_surface(&coverage, 0.0, 0.0)?;
+        }
+        self.begin_edit("Stroke");
+        self.renderer.set_image(id, result);
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Select > Color Range: every pixel within `fuzziness` (0 to 200) of `color`, softly at the edge of
+    /// that distance, from the composite or from the active layer alone.
+    pub fn select_color_range(&mut self, color: [f64; 3], fuzziness: f64, all_layers: bool, mode: Mode) -> Result<()> {
+        let (w, h) = (self.width(), self.height());
+        let fuzz = fuzziness.clamp(0.0, 200.0);
+        let sample = new_argb(w, h)?;
+        {
+            let cr = Context::new(&sample)?;
+            cr.rectangle(0.0, 0.0, w as f64, h as f64);
+            cr.clip();
+            if all_layers { self.renderer.draw(&cr)?; }
+            else if let Some(id) = self.active.filter(|id| !self.renderer.layer(*id).is_group()) { self.renderer.draw_layer_plain(id, &cr)?; }
+            else { bail!("Select a layer first, or sample all layers."); }
+        }
+        let target = color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
+        let (wu, hu) = (w as usize, h as usize);
+        let mut packed = vec![0u8; wu * hu];
+        let mut count = 0usize;
+        with_bytes(&sample, |data, stride| {
+            for y in 0..hu {
+                for x in 0..wu {
+                    let p = &data[y * stride + x * 4..y * stride + x * 4 + 4];
+                    let a = p[3] as f64;
+                    if a <= 0.0 { continue; }
+                    let straight = [p[2] as f64 * 255.0 / a, p[1] as f64 * 255.0 / a, p[0] as f64 * 255.0 / a];
+                    // The distance is the largest channel difference; full coverage inside half the
+                    // fuzziness, fading to none at the fuzziness itself.
+                    let d = (straight[0] - target[0]).abs().max((straight[1] - target[1]).abs()).max((straight[2] - target[2]).abs());
+                    let c = if fuzz <= 0.0 { if d < 0.5 { 1.0 } else { 0.0 } } else { ((fuzz - d) / (fuzz * 0.5)).clamp(0.0, 1.0) };
+                    let v = (c * a).round() as u8;
+                    if v > 0 { count += 1; }
+                    packed[y * wu + x] = v;
+                }
+            }
+        })?;
+        if count == 0 {
+            if mode == Mode::Replace { self.deselect(); }
+            bail!("No pixels are within {} of that color.", fuzz.round());
+        }
+        let shape = Selection::from_packed(&packed, w, h)?;
+        self.apply_selection(shape, mode, "Color Range")
+    }
+
+    /// The layers an alignment works on: every selected layer, or the active one.
+    fn alignment_targets(&self) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self.selected.iter().copied().filter(|id| self.has_layer(*id) && !self.renderer.layer(*id).is_group()).collect();
+        if ids.is_empty() { if let Some(a) = self.active.filter(|a| !self.renderer.layer(*a).is_group()) { ids.push(a); } }
+        ids.sort_by_key(|id| self.renderer.layer_index(*id));
+        ids
+    }
+
+    /// Layer > Align: the selected layers' edges or centers to the selection's bounds, or to the canvas.
+    /// `edge` is left, center, right, top, middle or bottom.
+    pub fn align_layers(&mut self, edge: &str) -> Result<()> {
+        let ids = self.alignment_targets();
+        if ids.is_empty() { bail!("Select a layer first."); }
+        let frame = match self.selection.as_ref().and_then(|s| s.bounds) { Some((x0, y0, x1, y1)) => (x0 as f64, y0 as f64, x1 as f64, y1 as f64), None => (0.0, 0.0, self.width() as f64, self.height() as f64) };
+        self.begin_edit("Align Layers");
+        for id in ids {
+            let t = self.renderer.layer(id).transform;
+            let (bx0, by0, bx1, by1) = t.bounds();
+            let (dx, dy) = match edge {
+                "left" => (frame.0 - bx0, 0.0),
+                "center" => ((frame.0 + frame.2) / 2.0 - (bx0 + bx1) / 2.0, 0.0),
+                "right" => (frame.2 - bx1, 0.0),
+                "top" => (0.0, frame.1 - by0),
+                "middle" => (0.0, (frame.1 + frame.3) / 2.0 - (by0 + by1) / 2.0),
+                "bottom" => (0.0, frame.3 - by1),
+                other => { self.abort_edit(); bail!("unknown edge {other}; use left, center, right, top, middle or bottom") }
+            };
+            if dx == 0.0 && dy == 0.0 { continue; }
+            let mut moved = t;
+            moved.origin = crate::format::Point(t.origin.0 + dx.round(), t.origin.1 + dy.round());
+            self.set_transform(id, moved, "Align Layers");
+        }
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Layer > Distribute: three or more selected layers spaced evenly by their centers, left to right
+    /// or top to bottom, the outermost two staying put.
+    pub fn distribute_layers(&mut self, horizontal: bool) -> Result<()> {
+        let ids = self.alignment_targets();
+        if ids.len() < 3 { bail!("Select at least three layers to distribute."); }
+        let mut centers: Vec<(Uuid, f64)> = ids.iter().map(|id| { let (x0, y0, x1, y1) = self.renderer.layer(*id).transform.bounds(); (*id, if horizontal { (x0 + x1) / 2.0 } else { (y0 + y1) / 2.0 }) }).collect();
+        centers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let (first, last) = (centers[0].1, centers[centers.len() - 1].1);
+        let step = (last - first) / (centers.len() - 1) as f64;
+        self.begin_edit("Distribute Layers");
+        for (i, (id, center)) in centers.iter().enumerate() {
+            let delta = (first + step * i as f64 - center).round();
+            if delta == 0.0 { continue; }
+            let mut t = self.renderer.layer(*id).transform;
+            if horizontal { t.origin.0 += delta; } else { t.origin.1 += delta; }
+            self.set_transform(*id, t, "Distribute Layers");
+        }
+        self.end_edit();
+        Ok(())
+    }
+
     pub fn resize_selection(&mut self, amount: i32) -> Result<()> {
         let Some(current) = &self.selection else { return Ok(()) };
         if current.is_empty() || amount == 0 || amount.abs() > 500 { return Ok(()); }

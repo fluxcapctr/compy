@@ -78,11 +78,16 @@ pub enum Kind {
     Clone { sample: Rc<Sample>, offset: (f64, f64), replaces: bool },
     /// Blur: the layer softened, painted in place through the tip.
     Blur { sample: Rc<LazyBlur> },
+    /// Dodge lightens and Burn darkens what is under the tip, weighted toward the shadows (0), midtones (1)
+    /// or highlights (2); the brush opacity is the exposure.
+    Dodge { burn: bool, range: u8 },
+    /// Sponge saturates or desaturates what is under the tip; the brush opacity is the flow.
+    Sponge { desaturate: bool },
 }
 
 impl Kind {
     pub fn name(&self) -> &'static str {
-        match self { Kind::Paint => "Brush Stroke", Kind::Erase => "Erase", Kind::Heal { .. } => "Spot Healing", Kind::Clone { .. } => "Clone Stamp", Kind::Blur { .. } => "Blur" }
+        match self { Kind::Paint => "Brush Stroke", Kind::Erase => "Erase", Kind::Heal { .. } => "Spot Healing", Kind::Clone { .. } => "Clone Stamp", Kind::Blur { .. } => "Blur", Kind::Dodge { burn: false, .. } => "Dodge", Kind::Dodge { burn: true, .. } => "Burn", Kind::Sponge { .. } => "Sponge" }
     }
 }
 
@@ -501,6 +506,33 @@ impl Stroke {
                         Kind::Blur { .. } => {
                             // Filled below from the blurred region, one block per tile rather than per pixel.
                             o.copy_from_slice(base);
+                        }
+                        Kind::Dodge { burn, range } => {
+                            // On the straight color: toward white (dodge) or black (burn) by the exposure,
+                            // weighted by how much the pixel belongs to the chosen tonal range.
+                            let alpha = base[3] as f64;
+                            if alpha <= 0.0 { o.copy_from_slice(base); continue; }
+                            let straight = [base[2] as f64 / alpha, base[1] as f64 / alpha, base[0] as f64 / alpha];
+                            let l = 0.299 * straight[0] + 0.587 * straight[1] + 0.114 * straight[2];
+                            let weight = match range { 0 => (1.0 - l).powi(2), 2 => l.powi(2), _ => 1.0 - (2.0 * l - 1.0).abs() };
+                            let k = (a * weight * 0.6).clamp(0.0, 1.0);
+                            let out = straight.map(|v| if *burn { v * (1.0 - k) } else { v + (1.0 - v) * k });
+                            o[2] = (out[0] * alpha).round().clamp(0.0, 255.0) as u8;
+                            o[1] = (out[1] * alpha).round().clamp(0.0, 255.0) as u8;
+                            o[0] = (out[2] * alpha).round().clamp(0.0, 255.0) as u8;
+                            o[3] = base[3];
+                        }
+                        Kind::Sponge { desaturate } => {
+                            let alpha = base[3] as f64;
+                            if alpha <= 0.0 { o.copy_from_slice(base); continue; }
+                            let straight = [base[2] as f64 / alpha, base[1] as f64 / alpha, base[0] as f64 / alpha];
+                            let l = 0.299 * straight[0] + 0.587 * straight[1] + 0.114 * straight[2];
+                            let f = if *desaturate { 1.0 - a } else { 1.0 + a };
+                            let out = straight.map(|v| (l + (v - l) * f).clamp(0.0, 1.0));
+                            o[2] = (out[0] * alpha).round() as u8;
+                            o[1] = (out[1] * alpha).round() as u8;
+                            o[0] = (out[2] * alpha).round() as u8;
+                            o[3] = base[3];
                         }
                     }
                 }

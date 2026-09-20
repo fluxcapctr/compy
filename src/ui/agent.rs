@@ -291,6 +291,14 @@ impl App {
                             "gaussian_blur" => { s.radius = num(args, "radius").unwrap_or(4.0); Kind::GaussianBlur }
                             "motion_blur" => { s.angle = num(args, "angle").unwrap_or(0.0); s.distance = num(args, "distance").unwrap_or(20.0); Kind::MotionBlur }
                             "add_noise" => { s.amount = num(args, "amount").unwrap_or(10.0); Kind::AddNoise }
+                            "unsharp_mask" => { if let Some(v) = num(args, "amount") { s.sharpen.amount = v; } if let Some(v) = num(args, "radius") { s.sharpen.radius = v; } if let Some(v) = num(args, "threshold") { s.sharpen.threshold = v; } Kind::UnsharpMask }
+                            "smart_sharpen" => { if let Some(v) = num(args, "amount") { s.sharpen.amount = v; } if let Some(v) = num(args, "radius") { s.sharpen.radius = v; } if let Some(v) = num(args, "noise") { s.sharpen.noise = v; } Kind::SmartSharpen }
+                            "brightness_contrast" => { s.brightness.brightness = num(args, "brightness").unwrap_or(0.0); s.brightness.contrast = num(args, "contrast").unwrap_or(0.0); Kind::BrightnessContrast }
+                            "vibrance" => { s.vibrance.vibrance = num(args, "vibrance").unwrap_or(0.0); s.vibrance.saturation = num(args, "saturation").unwrap_or(0.0); Kind::Vibrance }
+                            "black_white" => { for (k, f) in [("reds", &mut s.black_white.reds), ("yellows", &mut s.black_white.yellows), ("greens", &mut s.black_white.greens), ("cyans", &mut s.black_white.cyans), ("blues", &mut s.black_white.blues), ("magentas", &mut s.black_white.magentas)] { if let Some(v) = num(args, k) { *f = v; } } Kind::BlackWhite }
+                            "photo_filter" => { if let Some(c) = text(args, "color").and_then(|c| parse_color(&c)) { s.photo_filter.color = c; } if let Some(v) = num(args, "density") { s.photo_filter.density = v; } if let Some(b) = flag(args, "preserve_luminosity") { s.photo_filter.preserve_luminosity = b; } Kind::PhotoFilter }
+                            "threshold" => { s.threshold.level = num(args, "level").unwrap_or(128.0); Kind::Threshold }
+                            "posterize" => { s.posterize.levels = num(args, "levels").unwrap_or(4.0); Kind::Posterize }
                             "levels" => { if let Some(b) = num(args, "black") { s.levels.ranges[0].black = b; } if let Some(w) = num(args, "white") { s.levels.ranges[0].white = w; } if let Some(g) = num(args, "gamma") { s.levels.ranges[0].gamma = g; } Kind::Levels }
                             "exposure" => { s.exposure.exposure = num(args, "exposure").unwrap_or(0.5); Kind::Exposure }
                             "hue_saturation" => { s.hue_saturation.adjustments = vec![("Master".into(), [num(args, "hue").unwrap_or(0.0), num(args, "saturation").unwrap_or(0.0), num(args, "lightness").unwrap_or(0.0)])]; Kind::HueSaturation }
@@ -301,13 +309,19 @@ impl App {
                     }
                     "adjustment_layer" => {
                         let kind = text(args, "kind").unwrap_or_default();
-                        let name = match kind.as_str() { "levels" => "Levels", "exposure" => "Exposure", "hue_saturation" => "Hue/Saturation", "gradient_map" => "Gradient Map", "curves" => "Curves", other => bail!("unknown adjustment {other}") };
+                        let name = match kind.as_str() { "levels" => "Levels", "exposure" => "Exposure", "hue_saturation" => "Hue/Saturation", "gradient_map" => "Gradient Map", "curves" => "Curves", "brightness_contrast" => "Brightness/Contrast", "vibrance" => "Vibrance", "black_white" => "Black & White", "photo_filter" => "Photo Filter", "threshold" => "Threshold", "posterize" => "Posterize", other => bail!("unknown adjustment {other}") };
                         let id = dd.add_adjustment(name).ok_or_else(|| anyhow::anyhow!("could not add {name}"))?;
                         if let Some(mut a) = dd.adjustment(id) {
                             match &mut a {
                                 crate::filters::Adjustment::Levels(l) => { if let Some(b) = num(args, "black") { l.ranges[0].black = b; } if let Some(w) = num(args, "white") { l.ranges[0].white = w; } if let Some(g) = num(args, "gamma") { l.ranges[0].gamma = g; } }
                                 crate::filters::Adjustment::Exposure(e) => { if let Some(v) = num(args, "exposure") { e.exposure = v; } }
                                 crate::filters::Adjustment::HueSaturation(h) => { h.adjustments = vec![("Master".into(), [num(args, "hue").unwrap_or(0.0), num(args, "saturation").unwrap_or(0.0), num(args, "lightness").unwrap_or(0.0)])]; }
+                                crate::filters::Adjustment::BrightnessContrast(b) => { if let Some(v) = num(args, "brightness") { b.brightness = v; } if let Some(v) = num(args, "contrast") { b.contrast = v; } }
+                                crate::filters::Adjustment::Vibrance(v) => { if let Some(x) = num(args, "vibrance") { v.vibrance = x; } if let Some(x) = num(args, "saturation") { v.saturation = x; } }
+                                crate::filters::Adjustment::BlackWhite(b) => { for (k, f) in [("reds", &mut b.reds), ("yellows", &mut b.yellows), ("greens", &mut b.greens), ("cyans", &mut b.cyans), ("blues", &mut b.blues), ("magentas", &mut b.magentas)] { if let Some(v) = num(args, k) { *f = v; } } }
+                                crate::filters::Adjustment::PhotoFilter(p) => { if let Some(c) = text(args, "color").and_then(|c| parse_color(&c)) { p.color = c; } if let Some(v) = num(args, "density") { p.density = v; } if let Some(b) = flag(args, "preserve_luminosity") { p.preserve_luminosity = b; } }
+                                crate::filters::Adjustment::Threshold(t) => { if let Some(v) = num(args, "level") { t.level = v; } }
+                                crate::filters::Adjustment::Posterize(p) => { if let Some(v) = num(args, "levels") { p.levels = v; } }
                                 _ => {}
                             }
                             dd.set_adjustment(id, &a, true);
@@ -356,6 +370,17 @@ impl App {
                         if let Some(v) = args.get("color_overlay") { let mut o = crate::effects::Overlay::default(); o.color = color(v, "color", o.color); o.opacity = f(v, "opacity", o.opacity); e.color_overlay = Some(o); }
                         dd.set_effects(id, Some(&e))?; json!("styled")
                     }
+                    "stroke_selection" => {
+                        let color = parse_color(&text(args, "color").unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("color must look like #rrggbb"))?;
+                        let position = match text(args, "position").unwrap_or_else(|| "center".into()).as_str() { "inside" => 0, "outside" => 2, _ => 1 };
+                        dd.stroke_selection(num(args, "width").unwrap_or(3.0), color, position, num(args, "opacity").unwrap_or(1.0))?; json!("stroked")
+                    }
+                    "select_color_range" => {
+                        let color = parse_color(&text(args, "color").unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("color must look like #rrggbb"))?;
+                        dd.select_color_range(color, num(args, "fuzziness").unwrap_or(40.0), flag(args, "all_layers").unwrap_or(true), crate::selection::Mode::Replace)?; json!("selected")
+                    }
+                    "align_layers" => { dd.align_layers(&text(args, "edge").unwrap_or_default())?; json!("aligned") }
+                    "distribute_layers" => { dd.distribute_layers(text(args, "axis").unwrap_or_default() != "vertical")?; json!("distributed") }
                     "canvas_size" => { dd.canvas_size(num(args, "width").unwrap_or(0.0) as i32, num(args, "height").unwrap_or(0.0) as i32, num(args, "anchor").unwrap_or(4.0) as usize, None, None, "Canvas Size")?; json!("resized") }
                     "image_size" => { let res = dd.renderer.resolution(); dd.image_size(num(args, "width").unwrap_or(0.0) as i32, num(args, "height").unwrap_or(0.0) as i32, res, crate::format::Sampling::High)?; json!("resized") }
                     "flip" => { let horizontal = text(args, "axis").unwrap_or_default() != "vertical"; if flag(args, "canvas").unwrap_or(false) { dd.flip_canvas(horizontal)?; } else { dd.flip_layer(horizontal); } json!("flipped") }

@@ -1413,6 +1413,10 @@ impl Canvas {
                 Tool::Eraser => StrokeKind::Erase,
                 Tool::Heal => StrokeKind::Heal { mode: d.heal_mode },
                 Tool::Blur => StrokeKind::Blur,
+                Tool::Dodge => {
+                    if d.document.mask_target() { drop(d); self.notify("Dodge, Burn and Sponge work on the layer's pixels; target the layer rather than its mask."); return }
+                    match d.dodge_mode { 0 => StrokeKind::Dodge { burn: false, range: d.dodge_range as u8 }, 1 => StrokeKind::Dodge { burn: true, range: d.dodge_range as u8 }, 2 => StrokeKind::Sponge { desaturate: false }, _ => StrokeKind::Sponge { desaturate: true } }
+                }
                 Tool::Clone => {
                     let Some(source) = d.clone_source else { drop(d); self.notify("Alt-click where Clone Stamp should copy from first."); return };
                     let offset = match (d.clone_aligned, d.clone_offset) { (true, Some(o)) => o, _ => ((source.0 - point.0).round(), (source.1 - point.1).round()) };

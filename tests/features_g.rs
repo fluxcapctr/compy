@@ -424,3 +424,102 @@ fn image_and_canvas_size_stop_at_a_hundred_megapixels() {
     assert_eq!(d.width(), 40, "nothing changed");
     assert!(d.image_size(9_000, 9_000, 72.0, compositor::format::Sampling::High).is_ok());
 }
+
+#[test]
+fn sharpening_raises_edge_contrast_and_leaves_flat_color_alone() {
+    use compositor::filters::{Kind, Settings};
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [0.5, 0.5, 0.5], 0.0).unwrap();
+    d.add_shape_layer(false, (20.0, 0.0, 20.0, 40.0), [0.8, 0.8, 0.8], 0.0).unwrap();
+    let id = d.stamp_visible().unwrap();
+    d.select_layer(Some(id));
+    let before_dark = rgb_at(&mut d, 19, 20)[0];
+    let before_light = rgb_at(&mut d, 20, 20)[0];
+    let mut s = Settings::default();
+    s.sharpen.amount = 200.0;
+    s.sharpen.radius = 1.5;
+    d.apply_filter(Kind::UnsharpMask, &s).unwrap();
+    assert!(rgb_at(&mut d, 19, 20)[0] < before_dark, "the dark side of the edge gets darker");
+    assert!(rgb_at(&mut d, 20, 20)[0] > before_light, "the light side gets lighter");
+    assert_eq!(rgb_at(&mut d, 5, 20)[0], before_dark, "flat color far from the edge is untouched");
+    assert_eq!(d.undo_name(), Some("Unsharp Mask"));
+    d.undo();
+    d.apply_filter(Kind::SmartSharpen, &s).unwrap();
+    assert!(rgb_at(&mut d, 20, 20)[0] > before_light);
+    let p = rgb_at(&mut d, 20, 20);
+    assert!(p[0] == p[1] && p[1] == p[2], "gray stays gray when only brightness is sharpened: {p:?}");
+}
+
+#[test]
+fn simple_adjustments_behave_as_filters_and_as_layers() {
+    use compositor::filters::{Adjustment, BlackWhite, BrightnessContrast, Kind, Posterize, Settings, Threshold};
+    // Black & White: pure red comes out at Photoshop's 40 percent, white stays white.
+    let bw = BlackWhite::default();
+    assert!((bw.gray([1.0, 0.0, 0.0]) - 0.4).abs() < 1e-9);
+    assert!((bw.gray([1.0, 1.0, 1.0]) - 1.0).abs() < 1e-9);
+    assert!((bw.gray([0.0, 0.0, 1.0]) - 0.2).abs() < 1e-9);
+    // Brightness/Contrast: a monotonic table that keeps black and white in place at brightness alone.
+    let t = BrightnessContrast { brightness: 60.0, contrast: 0.0 }.table();
+    assert!(t.windows(2).all(|w| w[0] <= w[1]) && t[0] == 0.0 && (t[255] - 1.0).abs() < 1e-6 && t[128] > 0.5);
+    let c = BrightnessContrast { brightness: 0.0, contrast: 50.0 }.table();
+    assert!(c[64] < t[64] && c[192] > 0.75, "contrast pushes tones apart");
+    // Posterize to two levels leaves only black and white.
+    let p = Posterize { levels: 2.0 }.table();
+    assert!(p.iter().all(|v| *v == 0.0 || *v == 1.0));
+    // Threshold on a document, both ways.
+    let mut d = Document::blank(20, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 10.0, 20.0), [0.3, 0.3, 0.3], 0.0).unwrap();
+    d.add_shape_layer(false, (10.0, 0.0, 10.0, 20.0), [0.7, 0.7, 0.7], 0.0).unwrap();
+    let id = d.stamp_visible().unwrap();
+    d.select_layer(Some(id));
+    let mut s = Settings::default();
+    s.threshold = Threshold { level: 128.0 };
+    d.apply_filter(Kind::Threshold, &s).unwrap();
+    assert_eq!(rgb_at(&mut d, 5, 5), [0, 0, 0, 255]);
+    assert_eq!(rgb_at(&mut d, 15, 5), [255, 255, 255, 255]);
+    d.undo();
+    let layer = d.add_adjustment("Threshold").unwrap();
+    assert_eq!(rgb_at(&mut d, 5, 5), [0, 0, 0, 255], "the adjustment layer thresholds what is below");
+    let record = d.adjustment(layer).unwrap();
+    assert!(matches!(record, Adjustment::Threshold(_)));
+    // The record survives a round trip through the file format.
+    let back = Adjustment::from_record(&record.to_record()).unwrap();
+    assert_eq!(back, record);
+    let vib = Adjustment::from_record(&Adjustment::Vibrance(compositor::filters::Vibrance { vibrance: 30.0, saturation: -10.0 }).to_record()).unwrap();
+    assert_eq!(vib, Adjustment::Vibrance(compositor::filters::Vibrance { vibrance: 30.0, saturation: -10.0 }));
+}
+
+#[test]
+fn stroke_color_range_align_and_distribute() {
+    let mut d = Document::blank(60, 60, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 60.0, 60.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    d.select_box(20.0, 20.0, 20.0, 20.0, false, Mode::Replace, false).unwrap();
+    // A centered 4 px stroke straddles the selection edge and leaves the middle alone.
+    d.stroke_selection(4.0, [1.0, 0.0, 0.0], 1, 1.0).unwrap();
+    assert_eq!(rgb_at(&mut d, 21, 30), [255, 0, 0, 255], "just inside the edge");
+    assert_eq!(rgb_at(&mut d, 18, 30), [255, 0, 0, 255], "just outside the edge");
+    assert_eq!(rgb_at(&mut d, 30, 30), [255, 255, 255, 255], "the middle is untouched");
+    assert_eq!(rgb_at(&mut d, 5, 5), [255, 255, 255, 255]);
+    assert_eq!(d.undo_name(), Some("Stroke"));
+    // Color Range picks the red band and nothing else.
+    d.deselect();
+    d.select_color_range([1.0, 0.0, 0.0], 40.0, true, Mode::Replace).unwrap();
+    let sel = d.selection.clone().unwrap();
+    assert!(sel.contains(21.0, 30.0) && !sel.contains(30.0, 30.0) && !sel.contains(5.0, 5.0));
+    assert!(d.select_color_range([0.0, 0.0, 1.0], 20.0, true, Mode::Replace).is_err(), "nothing blue anywhere");
+    // Align three small layers to the canvas, then distribute them.
+    d.deselect();
+    let a = d.add_shape_layer(false, (0.0, 0.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let b = d.add_shape_layer(false, (5.0, 20.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let c = d.add_shape_layer(false, (40.0, 45.0, 10.0, 10.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    d.selected = [a, b, c].into_iter().collect();
+    d.align_layers("right").unwrap();
+    for id in [a, b, c] { assert_eq!(d.renderer.layer(id).transform.bounds().2, 60.0, "right edges on the canvas edge"); }
+    assert_eq!(d.undo_name(), Some("Align Layers"));
+    d.distribute_layers(false).unwrap();
+    let ys: Vec<f64> = [a, b, c].iter().map(|id| d.renderer.layer(*id).transform.origin.1).collect();
+    assert!(ys[0] == 0.0 && ys[2] == 45.0 && (ys[1] == 22.0 || ys[1] == 23.0), "the middle one sits halfway between the outer two: {ys:?}");
+    d.selected = [a].into_iter().collect();
+    assert!(d.distribute_layers(true).is_err(), "one layer cannot be distributed");
+    assert!(d.align_layers("sideways").is_err());
+}

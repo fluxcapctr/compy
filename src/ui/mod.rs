@@ -100,6 +100,9 @@ pub struct Doc {
     pub eyedropper_all_layers: bool,
     /// The Blur tool's mode: 0 Liquify, 1 Blur, 2 Smudge, as the Mac orders them.
     pub blur_mode: u32,
+    /// Dodge tool: 0 dodge, 1 burn, 2 saturate, 3 desaturate; and 0 shadows, 1 midtones, 2 highlights.
+    pub dodge_mode: u32,
+    pub dodge_range: u32,
     /// Guides drawn while a move is snapped: an x and a y across the whole canvas.
     pub snap_guides: (Option<f64>, Option<f64>),
     pub syncing_inspector: bool,
@@ -155,7 +158,7 @@ impl Doc {
     pub fn from(document: Document, title: &str) -> Doc {
         Doc { title: title.to_string(), document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
             brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
+            marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }
     }
 }
 
@@ -178,7 +181,7 @@ pub fn open_document(path: &Path) -> Result<(Doc, Vec<String>)> {
     let title = path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp").to_string()).unwrap_or_else(|| "Untitled".into());
     Ok((Doc { title, document, viewport: Viewport::default(), collapsed: HashSet::new(), tool: Tool::Move, wand: WandSettings::default(), mode: Mode::Replace, ants_phase: 0.0,
         brush: BrushSettings::default(), heal_mode: 0, clone_aligned: true, clone_all_layers: false, clone_source: None, clone_offset: None, last_brush_point: None,
-        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
+        marquee_ellipse: false, lasso_polygonal: false, antialiased: true, lock_ratio: true, auto_select: false, mask_paint_white: false, background: [1.0; 3], distort: None, gradient_radial: false, gradient_to_transparent: true, gradient_reversed: false, gradient_opacity: 1.0, gradient_line: None, shape_ellipse: false, shape_radius: 0.0, shape_draft: None, pen: crate::path::Path::default(), pen_done: false, text_style: crate::text::TextStyle::default(), crop: None, crop_ratio: 0, eyedropper_all_layers: true, blur_mode: 0, dodge_mode: 0, dodge_range: 1, snap_guides: (None, None), syncing_inspector: false, needs_redraw: false, rulers: false, autosave: Default::default(), hide_extras: false, show_handles: true, preview: false }, Vec::new()))
 }
 
 pub fn is_psd(path: &Path) -> bool { path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd")) }
@@ -416,7 +419,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 98] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 100] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -514,6 +517,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("canvas-size", &["<Control><Alt>c"], |s| { let state = s.clone(); let Some((w, h)) = s.current_size() else { return }; dialogs::canvas_size(s.window.upcast_ref(), (w, h), move |nw, nh, anchor, fill| state.edit(|d| d.canvas_size(nw, nh, anchor, fill, None, "Canvas Size"))); }),
         ("image-size", &["<Control><Alt>i"], |s| { let state = s.clone(); let Some((w, h)) = s.current_size() else { return }; let res = s.current_resolution(); dialogs::image_size(s.window.upcast_ref(), (w, h, res), move |nw, nh, r, sampling| { state.edit(|d| d.image_size(nw, nh, r, sampling)); state.with_current(|p| p.canvas.fit()); }); }),
         ("crop", &[], |s| s.edit(|d| d.crop_to_selection())),
+        ("stroke-selection", &[], |s| { let state = s.clone(); dialogs::stroke(s.window.upcast_ref(), move |width, position, opacity| state.with_doc(|d| { let color = d.brush.color; d.document.stroke_selection(width, color, position, opacity) })); }),
+        ("color-range", &[], |s| { let state = s.clone(); dialogs::color_range(s.window.upcast_ref(), move |fuzziness, all| state.with_doc(|d| { let (color, mode) = (d.brush.color, d.mode); d.document.select_color_range(color, fuzziness, all, mode) })); }),
         ("expand-selection", &[], |s| { let state = s.clone(); dialogs::amount(s.window.upcast_ref(), "Expand Selection", "Expand by (px)", move |n| state.edit(|d| d.resize_selection(n))); }),
         ("contract-selection", &[], |s| { let state = s.clone(); dialogs::amount(s.window.upcast_ref(), "Contract Selection", "Contract by (px)", move |n| state.edit(|d| d.resize_selection(-n))); }),
     ];
@@ -526,17 +531,25 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     }
     {
         let action = gio::SimpleAction::new("filter", Some(glib::VariantTy::STRING));
+        let state2 = state.clone();
         let state = state.clone();
         action.connect_activate(move |_, parameter| {
             let Some(name) = parameter.and_then(|v| v.get::<String>()) else { return };
             let kind = match name.as_str() {
                 "noise" => Kind::AddNoise, "grain" => Kind::Grain, "lens" => Kind::LensCorrection,
-                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "curves" => Kind::Curves, "balance" => Kind::ColorBalance, "fade" => Kind::Fade, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground, _ => return,
+                "gradient" => Kind::GradientMap, "levels" => Kind::Levels, "curves" => Kind::Curves, "balance" => Kind::ColorBalance, "fade" => Kind::Fade, "hsv" => Kind::HueSaturation, "exposure" => Kind::Exposure, "gaussian" => Kind::GaussianBlur, "motion" => Kind::MotionBlur, "background" => Kind::RemoveBackground,
+                "unsharp" => Kind::UnsharpMask, "sharpen" => Kind::SmartSharpen, "brightness" => Kind::BrightnessContrast, "vibrance" => Kind::Vibrance, "bw" => Kind::BlackWhite, "photo" => Kind::PhotoFilter, "threshold" => Kind::Threshold, "posterize" => Kind::Posterize, _ => return,
             };
             state.open_filter(kind);
         });
         window.add_action(&action);
         app.set_accels_for_action("win.filter::levels", &["<Control>l"]);
+        let align = gio::SimpleAction::new("align", Some(glib::VariantTy::STRING));
+        { let state = state2.clone(); align.connect_activate(move |_, parameter| { let Some(edge) = parameter.and_then(|v| v.get::<String>()) else { return }; state.edit(|d| d.align_layers(&edge)); }); }
+        window.add_action(&align);
+        let distribute = gio::SimpleAction::new("distribute", Some(glib::VariantTy::STRING));
+        { let state = state2.clone(); distribute.connect_activate(move |_, parameter| { let Some(axis) = parameter.and_then(|v| v.get::<String>()) else { return }; state.edit(|d| d.distribute_layers(axis == "horizontal")); }); }
+        window.add_action(&distribute);
         app.set_accels_for_action("win.filter::hsv", &["<Control>u"]);
         app.set_accels_for_action("win.filter::curves", &["<Control>m"]);
         app.set_accels_for_action("win.filter::balance", &["<Control>b"]);
@@ -660,6 +673,7 @@ fn menu() -> gio::Menu {
     edit.append(Some("Fill with Foreground"), Some("win.fill-foreground"));
     edit.append(Some("Fill with Background"), Some("win.fill-background"));
     edit.append(Some("Clear"), Some("win.clear"));
+    edit.append(Some("Stroke…"), Some("win.stroke-selection"));
     edit.append(Some("Generative Fill…"), Some("win.generative-fill"));
     menu.append_submenu(Some("Edit"), &edit);
     let select = gio::Menu::new();
@@ -668,6 +682,7 @@ fn menu() -> gio::Menu {
     select.append(Some("Reselect"), Some("win.reselect"));
     select.append(Some("Inverse"), Some("win.invert-selection"));
     select.append(Some("All Layers"), Some("win.select-all-layers"));
+    select.append(Some("Color Range…"), Some("win.color-range"));
     select.append(Some("Feather…"), Some("win.feather-selection"));
     select.append(Some("From Path"), Some("win.path-select"));
     select.append(Some("Load Layer Pixels"), Some("win.select-layer-pixels"));
@@ -678,7 +693,7 @@ fn menu() -> gio::Menu {
     layer.append(Some("New Layer"), Some("win.new-layer"));
     layer.append(Some("New Folder"), Some("win.new-folder"));
     let adjustments = gio::Menu::new();
-    for kind in ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain"] { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
+    for kind in crate::format::ADJUSTMENT_KINDS { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
     layer.append_submenu(Some("New Adjustment Layer"), &adjustments);
     layer.append(Some("Edit Adjustment…"), Some("win.edit-adjustment"));
     layer.append(Some("Duplicate Layer / Layer via Copy"), Some("win.duplicate-layer"));
@@ -702,6 +717,13 @@ fn menu() -> gio::Menu {
     layer.append(Some("Merge Down / Group"), Some("win.merge"));
     layer.append(Some("Merge Visible"), Some("win.merge-visible"));
     layer.append(Some("Stamp Visible"), Some("win.stamp-visible"));
+    let align = gio::Menu::new();
+    for (label, edge) in [("Left Edges", "left"), ("Horizontal Centers", "center"), ("Right Edges", "right"), ("Top Edges", "top"), ("Vertical Centers", "middle"), ("Bottom Edges", "bottom")] { align.append(Some(label), Some(&format!("win.align::{edge}"))); }
+    layer.append_submenu(Some("Align (to the selection, or the canvas)"), &align);
+    let distribute = gio::Menu::new();
+    distribute.append(Some("Horizontally"), Some("win.distribute::horizontal"));
+    distribute.append(Some("Vertically"), Some("win.distribute::vertical"));
+    layer.append_submenu(Some("Distribute"), &distribute);
     layer.append(Some("Bring to Front"), Some("win.layer-top"));
     layer.append(Some("Send to Back"), Some("win.layer-bottom"));
     layer.append(Some("Hide / Show Layer"), Some("win.toggle-layer-visibility"));
@@ -717,6 +739,12 @@ fn menu() -> gio::Menu {
     image.append(Some("Levels…"), Some("win.filter::levels"));
     image.append(Some("Curves…"), Some("win.filter::curves"));
     image.append(Some("Color Balance…"), Some("win.filter::balance"));
+    image.append(Some("Brightness/Contrast…"), Some("win.filter::brightness"));
+    image.append(Some("Vibrance…"), Some("win.filter::vibrance"));
+    image.append(Some("Black & White…"), Some("win.filter::bw"));
+    image.append(Some("Photo Filter…"), Some("win.filter::photo"));
+    image.append(Some("Threshold…"), Some("win.filter::threshold"));
+    image.append(Some("Posterize…"), Some("win.filter::posterize"));
     image.append(Some("Auto Tone"), Some("win.auto-tone"));
     image.append(Some("Auto Contrast"), Some("win.auto-contrast"));
     image.append(Some("Auto Color"), Some("win.auto-color"));
@@ -742,6 +770,8 @@ fn menu() -> gio::Menu {
     menu.append_submenu(Some("Image"), &image);
     let filter = gio::Menu::new();
     filter.append(Some("Remove Background…"), Some("win.filter::background"));
+    filter.append(Some("Unsharp Mask…"), Some("win.filter::unsharp"));
+    filter.append(Some("Smart Sharpen…"), Some("win.filter::sharpen"));
     filter.append(Some("Gaussian Blur…"), Some("win.filter::gaussian"));
     filter.append(Some("Motion Blur…"), Some("win.filter::motion"));
     filter.append(Some("Add Noise…"), Some("win.filter::noise"));
@@ -868,7 +898,7 @@ fn start_page() -> gtk::Widget {
 
 /// Every shortcut, for the Help window: (group, key, what it does).
 pub const SHORTCUTS: &[(&str, &str, &str)] = &[
-    ("Tools", "V M L W C I B E J S R G P T U H Z", "Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Smear, Gradient, Pen, Type, Shape, Hand, Zoom"),
+    ("Tools", "V M L W C I B E J S R O G P T U H Z", "Move, Marquee, Lasso, Wand, Crop, Eyedropper, Brush, Eraser, Heal, Clone, Smear, Dodge/Burn/Sponge, Gradient, Pen, Type, Shape, Hand, Zoom"),
     ("Tools", "Pen: Return, Ctrl+Return, Backspace, Escape", "End the path, make a selection from it, drop the last point, clear it"),
     ("Tools", "Shift+M, Shift+L, Shift+U", "Swap the marquee, lasso or shape kind"),
     ("Tools", "X, D", "Swap the colors, reset them"),
@@ -893,6 +923,9 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Select", "Ctrl+Shift+I", "Inverse"),
     ("Select", "Ctrl+Alt+A", "All layers"),
     ("Select", "Shift+F6, Ctrl+Alt+D", "Feather"),
+    ("Select", "Select > Color Range", "Every pixel near the foreground color, with a fuzziness"),
+    ("Edit", "Edit > Stroke", "Outline the selection in the foreground color, inside, centered or outside"),
+    ("Layer", "Layer > Align, Distribute", "Selected layers to the selection or canvas edges and centers; three or more spaced evenly"),
     ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
     ("Select", "Shift, Alt while selecting", "Add to, subtract from the selection"),
     ("Image", "Ctrl+L, Ctrl+M, Ctrl+B", "Levels, Curves, Color Balance"),
