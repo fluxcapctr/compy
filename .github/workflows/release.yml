@@ -13,7 +13,16 @@ jobs:
       - name: System libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libcairo2-dev libpango1.0-dev libheif-dev imagemagick
+          sudo apt-get install -y libgtk-4-dev libcairo2-dev libpango1.0-dev cmake libde265-dev libx265-dev libaom-dev libjpeg-dev libpng-dev imagemagick
+      - name: libheif 1.23 (Ubuntu ships an older one)
+        run: |
+          set -e
+          curl -sL https://github.com/strukturag/libheif/releases/download/v1.23.1/libheif-1.23.1.tar.gz | tar xz
+          cd libheif-1.23.1
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib/x86_64-linux-gnu -DWITH_EXAMPLES=OFF -DBUILD_TESTING=OFF
+          cmake --build build -j"$(nproc)"
+          sudo cmake --install build
+          sudo ldconfig
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release
