@@ -13,6 +13,8 @@ provides=('compy')
 conflicts=('compy')
 source=("compy::git+https://github.com/ericstevens/compy.git")
 sha256sums=('SKIP')
+# The C core is built by cargo's cc crate; makepkg's GCC LTO objects cannot be linked by Rust's linker.
+options=(!lto)
 
 pkgver() {
   cd compy
