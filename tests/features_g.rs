@@ -1264,3 +1264,108 @@ fn whole_project_audit_fixes() {
     assert_eq!(v.manifest().version, 8);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round 9 review: an adjustment on an odd-sized or grouped HiDPI target, shape and type layers edited
+/// after Image Size, a resize that would pass the layer limit, guides that undo, frames that keep their
+/// precision, a hairline that counts as coverage, and `edited` closing only its own edit.
+#[test]
+fn round_nine_fixes() {
+    use compositor::filters::{Adjustment, Levels, Range};
+    // 1 and 2. An inverting Levels adjustment on a 41-pixel scale-2 surface, and inside a pushed group.
+    let mut c = Document::blank(20, 20, 72.0).unwrap();
+    c.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let inv = c.add_adjustment("Levels").unwrap();
+    let mut flip = Levels::default();
+    flip.ranges[0] = Range { output_black: 255.0, output_white: 0.0, ..Range::default() };
+    assert!(c.set_adjustment(inv, &Adjustment::Levels(flip), true));
+    let pixel = |s: &cairo::ImageSurface, x: usize, y: usize| compositor::raster::with_bytes(s, |b, stride| { let i = y * stride + x * 4; [b[i + 2], b[i + 1], b[i], b[i + 3]] }).unwrap();
+    let odd = compositor::raster::new_argb(41, 41).unwrap();
+    odd.set_device_scale(2.0, 2.0);
+    { let cr = cairo::Context::new(&odd).unwrap(); cr.scale(1.025, 1.025); cr.rectangle(0.0, 0.0, 20.0, 20.0); cr.clip(); c.renderer.draw(&cr).unwrap(); }
+    assert_eq!(pixel(&odd, 20, 20), [0, 255, 255, 255], "inverted on a surface the rounded region overruns by a pixel");
+    let grouped = compositor::raster::new_argb(40, 40).unwrap();
+    grouped.set_device_scale(2.0, 2.0);
+    { let cr = cairo::Context::new(&grouped).unwrap(); cr.translate(3.0, 4.0); cr.scale(0.75, 0.75); cr.rectangle(0.0, 0.0, 20.0, 20.0); cr.clip(); cr.push_group(); c.renderer.draw(&cr).unwrap(); cr.pop_group_to_source().unwrap(); cr.paint().unwrap(); }
+    assert_eq!(pixel(&grouped, 20, 20), [0, 255, 255, 255], "inverted inside a pushed group");
+
+    // 3. A Path shape resized with the document, then nudged: still the resized square.
+    let mut p = Document::blank(100, 100, 72.0).unwrap();
+    let path = compositor::path::Path { anchors: [(10.0, 10.0), (50.0, 10.0), (50.0, 50.0), (10.0, 50.0)].iter().map(|&q| compositor::path::Anchor::corner(q)).collect(), closed: true };
+    let shape = p.add_path_shape_layer(&path, [1.0, 0.0, 0.0]).unwrap();
+    p.image_size(200, 200, 72.0, compositor::format::Sampling::High).unwrap();
+    assert_eq!(rgb_at(&mut p, 80, 80), [255, 0, 0, 255]);
+    let mut t = p.renderer.layer(shape).transform;
+    t.size.0 += 1.0;
+    p.set_transform(shape, t, "Nudge");
+    assert_eq!(rgb_at(&mut p, 80, 80), [255, 0, 0, 255], "the redrawn path keeps its resized extent");
+
+    // 4. Rotated type resized with the document keeps its turn when edited again.
+    let mut r = Document::blank(100, 100, 72.0).unwrap();
+    let mut style = compositor::text::TextStyle::default();
+    style.text = "Hello".into();
+    style.size = 20.0;
+    let text = r.add_text_layer(&style, 10.0, 10.0).unwrap();
+    let mut rt = r.renderer.layer(text).transform;
+    rt.rotation = 90.0;
+    r.set_transform(text, rt, "Turn");
+    r.image_size(200, 200, 72.0, compositor::format::Sampling::High).unwrap();
+    let before = r.renderer.layer(text).transform;
+    assert_eq!(before.rotation, 90.0, "the turn survives the resize");
+    let kept = r.text_style(text).unwrap();
+    assert!((kept.size - 40.0).abs() < 1e-9, "the size doubled: {}", kept.size);
+    r.set_text(text, &kept).unwrap();
+    let after = r.renderer.layer(text).transform;
+    assert_eq!(after.rotation, 90.0);
+    assert!((after.size.0 - before.size.0).abs() < 1.0 && (after.size.1 - before.size.1).abs() < 1.0, "editing the unchanged style keeps the picture: {before:?} vs {after:?}");
+
+    // 5. A resize that would push a layer past 30,000 pixels is refused before anything moves.
+    let mut w = Document::blank(100, 100, 72.0).unwrap();
+    let sheet = compositor::raster::new_argb(1, 1).unwrap();
+    let wide = w.add_image_surface(sheet, "Wide", (0.0, 0.0), (20_000.0, 1.0)).unwrap();
+    assert!(w.image_size(155, 100, 72.0, compositor::format::Sampling::High).is_err());
+    assert_eq!(w.renderer.layer(wide).transform.size.0, 20_000.0, "nothing moved");
+    assert!(!w.busy_editing());
+
+    // 6. Guides undo with the canvas.
+    let mut g = Document::blank(100, 100, 72.0).unwrap();
+    g.guides_v.push(50.0);
+    g.canvas_size(120, 120, 8, None, None, "Canvas Size").unwrap();
+    assert_eq!(g.guides_v, vec![70.0]);
+    g.undo();
+    assert_eq!(g.guides_v, vec![50.0], "the guide went back with the canvas");
+    g.redo();
+    assert_eq!(g.guides_v, vec![70.0]);
+
+    // 7. A small frame keeps its exact place through a halving and a doubling (a board can never be
+    // narrower than a pixel, so only that floor still rounds).
+    let mut a = Document::blank(100, 100, 72.0).unwrap();
+    let board = a.add_artboard("Dot", (3.0, 3.0, 3.0, 3.0), Some([1.0; 3])).unwrap();
+    a.image_size(50, 50, 72.0, compositor::format::Sampling::High).unwrap();
+    assert_eq!(a.renderer.layer(board).artboard.as_ref().map(|b| b.rect()), Some((1.5, 1.5, 1.5, 1.5)));
+    a.image_size(100, 100, 72.0, compositor::format::Sampling::High).unwrap();
+    assert_eq!(a.renderer.layer(board).artboard.as_ref().map(|b| b.rect()), Some((3.0, 3.0, 3.0, 3.0)));
+
+    // 8. A hairline on a huge clear layer is not called empty.
+    let mut h = Document::blank(20_000, 2, 72.0).unwrap();
+    let sheet = compositor::raster::new_argb(20_000, 2).unwrap();
+    { let cr = cairo::Context::new(&sheet).unwrap(); cr.set_source_rgb(1.0, 0.0, 0.0); cr.rectangle(100.0, 0.0, 1.0, 2.0); cr.fill().unwrap(); }
+    let mark = h.add_image_surface(sheet, "Mark", (0.0, 0.0), (20_000.0, 2.0)).unwrap();
+    let (fraction, bounds) = h.layer_coverage(mark).unwrap().expect("the mark shows");
+    assert!(fraction < 0.5 && bounds.0 <= 100.0 && bounds.2 >= 101.0, "found near x 100: {bounds:?}");
+
+    // 9. `edited` closes only its own edit, whatever the closure did.
+    let mut e = Document::blank(20, 20, 72.0).unwrap();
+    e.begin_edit("Outer");
+    e.add_shape_layer(false, (0.0, 0.0, 5.0, 5.0), [0.0; 3], 0.0).unwrap();
+    let count = e.renderer.layers().len();
+    let r: Result<(), anyhow::Error> = e.edited("Inner", |d| { d.abort_edit(); anyhow::bail!("already aborted") });
+    assert!(r.is_err());
+    assert!(e.busy_editing(), "the outer edit is still open");
+    assert_eq!(e.renderer.layers().len(), count, "the outer work stays");
+    let r: Result<(), anyhow::Error> = e.edited("Leaky", |d| { d.begin_edit("Left open"); Ok(()) });
+    assert!(r.is_ok());
+    assert!(e.busy_editing());
+    e.end_edit();
+    assert!(!e.busy_editing(), "exactly the outer edit remained to close");
+    assert_eq!(e.undo_name(), Some("Outer"));
+}

@@ -77,10 +77,12 @@ pub struct State {
     render: render::State,
     selection: Option<Selection>,
     active: Option<Uuid>,
+    /// Ruler guides: they move with the canvas, so they go back with it.
+    guides: (Vec<f64>, Vec<f64>),
 }
 
 impl PartialEq for State {
-    fn eq(&self, other: &Self) -> bool { self.render == other.render && self.selection == other.selection && self.active == other.active }
+    fn eq(&self, other: &Self) -> bool { self.render == other.render && self.selection == other.selection && self.active == other.active && self.guides == other.guides }
 }
 
 /// Where dragged layers land in the panel.
@@ -121,11 +123,13 @@ impl Document {
     pub fn width(&self) -> i32 { self.renderer.width() }
     pub fn height(&self) -> i32 { self.renderer.height() }
 
-    fn state(&self) -> State { State { render: self.renderer.snapshot(), selection: self.selection.clone(), active: self.active } }
+    fn state(&self) -> State { State { render: self.renderer.snapshot(), selection: self.selection.clone(), active: self.active, guides: (self.guides_v.clone(), self.guides_h.clone()) } }
     fn apply(&mut self, state: &State) {
         self.renderer.restore(&state.render);
         self.selection = state.selection.clone();
         self.active = state.active;
+        self.guides_v = state.guides.0.clone();
+        self.guides_h = state.guides.1.clone();
         self.selected.retain(|id| self.renderer.layer_index(*id).is_some());
         if let Some(a) = self.active { self.selected.insert(a); }
         // Painting the mask only makes sense while the active layer has one.
@@ -177,8 +181,13 @@ impl Document {
     /// Runs `f` as one edit named `name`: ended when it succeeds, abandoned (the document put back) when it
     /// fails, so an early `?` can never leave an edit open.
     pub fn edited<T>(&mut self, name: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let outer = self.history.depth();
         self.begin_edit(name);
-        match f(self) { Ok(v) => { self.end_edit(); Ok(v) } Err(e) => { self.abort_edit(); Err(e) } }
+        let result = f(self);
+        // Only the edit opened here is closed: one the closure left open is abandoned first, and one the
+        // closure closed itself is not closed again (that would take the caller's).
+        match &result { Ok(_) => { self.unwind_edits_to(outer + 1); if self.history.depth() == outer + 1 { self.end_edit(); } } Err(_) => self.unwind_edits_to(outer) }
+        result
     }
     /// Abandons every edit opened since the history was `depth` deep (a guard around code that may fail
     /// partway through its own begin/end pairs).
@@ -1349,19 +1358,23 @@ impl Document {
     /// box around them in document pixels; None when nothing shows. Judged at a small scale.
     pub fn layer_coverage(&mut self, id: Uuid) -> Result<Option<(f64, (f64, f64, f64, f64))>> {
         let (w, h) = (self.width() as f64, self.height() as f64);
-        let scale = (256.0 / w.max(h)).min(1.0);
-        let (sw, sh) = (((w * scale).ceil() as i32).max(1), ((h * scale).ceil() as i32).max(1));
-        let surface = self.renderer.render_layer(id, 0.0, 0.0, sw, sh, scale)?;
-        let mut count = 0usize;
-        let mut b = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        crate::raster::with_bytes(&surface, |data, stride| {
-            for y in 0..sh { for x in 0..sw {
-                if data[y as usize * stride + x as usize * 4 + 3] > 8 { count += 1; b.0 = b.0.min(x); b.1 = b.1.min(y); b.2 = b.2.max(x); b.3 = b.3.max(y); }
-            } }
-        })?;
-        if count == 0 { return Ok(None); }
-        let fraction = count as f64 / (sw as f64 * sh as f64);
-        Ok(Some((fraction, (b.0 as f64 / scale, b.1 as f64 / scale, (b.2 + 1) as f64 / scale, (b.3 + 1) as f64 / scale))))
+        // A hairline can vanish at 256 pixels across; before calling the layer empty, look closer.
+        for side in [256.0, 2048.0] {
+            let scale = (side / w.max(h)).min(1.0);
+            let (sw, sh) = (((w * scale).ceil() as i32).max(1), ((h * scale).ceil() as i32).max(1));
+            let surface = self.renderer.render_layer(id, 0.0, 0.0, sw, sh, scale)?;
+            let mut count = 0usize;
+            let mut b = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            crate::raster::with_bytes(&surface, |data, stride| {
+                for y in 0..sh { for x in 0..sw {
+                    if data[y as usize * stride + x as usize * 4 + 3] > 0 { count += 1; b.0 = b.0.min(x); b.1 = b.1.min(y); b.2 = b.2.max(x); b.3 = b.3.max(y); }
+                } }
+            })?;
+            if count == 0 { if scale >= 1.0 { return Ok(None); } continue; }
+            let fraction = count as f64 / (sw as f64 * sh as f64);
+            return Ok(Some((fraction, (b.0 as f64 / scale, b.1 as f64 / scale, (b.2 + 1) as f64 / scale, (b.3 + 1) as f64 / scale))));
+        }
+        Ok(None)
     }
 
     /// What crop edges snap to: the canvas edges and every visible layer's bounds, in whole pixels.
@@ -3338,7 +3351,7 @@ impl Document {
         for (id, _, r) in self.artboards() {
             let (x, y, w, h) = f(r);
             let background = self.renderer.layer(id).artboard.as_ref().and_then(|b| b.background);
-            self.renderer.set_artboard(id, Some(crate::format::Artboard { x: x.round(), y: y.round(), width: w.round().max(1.0), height: h.round().max(1.0), background }));
+            self.renderer.set_artboard(id, Some(crate::format::Artboard { x, y, width: w.max(1.0), height: h.max(1.0), background }));
         }
     }
 
@@ -3369,11 +3382,38 @@ impl Document {
         let (ow, oh) = (self.width(), self.height());
         if width != ow || height != oh {
             let (sx, sy) = (width as f64 / ow as f64, height as f64 / oh as f64);
+            // Every layer's new box must be one the file can hold, before anything changes.
+            for layer in self.renderer.layers() {
+                let (bx0, by0, bx1, by1) = layer.transform.bounds();
+                if (bx1 - bx0) * sx > 30_000.0 || (by1 - by0) * sy > 30_000.0 { bail!("\"{}\" would be wider than 30,000 pixels at that size.", layer.name); }
+            }
             for layer in self.renderer.layers().to_vec() {
                 let (bx0, by0, bx1, by1) = layer.transform.bounds();
                 let (left, top) = ((bx0 * sx).floor(), (by0 * sy).floor());
                 let (w, h) = (((bx1 * sx).ceil() - left).max(1.0) as i32, ((by1 * sy).ceil() - top).max(1.0) as i32);
                 let placed = Transform { origin: crate::format::Point(left, top), size: crate::format::Size(w as f64, h as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling };
+                if let (Some(mut style), true) = (layer.text.clone(), self.renderer.has_image(layer.id)) {
+                    // Type stays type: the style scales and the text is set again from it, in the same
+                    // turn and flips, so a later edit keeps what the resize showed.
+                    for (key, k) in [("size", sy), ("tracking", sy), ("width", sx)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
+                    if let Some(parsed) = crate::text::TextStyle::from_record(&style) {
+                        if let Ok((image, _, _)) = crate::text::render(&parsed) {
+                            let t = layer.transform;
+                            let (rw, rh) = self.renderer.image_size(layer.id).unwrap_or((1, 1));
+                            // The layer's own stretch over its raster, carried along (sideways stretch follows sx over sy).
+                            let stretch = (t.size.0 / rw.max(1) as f64 * sx / sy, t.size.1 / rh.max(1) as f64);
+                            let size = crate::format::Size((image.width() as f64 * stretch.0).max(1.0), (image.height() as f64 * stretch.1).max(1.0));
+                            let c = t.center();
+                            let center = (c.0 * sx, c.1 * sy);
+                            let turned = Transform { origin: crate::format::Point(center.0 - size.0 / 2.0, center.1 - size.1 / 2.0), size, rotation: t.rotation, flip_x: t.flip_x, flip_y: t.flip_y, sampling: t.sampling };
+                            if self.renderer.mask(layer.id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(layer.id, Some(t)); }
+                            self.renderer.set_text_image(layer.id, image, style);
+                            self.renderer.set_layer_transform(layer.id, turned);
+                            if let Some(p) = self.renderer.layer(layer.id).mask_placement { let mut scale = cairo::Matrix::identity(); scale.scale(sx, sy); self.renderer.set_mask_placement(layer.id, Some(p.placing(&cairo::Matrix::multiply(&p.unit_to_document(), &scale)))); }
+                            continue;
+                        }
+                    }
+                }
                 if self.renderer.has_image(layer.id) {
                     self.renderer.set_sampling(layer.id, sampling);
                     let surface = new_argb(w, h)?;
@@ -3383,12 +3423,16 @@ impl Document {
                         cr.scale(sx, sy);
                         self.renderer.draw_layer_plain(layer.id, &cr)?;
                     }
-                    // Type and shape layers stay editable: their records come along, scaled.
-                    if let Some(mut style) = layer.text.clone() {
-                        for (key, k) in [("size", sy), ("tracking", sy), ("width", sx)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
-                        self.renderer.set_text_image(layer.id, surface, style);
-                    } else if let Some(mut style) = layer.shape.clone() {
-                        for (key, k) in [("baseWidth", sx), ("baseHeight", sy)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
+                    // Shape layers stay editable: a Path's points and base scale together (the redraw
+                    // maps points through size over base, so both must move); other kinds redraw from
+                    // the layer's size alone.
+                    if let Some(mut style) = layer.shape.clone() {
+                        if style.get("kind").and_then(serde_json::Value::as_str) == Some("Path") {
+                            for (key, k) in [("baseWidth", sx), ("baseHeight", sy)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
+                            if let Some(anchors) = style.get_mut("anchors").and_then(serde_json::Value::as_array_mut) {
+                                for a in anchors.iter_mut() { for (key, k) in [("x", sx), ("ix", sx), ("ox", sx), ("y", sy), ("iy", sy), ("oy", sy)] { if let Some(v) = a.get(key).and_then(serde_json::Value::as_f64) { a[key] = serde_json::json!(v * k); } } }
+                            }
+                        } else if let Some(r) = style.get("radius").and_then(serde_json::Value::as_f64) { style["radius"] = serde_json::json!(r * sx.min(sy)); }
                         self.renderer.set_shape_image(layer.id, surface, style);
                     } else {
                         self.renderer.set_image(layer.id, surface);

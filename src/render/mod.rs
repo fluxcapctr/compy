@@ -164,7 +164,7 @@ impl Region {
 
 /// The device scale of the surface a context draws on (2 on a HiDPI frame, 1 for a plain surface).
 pub(crate) fn target_scale(cr: &Context) -> (f64, f64) {
-    let (sx, sy) = cr.target().device_scale();
+    let (sx, sy) = cr.group_target().device_scale();
     (if sx.is_finite() && sx > 0.0 { sx } else { 1.0 }, if sy.is_finite() && sy > 0.0 { sy } else { 1.0 })
 }
 
@@ -667,7 +667,7 @@ impl Renderer {
         let visible = visible_layers(&self.layers);
         self.prepare_stacks(&visible);
         let adjusts = visible.iter().any(|id| self.layer(*id).adjustment.is_some() || self.layer(*id).effects.as_ref().and_then(crate::effects::Effects::from_record).and_then(|e| e.blend_if().map(|b| b.uses_underlying())).unwrap_or(false));
-        let readable = ImageSurface::try_from(cr.target()).is_ok();
+        let readable = ImageSurface::try_from(cr.group_target()).is_ok();
         if adjusts && !readable {
             let Some(region) = Region::of(cr)? else { return Ok(()) };
             let (surface, inner) = region.offscreen(cr)?;
@@ -786,25 +786,32 @@ impl Renderer {
         let layer = self.layer(id).clone();
         let Some(record) = &layer.adjustment else { return Ok(()) };
         let Some(adjustment) = crate::filters::Adjustment::from_record(record) else { return Ok(()) };
-        let Ok(target) = ImageSurface::try_from(cr.target()) else { return Ok(()) };
+        // The surface being drawn on now: a group when one is pushed, else the context's own target.
+        let Ok(target) = ImageSurface::try_from(cr.group_target()) else { return Ok(()) };
         let Some(region) = Region::of(cr)? else { return Ok(()) };
-        cr.target().flush();
+        target.flush();
         // The region in the target's own pixels: its coordinates are logical, the surface may be scaled
-        // (a HiDPI frame) and offset (a group).
+        // (a HiDPI frame) and offset (a group). The region was rounded outward in logical units, so it
+        // can reach a pixel past the surface: the readback is what the surface has, never nothing.
         let (tsx, tsy) = target.device_scale();
         let (tox, toy) = target.device_offset();
-        let (px, py) = ((region.x as f64 * tsx + tox).round() as i32, (region.y as f64 * tsy + toy).round() as i32);
-        let (pw, ph) = ((region.width as f64 * tsx).round().max(1.0) as i32, (region.height as f64 * tsy).round().max(1.0) as i32);
-        let (w, h) = (pw as usize, ph as usize);
         let (tw, th) = (target.width() as i32, target.height() as i32);
-        if px < 0 || py < 0 || px + pw > tw || py + ph > th { return Ok(()); }
+        let px = ((region.x as f64 * tsx + tox).round() as i32).clamp(0, tw);
+        let py = ((region.y as f64 * tsy + toy).round() as i32).clamp(0, th);
+        let px1 = (((region.x + region.width) as f64 * tsx + tox).round() as i32).clamp(0, tw);
+        let py1 = (((region.y + region.height) as f64 * tsy + toy).round() as i32).clamp(0, th);
+        let (pw, ph) = (px1 - px, py1 - py);
+        if pw <= 0 || ph <= 0 { return Ok(()); }
+        let (w, h) = (pw as usize, ph as usize);
+        // The pixels' own origin in logical units, where the result and its coverage are placed.
+        let (lx, ly) = ((px as f64 - tox) / tsx, (py as f64 - toy) / tsy);
         let mut original = vec![0u8; w * h * 4];
         with_bytes(&target, |data, stride| {
             for r in 0..h { original[r * w * 4..(r + 1) * w * 4].copy_from_slice(&data[(py as usize + r) * stride + px as usize * 4..(py as usize + r) * stride + (px as usize + w) * 4]); }
         })?;
         let mut adjusted = original.clone();
         // Where this region sits on the document, so Grain's pattern stays put.
-        let (ox, oy) = cr.device_to_user(region.x as f64, region.y as f64)?;
+        let (ox, oy) = cr.device_to_user(lx, ly)?;
         let units = 1.0 / device_scale(cr).max(1e-9);
         adjustment.apply(&mut adjusted, w, h, (ox, oy), units);
         let mode = layer.blend_mode();
@@ -838,7 +845,7 @@ impl Renderer {
         coverage.set_device_scale(tsx, tsy);
         {
             let ccr = Context::new(&coverage)?;
-            ccr.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -region.x as f64, -region.y as f64)));
+            ccr.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -lx, -ly)));
             let mut masks: Vec<(Uuid, Transform)> = folders.iter().map(|f| (f.id, f.transform)).collect();
             if layer.mask_enabled() && self.masks.contains_key(&id) { masks.push((id, layer.mask_placement.unwrap_or(layer.transform))); }
             let device = device_scale(cr);
@@ -864,9 +871,9 @@ impl Renderer {
         }
         cr.save()?;
         cr.identity_matrix();
-        cr.set_source_surface(&result, region.x as f64, region.y as f64)?;
+        cr.set_source_surface(&result, lx, ly)?;
         cr.set_operator(Operator::Source);
-        cr.mask_surface(&coverage, region.x as f64, region.y as f64)?;
+        cr.mask_surface(&coverage, lx, ly)?;
         cr.restore()?;
         Ok(())
     }
@@ -942,7 +949,7 @@ impl Renderer {
         let (ox, oy) = own.device_offset();
         let (w, h) = (((region.width as f64) * sx).round() as usize, ((region.height as f64) * sy).round() as usize);
         if w == 0 || h == 0 || w * h > 100_000_000 { return Ok(()); }
-        let under = if b.uses_underlying() { ImageSurface::try_from(cr.target()).ok() } else { None };
+        let under = if b.uses_underlying() { ImageSurface::try_from(cr.group_target()).ok() } else { None };
         if let Some(u) = &under { u.flush(); }
         let mut mask = vec![0u8; w * h];
         let luma = |p: &[u8]| -> Option<f64> { let a = p[3] as f64; if a <= 0.0 { None } else { Some((0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64) / a * 255.0) } };
