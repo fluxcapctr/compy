@@ -348,6 +348,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     let bar = gtk::PopoverMenuBar::from_model(Some(&menu()));
     bar.add_css_class("main-menu");
     header.pack_start(&bar);
+    // The Compy mark in the middle of the bar, in the theme's accent color, instead of the window title.
+    header.set_title_widget(Some(&icons::compy_mark(22)));
     // Compy, the assistant, at the right end of the bar with the same robot Omarchy's bar shows for agents.
     let compy = gtk::Button::builder().child(&gtk::Label::builder().label("\u{f16a3}").css_classes(["compy-glyph"]).build()).action_name("win.assistant").tooltip_text("Compy, the assistant (Ctrl+K)").has_frame(false).build();
     header.pack_end(&compy);

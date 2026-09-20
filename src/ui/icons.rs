@@ -11,6 +11,25 @@ pub fn icon(tool: Tool) -> gtk::DrawingArea { glyph_area(17, move |cr| draw(tool
 /// adjustment, trash, link, fx, new-folder.
 pub fn glyph(name: &'static str, size: i32) -> gtk::DrawingArea { glyph_area(size, move |cr| draw_glyph(name, cr)) }
 
+/// The Compy mark (the maze square from the logo, without the word), `size` pixels tall, painted in the
+/// theme's accent color so it follows Omarchy's theme.
+pub fn compy_mark(size: i32) -> gtk::DrawingArea {
+    thread_local! { static MARK: Option<cairo::ImageSurface> = crate::document::Document::decode_image_bytes(include_bytes!("../../assets/compy-mark.png")).ok().map(|(s, _, _)| s); }
+    let area = gtk::DrawingArea::builder().content_width(size).content_height(size).halign(gtk::Align::Center).valign(gtk::Align::Center).tooltip_text("Compy").build();
+    area.set_draw_func(move |_, cr, w, h| {
+        MARK.with(|mark| {
+            let Some(mark) = mark else { return };
+            let (r, g, b) = super::theme::accent();
+            cr.set_source_rgb(r, g, b);
+            let scale = w.min(h) as f64 / mark.width().max(1) as f64;
+            cr.translate((w as f64 - mark.width() as f64 * scale) / 2.0, (h as f64 - mark.height() as f64 * scale) / 2.0);
+            cr.scale(scale, scale);
+            let _ = cr.mask_surface(mark, 0.0, 0.0);
+        });
+    });
+    area
+}
+
 fn glyph_area(size: i32, draw: impl Fn(&cairo::Context) + 'static) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::builder().content_width(size).content_height(size).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
     area.set_draw_func(move |area, cr, w, h| {
