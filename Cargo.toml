@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Compy, a layer-based image editor for Linux with an AI assistant, built around the original Compositor C pixel core."
 license = "MIT"
-repository = "https://github.com/ericstevens/compy"
-homepage = "https://github.com/ericstevens/compy"
+repository = "https://github.com/fluxcapctr/compy"
+homepage = "https://github.com/fluxcapctr/compy"
 
 [lib]
 name = "compositor"

@@ -26,7 +26,7 @@ installed by the distribution (`libgtk-4-1 libheif1` on Debian and Ubuntu 24.04 
 `libgtk-4-dev libcairo2-dev libpango1.0-dev libheif-dev` on Debian and Ubuntu), then
 
 ```
-git clone https://github.com/ericstevens/compy.git
+git clone https://github.com/fluxcapctr/compy.git
 cd compy
 ./install.sh
 ```

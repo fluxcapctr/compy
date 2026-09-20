@@ -4,14 +4,14 @@ pkgver=0.1.0.r0.g0000000
 pkgrel=1
 pkgdesc="Layer-based image editor with masks, adjustments, layer styles, PSD import and export, and an AI assistant"
 arch=('x86_64')
-url="https://github.com/ericstevens/compy"
+url="https://github.com/fluxcapctr/compy"
 license=('MIT')
 depends=('gtk4' 'cairo' 'pango' 'libheif' 'libavif' 'gcc-libs' 'glibc')
 makedepends=('git' 'cargo' 'imagemagick')
 optdepends=('claude-code: the Compy assistant (Claude Code)' 'voxtype: dictation into the assistant')
 provides=('compy')
 conflicts=('compy')
-source=("compy::git+https://github.com/ericstevens/compy.git")
+source=("compy::git+https://github.com/fluxcapctr/compy.git")
 sha256sums=('SKIP')
 # The C core is built by cargo's cc crate; makepkg's GCC LTO objects cannot be linked by Rust's linker.
 options=(!lto)
