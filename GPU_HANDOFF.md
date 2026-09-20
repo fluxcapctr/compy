@@ -137,10 +137,16 @@ COMPOSITOR_GPU=present: it has hung this machine's graphics card five times. COM
 and the parity test in tests/gpu.rs are safe to run.
 
 Find the cause of the page faults and gfx ring timeouts described in the handoff, or the most
-probable causes ranked with the evidence for each. Then propose, or implement behind the existing
-opt-in, a presentation design that cannot free or overwrite a buffer GTK is still reading: release
-callbacks from GdkDmabufTextureBuilder, a buffer pool with explicit ownership, correct image layouts
-for an image shared between two VkDevices in one process, and whatever synchronization GDK 4.22
-offers for dma-buf import. Keep the CPU path untouched and the GPU off by default. If you change
-code, run cargo build and cargo test, and write what you did and what remains untested to
-GPU_HANDOFF.md under a new heading. No em dashes in your output.
+probable causes ranked with the evidence for each, citing file:line. Confirm from the code which
+VkDevice GTK 4.22's Vulkan renderer would open on this machine (the 9070 XT drives the display; the
+Ryzen's integrated GPU is also present) and whether the dma-buf crosses devices.
+
+Then write, do not implement, the design for a presentation path that cannot free or overwrite a
+buffer GTK is still reading: release callbacks from GdkDmabufTextureBuilder, a buffer pool with
+explicit ownership, the image layouts and barriers for an image shared between two VkDevices in one
+process, and whatever synchronization GDK 4.22 offers for dma-buf import. Be specific enough that
+another engineer can implement it from your notes without rediscovering anything: which functions
+change, what they do, in what order, and how to verify each step without hanging the card.
+
+Do not change any source file. Append your findings and the design to GPU_HANDOFF.md under a heading
+"Diagnosis" and a heading "Proposed design". No em dashes in your output.
