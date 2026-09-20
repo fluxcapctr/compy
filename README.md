@@ -278,6 +278,14 @@ brush never paints wider than 2000. Many brush packs carry patterns as well: `co
 Fill with Pattern and the Pattern Stamp find them. `compositor convert-brushes out.abr in.abr` rewrites a
 pack as tips alone, which keeps a pattern-heavy file from being read whole at every start.
 
+**Export Sizes.** File > Export Sizes writes the document at several sizes at once into a folder:
+tick presets (Instagram post and portrait, Story or Reel, Facebook, X, LinkedIn, YouTube thumbnail,
+Pinterest, the IAB banner sizes, HD, 4K, Letter, A4 and Tabloid at 300 ppi) or a custom size, pick how
+the picture meets each frame (Reframe: the picture fills the frame and type, logos and other small
+elements keep their relative places, scaled to the short side and held inside a five percent margin;
+Fill: cover and crop; Pad: fit inside and fill the rest with a color), PNG or JPEG, and the folder.
+Files are named title-size-WxH. Compy: `export_sizes` with preset names or width and height objects.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

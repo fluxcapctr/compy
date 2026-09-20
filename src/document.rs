@@ -2605,6 +2605,14 @@ impl Document {
         Ok(new_ids)
     }
 
+    /// A separate copy of the document with the same layers and pixels (shared, copy on write) and no
+    /// history: what Export Sizes reshapes without touching the original.
+    pub fn duplicate(&self) -> Result<Document> {
+        let mut copy = Document::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?;
+        copy.history = History::new(1, 1);
+        Ok(copy)
+    }
+
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
         let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None };

@@ -170,6 +170,79 @@ pub fn pattern_fill(parent: &gtk::Window, names: &[String], done: impl Fn(String
     window.present();
 }
 
+/// File > Export Sizes: which sizes, how the picture meets each frame, the format, and where to write.
+pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::export_sizes::SizePreset>, crate::export_sizes::Fit, crate::export_sizes::Format, [f64; 3], std::path::PathBuf) + 'static) {
+    use crate::export_sizes::{Fit, Format, SizePreset};
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(14).margin_bottom(14).margin_start(14).margin_end(14).build();
+    content.append(&gtk::Label::builder().label("Sizes").xalign(0.0).css_classes(["heading"]).build());
+    let flow = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).column_spacing(4).row_spacing(2).max_children_per_line(3).min_children_per_line(2).homogeneous(true).build();
+    let presets = crate::export_sizes::presets();
+    let checks: Vec<gtk::CheckButton> = presets.iter().map(|p| { let c = gtk::CheckButton::builder().label(format!("{} ({}x{})", p.name, p.width, p.height)).build(); flow.insert(&c, -1); c }).collect();
+    content.append(&flow);
+    let custom_row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+    let custom = gtk::CheckButton::builder().label("Custom").build();
+    let cw = gtk::SpinButton::with_range(1.0, 30_000.0, 1.0);
+    cw.set_value(1080.0);
+    let ch = gtk::SpinButton::with_range(1.0, 30_000.0, 1.0);
+    ch.set_value(1080.0);
+    custom_row.append(&custom); custom_row.append(&cw); custom_row.append(&gtk::Label::new(Some("x"))); custom_row.append(&ch);
+    content.append(&custom_row);
+    let grid = gtk::Grid::builder().row_spacing(8).column_spacing(10).build();
+    grid.attach(&gtk::Label::builder().label("Fit").xalign(0.0).build(), 0, 0, 1, 1);
+    let fit = gtk::DropDown::from_strings(&["Reframe: the picture fills, elements keep their places", "Fill: scale to cover and crop the overflow", "Pad: scale to fit and fill the rest with a color"]);
+    grid.attach(&fit, 1, 0, 2, 1);
+    grid.attach(&gtk::Label::builder().label("Format").xalign(0.0).build(), 0, 1, 1, 1);
+    let format = gtk::DropDown::from_strings(&["PNG", "JPEG"]);
+    grid.attach(&format, 1, 1, 1, 1);
+    let quality = gtk::SpinButton::with_range(1.0, 100.0, 1.0);
+    quality.set_value(90.0);
+    quality.set_tooltip_text(Some("JPEG quality"));
+    grid.attach(&quality, 2, 1, 1, 1);
+    grid.attach(&gtk::Label::builder().label("Background").xalign(0.0).build(), 0, 2, 1, 1);
+    let background = super::color_wheel::ColorButton::new([1.0; 3], std::rc::Rc::new(|_| {}));
+    background.widget.set_tooltip_text(Some("Behind the picture when padding, and under JPEGs"));
+    grid.attach(&background.widget, 1, 2, 1, 1);
+    grid.attach(&gtk::Label::builder().label("Folder").xalign(0.0).build(), 0, 3, 1, 1);
+    let folder_label = gtk::Label::builder().label("(not chosen)").xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Middle).hexpand(true).build();
+    let choose = gtk::Button::with_label("Choose…");
+    grid.attach(&folder_label, 1, 3, 1, 1);
+    grid.attach(&choose, 2, 3, 1, 1);
+    content.append(&grid);
+    let status = gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build();
+    content.append(&status);
+    let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).halign(gtk::Align::End).build();
+    let cancel = gtk::Button::with_label("Cancel");
+    let ok = gtk::Button::builder().label("Export").css_classes(["suggested-action"]).build();
+    buttons.append(&cancel); buttons.append(&ok);
+    content.append(&buttons);
+    let window = floating(parent, &format!("Export Sizes: {title}"), false, 560, &content);
+    let folder: std::rc::Rc<std::cell::RefCell<Option<std::path::PathBuf>>> = std::rc::Rc::new(std::cell::RefCell::new(None));
+    {
+        let (folder, folder_label, window) = (folder.clone(), folder_label.clone(), window.clone());
+        choose.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::builder().title("Export into").modal(true).build();
+            let (folder, folder_label) = (folder.clone(), folder_label.clone());
+            dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| { if let Ok(f) = result { if let Some(p) = f.path() { folder_label.set_label(&p.display().to_string()); *folder.borrow_mut() = Some(p); } } });
+        });
+    }
+    { let w = window.clone(); cancel.connect_clicked(move |_| w.close()); }
+    {
+        let (w, folder, status) = (window.clone(), folder.clone(), status.clone());
+        let presets = presets.clone();
+        ok.connect_clicked(move |_| {
+            let mut sizes: Vec<SizePreset> = checks.iter().zip(&presets).filter(|(c, _)| c.is_active()).map(|(_, p)| p.clone()).collect();
+            if custom.is_active() { sizes.push(SizePreset { name: "Custom".into(), width: cw.value() as i32, height: ch.value() as i32 }); }
+            if sizes.is_empty() { status.set_label("Tick at least one size."); return; }
+            let Some(folder) = folder.borrow().clone() else { status.set_label("Choose a folder to export into."); return };
+            let fit = match fit.selected() { 1 => Fit::Fill, 2 => Fit::Pad, _ => Fit::Reframe };
+            let format = if format.selected() == 1 { Format::Jpeg(quality.value() / 100.0) } else { Format::Png };
+            done(sizes, fit, format, background.color(), folder);
+            w.close();
+        });
+    }
+    window.present();
+}
+
 /// A text field, for renaming.
 pub fn text(parent: &gtk::Window, title: &str, label: &str, initial: &str, done: impl Fn(String) + 'static) {
     let (window, grid, ok) = dialog(parent, title);

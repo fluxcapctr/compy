@@ -815,3 +815,41 @@ fn round_seven_fixes_hold() {
     let _ = std::fs::remove_dir_all(&dir);
     match saved { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
 }
+
+#[test]
+fn export_sizes_reframes_fills_and_pads() {
+    use compositor::export_sizes::{Fit, Format, SizePreset, export_all, file_name, preset_named, remake};
+    // A wide 200 x 100 document: a photo covering everything and a small element in the top right corner.
+    let mut d = Document::blank(200, 100, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.2, 0.4, 0.8], 0.0).unwrap();
+    let logo = d.add_shape_layer(false, (170.0, 10.0, 20.0, 10.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let story = SizePreset { name: "Story".into(), width: 90, height: 160 };
+    // Fill covers the tall frame: the photo runs edge to edge and the corner logo is cropped away.
+    let mut filled = remake(&d, &story, Fit::Fill, [1.0; 3]).unwrap();
+    assert_eq!((filled.width(), filled.height()), (90, 160));
+    assert_eq!(rgb_at(&mut filled, 45, 2), [51, 102, 204, 255], "the photo reaches the top");
+    // Pad keeps the whole picture and fills above and below with the background.
+    let mut padded = remake(&d, &story, Fit::Pad, [1.0; 3]).unwrap();
+    assert_eq!((padded.width(), padded.height()), (90, 160));
+    assert_eq!(rgb_at(&mut padded, 45, 5), [255, 255, 255, 255], "white padding at the top");
+    assert_eq!(rgb_at(&mut padded, 45, 80), [51, 102, 204, 255], "the picture in the middle");
+    // Reframe: the photo fills, and the logo sits in the top right inside a margin, scaled to the short side.
+    let mut reframed = remake(&d, &story, Fit::Reframe, [1.0; 3]).unwrap();
+    assert_eq!((reframed.width(), reframed.height()), (90, 160));
+    let t = reframed.renderer.layer(logo).transform;
+    let (x0, y0, x1, y1) = t.bounds();
+    assert!(x1 <= 90.0 - 4.0 && y0 >= 4.0, "inside the margin: {:?}", t.bounds());
+    assert!(x0 > 45.0 && y1 < 80.0, "still in the top right: {:?}", t.bounds());
+    assert!(t.size.0 < 20.0 && t.size.0 >= 8.0, "scaled to the short side, not the long one: {}", t.size.0);
+    assert_eq!(rgb_at(&mut reframed, 45, 150), [51, 102, 204, 255], "the photo fills the bottom");
+    // Names and presets.
+    assert_eq!(file_name("My Poster", &story, Format::Png), "My Poster-Story-90x160.png");
+    assert_eq!(preset_named("story").map(|p| (p.width, p.height)), Some((1080, 1920)));
+    assert!(preset_named("a4").is_some() && preset_named("nothing like it").is_none());
+    let dir = std::env::temp_dir().join(format!("compy-sizes-{}", std::process::id()));
+    let (made, failed) = export_all(&d, "T", &[story.clone(), SizePreset { name: "Bad".into(), width: 0, height: 10 }], Fit::Fill, Format::Jpeg(0.8), [1.0; 3], &dir);
+    assert_eq!(made.len(), 1);
+    assert!(made[0].ends_with("T-Story-90x160.jpg") && made[0].exists());
+    assert_eq!(failed.len(), 1, "the impossible size is reported, not fatal");
+    let _ = std::fs::remove_dir_all(&dir);
+}

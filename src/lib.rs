@@ -13,6 +13,7 @@ pub mod brush_set;
 pub mod distort;
 pub mod document;
 pub mod effects;
+pub mod export_sizes;
 pub mod ffi;
 pub mod filters;
 pub mod history;

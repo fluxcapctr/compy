@@ -240,6 +240,8 @@ pub struct Script {
     /// Shows the grid; opens the shortcuts window.
     pub grid: bool,
     pub shortcuts: bool,
+    /// Opens the Export Sizes dialog (a screenshot check).
+    pub export_sizes: bool,
     /// Starts typing on the canvas into the active type layer.
     pub type_edit: bool,
     /// Opens the layers panel's background menu.
@@ -262,7 +264,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.type_edit || script.layers_menu || script.assistant || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.export_sizes || script.type_edit || script.layers_menu || script.assistant || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -277,6 +279,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.layer_style { state.open_layer_style(); }
                     if script.grid { p.canvas.doc().borrow_mut().document.grid = Some((100.0, 4)); p.canvas.area.queue_draw(); }
                     if script.shortcuts { state.show_shortcuts(); }
+                    if script.export_sizes { state.export_sizes(); }
                     if let Some(spec) = &script.path {
                         let mut d = p.canvas.doc().borrow_mut();
                         let mut path = crate::path::Path::default();
@@ -427,7 +430,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 105] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 106] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -486,6 +489,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("import", &["<Control><Shift>p"], |s| { let state = s.clone(); dialogs::open_image(s.window.upcast_ref(), move |path| state.edit(|d| d.import_image(&path).map(|_| ()))); }),
         ("export-png", &["<Control><Alt><Shift>w"], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export PNG", &title, "png", move |path| state.edit(|d| d.export_png(&path))); }),
         ("export-jpeg", &["<Control><Alt><Shift>s"], |s| s.export_jpeg()),
+        ("export-sizes", &[], |s| s.export_sizes()),
         ("copy-merged", &["<Control><Shift>c"], |s| s.copy_merged()),
         ("new-layer", &["<Control><Shift>n", "<Control><Alt><Shift>n"], |s| s.edit(|d| { d.add_blank_layer(); Ok(()) })),
         ("new-folder", &["<Control>g"], |s| s.edit(|d| { d.add_folder(); Ok(()) })),
@@ -675,6 +679,7 @@ fn menu() -> gio::Menu {
     file.append(Some("Export PNG…"), Some("win.export-png"));
     file.append(Some("Export JPEG…"), Some("win.export-jpeg"));
     file.append(Some("Export PSD…"), Some("win.export-psd"));
+    file.append(Some("Export Sizes…"), Some("win.export-sizes"));
     file.append(Some("Close"), Some("win.close-tab"));
     menu.append_submenu(Some("File"), &file);
     let edit = gio::Menu::new();
@@ -961,6 +966,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Layer", "Layer > Align, Distribute", "Selected layers to the selection or canvas edges and centers; three or more spaced evenly"),
     ("Layer", "Layer > Shape from Path, Edit Shape Points, Apply Path to Shape", "A Pen path becomes a vector shape; its points can be picked up again and put back"),
     ("Edit", "Edit > Define Pattern, Fill with Pattern", "Save the selection as a tile; fill with a saved tile (the Clone tool's Pattern option stamps one)"),
+    ("File", "File > Export Sizes", "The document at several ad and social sizes at once: reframed, filled or padded"),
     ("Type", "Drag with the Type tool, or the Width field", "Paragraph text that wraps at a width; 0 is a single line"),
     ("Layer", "Layer Style > Blend If", "Show the layer only where its tones, and the tones beneath, fall between black and white points"),
     ("Select", "Ctrl+click a layer row", "Load its pixels as a selection"),
@@ -1346,6 +1352,21 @@ impl App {
             let label = format!("{}{}", d.title, if d.document.is_modified() { " •" } else { "" });
             if let Some(tab) = self.notebook.tab_label(&page.root) { if let Some(l) = tab.first_child().and_downcast::<gtk::Label>() { l.set_label(&label); } }
         }
+    }
+
+    /// File > Export Sizes: the document at several sizes into a folder.
+    fn export_sizes(self: &Rc<Self>) {
+        let mut doc = None;
+        self.with_current(|p| doc = Some(p.canvas.doc().clone()));
+        let Some(doc) = doc else { return };
+        let state = self.clone();
+        let title = self.current_title();
+        dialogs::export_sizes(self.window.upcast_ref(), &title.clone(), move |sizes, fit, format, background, folder| {
+            let (made, failed) = { let d = doc.borrow(); crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder) };
+            let mut text = format!("{} file{} written to {}.", made.len(), if made.len() == 1 { "" } else { "s" }, folder.display());
+            if !failed.is_empty() { text.push_str(&format!("\n\nNot written:\n{}", failed.join("\n"))); }
+            state.alert("Export Sizes", &text);
+        });
     }
 
     fn export_jpeg(self: &Rc<Self>) {

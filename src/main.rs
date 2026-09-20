@@ -79,6 +79,7 @@ fn main() {
                     "--effects" => script.effects = true,
                     "--grid" => script.grid = true,
                     "--shortcuts" => script.shortcuts = true,
+                    "--export-sizes" => script.export_sizes = true,
                     "--type-edit" => script.type_edit = true,
                     "--layers-menu" => script.layers_menu = true,
                     "--assistant" => script.assistant = true,

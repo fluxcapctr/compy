@@ -482,6 +482,27 @@ impl App {
                     "image_size" => { let res = dd.renderer.resolution(); dd.image_size(num(args, "width").unwrap_or(0.0) as i32, num(args, "height").unwrap_or(0.0) as i32, res, crate::format::Sampling::High)?; json!("resized") }
                     "flip" => { let horizontal = text(args, "axis").unwrap_or_default() != "vertical"; if flag(args, "canvas").unwrap_or(false) { dd.flip_canvas(horizontal)?; } else { dd.flip_layer(horizontal); } json!("flipped") }
                     "crop_to_selection" => { dd.crop_to_selection()?; json!("cropped") }
+                    "export_sizes" => {
+                        use crate::export_sizes::{Fit, Format, SizePreset};
+                        let folder = std::path::PathBuf::from(text(args, "folder").unwrap_or_default());
+                        if folder.as_os_str().is_empty() { bail!("folder needed"); }
+                        let mut sizes = Vec::new();
+                        for item in args.get("sizes").and_then(Value::as_array).cloned().unwrap_or_default() {
+                            match &item {
+                                Value::String(name) => sizes.push(crate::export_sizes::preset_named(name).ok_or_else(|| anyhow::anyhow!("no size preset called {name}"))?),
+                                Value::Object(o) => sizes.push(SizePreset { name: o.get("name").and_then(Value::as_str).unwrap_or("Custom").to_string(), width: o.get("width").and_then(Value::as_f64).unwrap_or(0.0) as i32, height: o.get("height").and_then(Value::as_f64).unwrap_or(0.0) as i32 }),
+                                _ => bail!("each size is a preset name or {{name, width, height}}"),
+                            }
+                        }
+                        if sizes.is_empty() { bail!("give at least one size"); }
+                        let fit = Fit::from_name(&text(args, "fit").unwrap_or_else(|| "reframe".into())).ok_or_else(|| anyhow::anyhow!("fit must be reframe, fill or pad"))?;
+                        let format = if text(args, "format").unwrap_or_default().to_lowercase().starts_with("jp") { Format::Jpeg(num(args, "quality").unwrap_or(0.9)) } else { Format::Png };
+                        let background = text(args, "background").and_then(|c| parse_color(&c)).unwrap_or([1.0; 3]);
+                        let title = d.title.clone();
+                        let (made, failed) = crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder);
+                        refresh = false;
+                        json!({"written": made.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "failed": failed})
+                    }
                     "export" => {
                         let path = std::path::PathBuf::from(text(args, "path").unwrap_or_default());
                         if path.as_os_str().is_empty() { bail!("path needed"); }
