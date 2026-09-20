@@ -4,8 +4,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-cargo build --release
-install -Dm755 target/release/compositor "$HOME/.local/bin/compositor"
+# From a source checkout the binary is built; from a release tarball it sits beside this script.
+if [ -f Cargo.toml ]; then
+  cargo build --release
+  install -Dm755 target/release/compositor "$HOME/.local/bin/compositor"
+elif [ -f compositor ]; then
+  install -Dm755 compositor "$HOME/.local/bin/compositor"
+else
+  echo "no Cargo.toml and no compositor binary here" >&2; exit 1
+fi
 
 # The Compy logo, scaled to each icon size (ImageMagick); without it the full-size logo serves every size.
 for size in 16 32 48 64 128 256 512; do

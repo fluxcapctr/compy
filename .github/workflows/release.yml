@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libcairo2-dev libpango1.0-dev libheif-dev imagemagick
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Test
+        run: cargo test --release --lib
+      - name: Package
+        run: |
+          set -e
+          v="${GITHUB_REF_NAME#v}"
+          dir="compy-${v}-linux-x86_64"
+          mkdir -p "$dir/assets"
+          cp target/release/compositor "$dir/"
+          cp install.sh LICENSE README.md "$dir/"
+          cp assets/compy-logo.png assets/compy-mark.png assets/compy-design.md "$dir/assets/"
+          tar czf "$dir.tar.gz" "$dir"
+          echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true

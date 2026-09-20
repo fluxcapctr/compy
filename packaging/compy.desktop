@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Compy
+GenericName=Image Editor
+Comment=Compy: layered image editing with masks, adjustments, layer styles and an AI assistant
+Exec=compositor %F
+Icon=compy
+Terminal=false
+StartupNotify=true
+StartupWMClass=co.ericstevens.compositor
+Categories=Graphics;2DGraphics;RasterGraphics;Photography;
+Keywords=image;photo;layers;compy;compositor;photoshop;psd;
+MimeType=image/vnd.adobe.photoshop;image/png;image/jpeg;image/webp;image/tiff;image/heif;

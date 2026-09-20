@@ -1,0 +1,52 @@
+# Maintainer: Eric Stevens
+pkgname=compy-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Layer-based image editor with masks, adjustments, layer styles, PSD import and export, and an AI assistant"
+arch=('x86_64')
+url="https://github.com/ericstevens/compy"
+license=('MIT')
+depends=('gtk4' 'cairo' 'pango' 'libheif' 'libavif' 'gcc-libs' 'glibc')
+makedepends=('git' 'cargo' 'imagemagick')
+optdepends=('claude-code: the Compy assistant (Claude Code)' 'voxtype: dictation into the assistant')
+provides=('compy')
+conflicts=('compy')
+source=("compy::git+https://github.com/ericstevens/compy.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd compy
+  printf "%s.r%s.g%s" "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd compy
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd compy
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd compy
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release --lib
+}
+
+package() {
+  cd compy
+  install -Dm755 target/release/compositor "$pkgdir/usr/bin/compositor"
+  ln -s compositor "$pkgdir/usr/bin/compy"
+  for size in 16 32 48 64 128 256 512; do
+    install -d "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps"
+    magick assets/compy-logo.png -resize "${size}x${size}" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/compy.png"
+  done
+  install -Dm644 packaging/compy.desktop "$pkgdir/usr/share/applications/compy.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
