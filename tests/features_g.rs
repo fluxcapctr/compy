@@ -934,3 +934,23 @@ fn rotate_straighten_history_webp_layers_and_overlay_styles() {
     let _ = std::fs::remove_dir_all(&dir);
     match saved_home { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
 }
+
+#[test]
+fn gif_and_avif_export() {
+    let mut d = Document::blank(30, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 15.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let dir = std::env::temp_dir().join(format!("compy-gif-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gif = dir.join("out.gif");
+    d.export_gif(&gif).unwrap();
+    let decoded = image::open(&gif).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (30, 20));
+    assert_eq!(decoded.get_pixel(3, 3).0, [255, 0, 0, 255]);
+    assert_eq!(decoded.get_pixel(25, 3).0[3], 0, "transparent where the canvas is empty");
+    let avif = dir.join("out.avif");
+    match d.export_avif(&avif, 80.0) {
+        Ok(()) => { assert!(avif.exists() && std::fs::metadata(&avif).unwrap().len() > 0); assert!(!dir.join(format!("out.avif-source-{}.png", std::process::id())).exists(), "the temporary PNG is gone"); }
+        Err(e) => assert!(e.to_string().contains("libavif"), "{e:#}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

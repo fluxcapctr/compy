@@ -300,8 +300,10 @@ steps after it stay until the next edit. The color picker keeps swatches: + save
 good, right-click a swatch removes it. Image > Rotate Canvas turns everything a quarter turn either
 way, a half turn or any angle, the canvas growing to hold the picture; Image > Straighten to the Pen
 Line levels a horizon: two Pen points along it, then the command turns and crops the canvas upright.
-File > Export WebP writes a lossless WebP; File > Export Layers to Files writes every visible layer as
-its own PNG, trimmed and numbered from the bottom. Compy: layer_style takes gradient_overlay and
+File > Export WebP writes a lossless WebP, Export GIF a single-frame 256-color GIF with transparency,
+Export AVIF an AVIF at a quality (100 is lossless) through libavif's `avifenc`, which Omarchy ships;
+File > Export Layers to Files writes every visible layer as its own PNG, trimmed and numbered from the
+bottom. Compy: layer_style takes gradient_overlay and
 pattern_overlay; rotate_canvas, straighten, export_layers, and export accepts .webp.
 
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the

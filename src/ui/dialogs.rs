@@ -293,6 +293,15 @@ pub fn history(parent: &gtk::Window, doc: super::DocRef, refresh: std::rc::Rc<dy
     window.present();
 }
 
+/// A quality from 1 to 100.
+pub fn quality(parent: &gtk::Window, title: &str, done: impl Fn(f64) + 'static) {
+    let (window, grid, ok) = dialog(parent, title);
+    let value = spin(&grid, 0, "Quality (100 is lossless)", 1.0, 100.0, 1.0, 80.0, 0);
+    let w = window.clone();
+    ok.connect_clicked(move |_| { done(value.value()); w.close(); });
+    window.present();
+}
+
 /// An angle in degrees.
 pub fn angle(parent: &gtk::Window, title: &str, label: &str, done: impl Fn(f64) + 'static) {
     let (window, grid, ok) = dialog(parent, title);

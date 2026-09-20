@@ -1234,6 +1234,37 @@ impl Document {
 
     pub fn export_webp(&mut self, path: &std::path::Path) -> Result<()> { let bytes = self.webp_bytes()?; std::fs::write(path, bytes)?; Ok(()) }
 
+    /// A single-frame GIF: 256 colors chosen for the picture, transparency where the composite is clear.
+    pub fn export_gif(&mut self, path: &std::path::Path) -> Result<()> {
+        let image = self.renderer.render_flat()?;
+        let (rgba, w, h) = crate::png_io::straight_rgba(&image)?;
+        let buffer = image::RgbaImage::from_raw(w as u32, h as u32, rgba).ok_or_else(|| anyhow::anyhow!("the picture could not be packed"))?;
+        let mut out = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
+            encoder.encode_frame(image::Frame::new(buffer))?;
+        }
+        std::fs::write(path, out)?;
+        Ok(())
+    }
+
+    /// AVIF through libavif's encoder (`avifenc`), which Omarchy ships: a PNG goes out beside the target
+    /// and comes back compressed at `quality` (0 to 100; 100 is lossless).
+    pub fn export_avif(&mut self, path: &std::path::Path, quality: f64) -> Result<()> {
+        let encoder = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("avifenc")).find(|p| p.exists()));
+        let Some(encoder) = encoder else { bail!("AVIF needs libavif's encoder: run `omarchy pkg add libavif`, then try again.") };
+        let temp = path.with_extension(format!("avif-source-{}.png", std::process::id()));
+        self.export_png(&temp)?;
+        let q = quality.clamp(0.0, 100.0).round() as i64;
+        let mut command = std::process::Command::new(encoder);
+        if q >= 100 { command.arg("--lossless"); } else { command.args(["-q", &q.to_string(), "--speed", "6"]); }
+        let output = command.arg(&temp).arg(path).output();
+        let _ = std::fs::remove_file(&temp);
+        let output = output.map_err(|e| anyhow::anyhow!("running avifenc: {e}"))?;
+        if !output.status.success() { bail!("avifenc failed: {}", String::from_utf8_lossy(&output.stderr).trim()); }
+        Ok(())
+    }
+
     /// File > Export Layers: every visible pixel, type and shape layer as its own PNG in `folder`, at its
     /// own bounds (`trim`) or on the full canvas, numbered from the bottom. Returns the files written.
     pub fn export_layers(&mut self, folder: &std::path::Path, trim: bool) -> Result<Vec<std::path::PathBuf>> {

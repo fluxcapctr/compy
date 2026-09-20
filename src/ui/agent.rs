@@ -536,7 +536,7 @@ impl App {
                     "export" => {
                         let path = std::path::PathBuf::from(text(args, "path").unwrap_or_default());
                         if path.as_os_str().is_empty() { bail!("path needed"); }
-                        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")) { dd.export_jpeg(&path, num(args, "quality").map(|q| if q > 1.0 { q / 100.0 } else { q }).unwrap_or(0.9), [1.0; 3])?; } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("webp")) { dd.export_webp(&path)?; } else { dd.export_png(&path)?; }
+                        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")) { dd.export_jpeg(&path, num(args, "quality").map(|q| if q > 1.0 { q / 100.0 } else { q }).unwrap_or(0.9), [1.0; 3])?; } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("webp")) { dd.export_webp(&path)?; } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif")) { dd.export_gif(&path)?; } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("avif")) { dd.export_avif(&path, num(args, "quality").map(|q| if q <= 1.0 { q * 100.0 } else { q }).unwrap_or(80.0))?; } else { dd.export_png(&path)?; }
                         refresh = false; json!(format!("wrote {}", path.display()))
                     }
                     "save" => {

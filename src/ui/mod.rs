@@ -430,7 +430,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 114] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 116] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -492,6 +492,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("export-sizes", &[], |s| s.export_sizes()),
         ("export-webp", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export WebP", &title, "webp", move |path| state.edit(|d| d.export_webp(&path))); }),
         ("export-layers", &[], |s| s.export_layers()),
+        ("export-gif", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export GIF", &title, "gif", move |path| state.edit(|d| d.export_gif(&path))); }),
+        ("export-avif", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::quality(s.window.upcast_ref(), "Export AVIF", move |q| { let state = state.clone(); let title = title.clone(); let window = state.window.clone(); dialogs::save_as(window.upcast_ref(), "Export AVIF", &title, "avif", move |path| state.edit(|d| d.export_avif(&path, q))); }); }),
         ("history", &["<Alt>h"], |s| { let mut doc = None; let mut refresh: Option<Rc<dyn Fn()>> = None; s.with_current(|p| { doc = Some(p.canvas.doc().clone()); let page = p.canvas.clone(); refresh = Some(Rc::new(move || { if let Some(r) = page.refresh_fn() { r(); } })); }); if let (Some(doc), Some(refresh)) = (doc, refresh) { dialogs::history(s.window.upcast_ref(), doc, refresh); } }),
         ("rotate-canvas-cw", &[], |s| { s.edit(|d| d.rotate_canvas(90.0)); s.with_current(|p| p.canvas.fit()); }),
         ("rotate-canvas-ccw", &[], |s| { s.edit(|d| d.rotate_canvas(-90.0)); s.with_current(|p| p.canvas.fit()); }),
@@ -689,6 +691,8 @@ fn menu() -> gio::Menu {
     file.append(Some("Export PSD…"), Some("win.export-psd"));
     file.append(Some("Export Sizes…"), Some("win.export-sizes"));
     file.append(Some("Export WebP…"), Some("win.export-webp"));
+    file.append(Some("Export GIF…"), Some("win.export-gif"));
+    file.append(Some("Export AVIF…"), Some("win.export-avif"));
     file.append(Some("Export Layers to Files…"), Some("win.export-layers"));
     file.append(Some("Close"), Some("win.close-tab"));
     menu.append_submenu(Some("File"), &file);
@@ -985,7 +989,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Layer", "Layer > Shape from Path, Edit Shape Points, Apply Path to Shape", "A Pen path becomes a vector shape; its points can be picked up again and put back"),
     ("Edit", "Edit > Define Pattern, Fill with Pattern", "Save the selection as a tile; fill with a saved tile (the Clone tool's Pattern option stamps one)"),
     ("File", "File > Export Sizes", "The document at several ad and social sizes at once: reframed, filled or padded"),
-    ("File", "File > Export WebP, Export Layers to Files", "A lossless WebP of the composite; every layer as its own PNG in a folder"),
+    ("File", "File > Export WebP, GIF, AVIF, Layers to Files", "A lossless WebP, a 256-color GIF, an AVIF at a quality (through libavif), every layer as its own PNG"),
     ("Edit", "Alt+H", "History: the list of steps, click one to go back to it"),
     ("Image", "Image > Rotate Canvas, Straighten", "Quarter turns, a half turn or any angle; straighten to a two-point Pen line along the horizon"),
     ("Color", "Swatches in the color picker", "+ saves the current color for good; right-click a swatch to remove it"),
