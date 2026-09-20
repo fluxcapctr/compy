@@ -7,6 +7,36 @@ A Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a l
 macOS. The original app's C pixel core (`csrc/`) is compiled unchanged; the rest is rebuilt in Rust on Cairo,
 with the Swift app checked out as a read-only submodule in `reference/` and used as the specification.
 
+## Install
+
+**Omarchy and Arch**, from the AUR (the package builds from this repository):
+
+```
+omarchy pkg aur add compy-git
+```
+
+or `yay -S compy-git`. Then launch Compy from the app launcher, or run `compy`.
+
+**Any Linux**, from a release: download the tarball from the Releases page, unpack it, and run
+`./install.sh` inside. It puts the binary in `~/.local/bin`, the icon and desktop entry under
+`~/.local/share`, and touches nothing in `/usr`. Needs GTK 4.14 or newer, Cairo, Pango and libheif
+installed by the distribution (`libgtk-4-1 libheif1` on Debian and Ubuntu 24.04 or newer).
+
+**From source**: a Rust toolchain plus the development packages (`gtk4 cairo pango libheif` on Arch;
+`libgtk-4-dev libcairo2-dev libpango1.0-dev libheif-dev` on Debian and Ubuntu), then
+
+```
+git clone https://github.com/ericstevens/compy.git
+cd compy
+./install.sh
+```
+
+The `reference/` submodule (the macOS original, used as the specification) is not needed to build.
+
+**Optional pieces**: [Claude Code](https://claude.com/claude-code) for the Compy assistant, a fal.ai
+key for generative fill (File > Generative Fill asks for it once), `libavif` for AVIF export, and
+`voxtype` for dictation.
+
 Progress follows the phases in the build plan:
 
 | Phase | State |
