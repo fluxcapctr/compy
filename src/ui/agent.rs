@@ -23,6 +23,9 @@ struct Pending { request: Request, reply: mpsc::Sender<Response> }
 /// the result lands there and not on whatever is current when it finishes.
 struct Job {
     status: std::sync::Arc<std::sync::Mutex<(String, Option<Result<Value, String>>)>>,
+    /// What the panel says while it runs ("nano bananaing"), and when it began.
+    label: String,
+    started: std::time::Instant,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     document: uuid::Uuid,
     source: Option<uuid::Uuid>,
@@ -111,6 +114,24 @@ pub fn serve(app: Rc<App>) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// The panel's word for a fal model at work: "nano bananaing", "gpting", "fluxing".
+fn model_verb(model: &str) -> String {
+    let m = model.to_ascii_lowercase();
+    if m.contains("nano-banana") { "nano bananaing".into() } else if m.starts_with("openai/") || m.contains("gpt") { "gpting".into() } else if m.contains("flux") { "fluxing".into() }
+    else if m.contains("aura") { "upscaling (Aura SR)".into() } else if m.contains("relight") { "relighting".into() } else { format!("running {model}") }
+}
+
+/// What a running job says, for the panel: the verb, the seconds so far, and fal's own status line.
+pub fn running_job_status() -> Option<String> {
+    JOBS.with(|jobs| {
+        let jobs = jobs.borrow();
+        let job = jobs.values().max_by_key(|j| j.started)?;
+        let status = job.status.lock().ok().map(|s| s.0.clone()).unwrap_or_default();
+        let secs = job.started.elapsed().as_secs();
+        Some(format!("{}… {secs} s{}", job.label, if status.is_empty() { String::new() } else { format!(" · {}", status.trim_end_matches('…')) }))
+    })
 }
 
 /// The undo step a tool's call makes: "new_layer" reads as "New Layer".
@@ -423,7 +444,7 @@ impl App {
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
                         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
-                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: dd.selection.clone() }));
+                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), label: format!("filling with {}", model.name), started: std::time::Instant::now(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: dd.selection.clone() }));
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
@@ -473,7 +494,7 @@ impl App {
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
                         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
-                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: None }));
+                        JOBS.with(|jobs| jobs.borrow_mut().insert(job, Job { status: status.clone(), label: model_verb(&model), started: std::time::Instant::now(), cancelled: cancelled.clone(), document: dd.document_id, source: dd.active, selection: None }));
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
@@ -581,6 +602,8 @@ pub struct Assistant {
     child_pid: Cell<Option<u32>>,
     /// Counts turns; a turn's timer and process act only while this still names their turn.
     turn: Cell<u64>,
+    /// What Compy is doing in this turn, for the status line ("thinking", or a tool's name).
+    activity: RefCell<String>,
     replied: Cell<bool>,
     app: Rc<App>,
 }
@@ -632,7 +655,7 @@ impl Assistant {
         row.append(&send);
         body.append(&row);
         content.append(&body);
-        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), turn: Cell::new(0), replied: Cell::new(false), app });
+        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), turn: Cell::new(0), activity: RefCell::new(String::new()), replied: Cell::new(false), app });
         { let t = this.clone(); fresh.connect_clicked(move |_| t.reset()); }
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
         { let t = this.clone(); entry.connect_changed(move |_| t.entry_changed.set(Some(std::time::Instant::now()))); }
@@ -795,6 +818,7 @@ impl Assistant {
         self.busy.set(true);
         self.send.set_sensitive(false);
         self.status.set_label("Compy is thinking…");
+        *self.activity.borrow_mut() = "thinking".into();
         let fail = |this: &Self, what: String| { this.append("system", &what); this.busy.set(false); this.send.set_sensitive(true); };
         // The MCP server is this same binary, pointed at the running app.
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("compositor"));
@@ -838,10 +862,23 @@ impl Assistant {
         }
         let this = self.clone();
         let mut quiet_since = std::time::Instant::now();
+        let turn_started = std::time::Instant::now();
+        let mut shown_at = std::time::Instant::now();
         let last_error = Rc::new(RefCell::new(String::new()));
         glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
             // A newer turn (or a reset) owns the panel now: this timer is done, its process already stopped.
             if this.turn.get() != turn { return glib::ControlFlow::Break; }
+            // The status line keeps time, so a long generation reads as working rather than stalled: a fal
+            // job shows its model and fal's own progress; otherwise the tool in hand and the seconds so far.
+            if shown_at.elapsed() >= std::time::Duration::from_millis(250) && !this.activity.borrow().is_empty() {
+                shown_at = std::time::Instant::now();
+                let secs = turn_started.elapsed().as_secs();
+                let text = match running_job_status() {
+                    Some(job) => job,
+                    None => { let a = this.activity.borrow(); if *a == "thinking" { format!("Compy is thinking… {secs} s") } else { format!("Compy is working ({a})… {secs} s") } }
+                };
+                this.status.set_label(&text);
+            }
             // A turn that says nothing for five minutes is stuck: stop it and say so.
             if quiet_since.elapsed() > std::time::Duration::from_secs(300) && this.child_pid.get() == Some(pid) { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); this.child_pid.set(None); }
             while let Ok((kind, line)) = rx.try_recv() {
@@ -853,6 +890,7 @@ impl Assistant {
                         if this.child_pid.get() == Some(pid) { this.child_pid.set(None); }
                         this.busy.set(false);
                         this.send.set_sensitive(true);
+                        this.activity.borrow_mut().clear();
                         if line != "0" {
                             let detail = last_error.borrow().clone();
                             this.append("system", &format!("Compy stopped ({}). {}", if line == "-1" { "it was interrupted".to_string() } else { format!("status {line}") }, if detail.is_empty() { "Try again, or start a new conversation with the arrow button.".to_string() } else { detail.clone() }));
@@ -883,6 +921,7 @@ impl Assistant {
                         Some("tool_use") => {
                             // The work shows on the canvas, not in the chat: just a word in the status line.
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("").trim_start_matches("mcp__compy__").replace('_', " ");
+                            *self.activity.borrow_mut() = name.clone();
                             self.status.set_label(&format!("Compy is working ({name})…"));
                         }
                         _ => {}
@@ -891,6 +930,7 @@ impl Assistant {
             }
             Some("result") => {
                 // On a Claude subscription nothing is billed per turn, so no figure is shown.
+                self.activity.borrow_mut().clear();
                 self.status.set_label("Done.");
             }
             _ => {}

@@ -342,7 +342,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     css.load_from_string("button.tool, .layers-panel row button, .layers-footer button, .layers-panel menubutton > button { background-image: none; background-color: transparent; border: none; box-shadow: none; outline: none; } button.tool:hover, .layers-panel row button:hover, .layers-footer button:hover { background-color: alpha(currentColor, 0.12); } button.tool { min-width: 0; min-height: 0; padding: 3px; border-radius: 3px; } button.tool.mark { padding: 1px; } button.swatch { min-width: 0; min-height: 0; padding: 0; border-radius: 0; border: 1px solid alpha(currentColor, 0.5); } .panel-tab { padding: 5px 12px; } .panel-tab.current { background-color: alpha(@window_bg_color, 1); border-bottom: 2px solid @accent_bg_color; } .layers-footer button { min-width: 0; min-height: 0; padding: 3px 5px; } .type-bold { font-weight: bold; } .type-italic { font-style: italic; } list.navigation-sidebar > row.multi { background-color: alpha(@accent_bg_color, 0.22); } list.navigation-sidebar > row.drop-above { box-shadow: inset 0 3px @accent_bg_color; } list.navigation-sidebar > row.drop-below { box-shadow: inset 0 -3px @accent_bg_color; } list.navigation-sidebar > row.drop-into { box-shadow: inset 0 0 0 2px @accent_bg_color; }");
     if let Some(display) = gdk::Display::default() { gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION); }
 
-    let window = gtk::ApplicationWindow::builder().application(app).title("Compy").default_width(1280).default_height(820).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("Compy").default_width(1280).default_height(820).icon_name("compy").build();
     let header = gtk::HeaderBar::new();
     // File, Edit, Select, Layer, View, Image, Filter and Help along the top, as Photoshop lays them out.
     let bar = gtk::PopoverMenuBar::from_model(Some(&menu()));
@@ -808,6 +808,15 @@ const PRESETS: &[(&str, &str, i32, i32, i32)] = &[
 /// each drawn as a box in its own aspect ratio, a custom size, and Open.
 fn start_page() -> gtk::Widget {
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(14).margin_top(36).margin_bottom(36).margin_start(48).margin_end(48).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
+    // The logo, built into the binary so the start page has it wherever the app runs from.
+    if let Ok(texture) = gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("../../assets/compy-logo.png"))) {
+        let logo = gtk::Picture::for_paintable(&texture);
+        logo.set_size_request(160, 160);
+        logo.set_can_shrink(true);
+        logo.set_halign(gtk::Align::Start);
+        logo.set_margin_bottom(6);
+        page.append(&logo);
+    }
     let recovered = crate::autosave::recoverable();
     if !recovered.is_empty() {
         page.append(&gtk::Label::builder().label("Recovered").xalign(0.0).css_classes(["heading"]).build());

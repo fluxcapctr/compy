@@ -7,9 +7,11 @@ cd "$(dirname "$0")"
 cargo build --release
 install -Dm755 target/release/compositor "$HOME/.local/bin/compositor"
 
-icons=reference/Compositor/Assets.xcassets/AppIcon.appiconset
-for size in 16 32 64 128 256 512; do
-  install -Dm644 "$icons/app-icon-$size.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/compositor.png"
+# The Compy logo, scaled to each icon size (ImageMagick); without it the full-size logo serves every size.
+for size in 16 32 48 64 128 256 512; do
+  target="$HOME/.local/share/icons/hicolor/${size}x${size}/apps/compy.png"
+  mkdir -p "$(dirname "$target")"
+  if command -v magick >/dev/null 2>&1; then magick assets/compy-logo.png -resize "${size}x${size}" "$target"; else cp assets/compy-logo.png "$target"; fi
 done
 
 install -Dm644 /dev/stdin "$HOME/.local/share/applications/compositor.desktop" <<'DESKTOP'
@@ -20,7 +22,7 @@ Name=Compy
 GenericName=Image Editor
 Comment=Compy: layered image editing with masks, adjustments and filters
 Exec=compositor %F
-Icon=compositor
+Icon=compy
 Terminal=false
 StartupNotify=true
 StartupWMClass=co.ericstevens.compositor
