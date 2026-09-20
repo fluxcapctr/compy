@@ -47,7 +47,7 @@ pub fn colors_path() -> PathBuf {
     home.join(".local/state/omarchy/current/theme/colors.toml")
 }
 
-fn hex(text: &str) -> Option<(f64, f64, f64)> {
+pub fn hex(text: &str) -> Option<(f64, f64, f64)> {
     let t = text.trim().trim_start_matches('#');
     if t.len() != 6 { return None; }
     let v = u32::from_str_radix(t, 16).ok()?;

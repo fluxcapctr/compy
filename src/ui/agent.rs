@@ -165,6 +165,8 @@ fn state_of(doc: &Doc) -> Value {
             "opacity": l.opacity(), "blend": l.blend_mode().name(), "active": d.active == Some(l.id), "selected": d.selected.contains(&l.id),
             "x": t.origin.0, "y": t.origin.1, "width": t.size.0, "height": t.size.1, "rotation": t.rotation,
             "mask": l.mask_file.is_some(), "clipped_to_below": l.mask_source_id.is_some(), "effects": l.effects.is_some(),
+            "artboard": l.artboard.as_ref().filter(|_| l.is_group()).map(|b| json!({"x": b.x, "y": b.y, "width": b.width, "height": b.height})),
+            "in_artboard": d.artboard_of(l.id).filter(|a| *a != l.id).map(crate::format::upper),
             "text": l.text.as_ref().and_then(crate::text::TextStyle::from_record).map(|s| s.text),
         })
     }).collect();
@@ -501,6 +503,29 @@ impl App {
                     "image_size" => { let res = dd.renderer.resolution(); dd.image_size(num(args, "width").unwrap_or(0.0) as i32, num(args, "height").unwrap_or(0.0) as i32, res, crate::format::Sampling::High)?; json!("resized") }
                     "flip" => { let horizontal = text(args, "axis").unwrap_or_default() != "vertical"; if flag(args, "canvas").unwrap_or(false) { dd.flip_canvas(horizontal)?; } else { dd.flip_layer(horizontal); } json!("flipped") }
                     "crop_to_selection" => { dd.crop_to_selection()?; json!("cropped") }
+                    "new_artboard" => {
+                        let (mut w, mut h) = (num(args, "width").unwrap_or(0.0), num(args, "height").unwrap_or(0.0));
+                        if let Some(p) = text(args, "preset") { let pr = crate::export_sizes::preset_named(&p).ok_or_else(|| anyhow::anyhow!("no size preset called {p}"))?; w = pr.width as f64; h = pr.height as f64; }
+                        if w < 1.0 || h < 1.0 { bail!("give a preset or a width and height"); }
+                        let name = text(args, "name").unwrap_or_else(|| format!("Artboard {}", dd.artboards().len() + 1));
+                        let (x, y) = match (num(args, "x"), num(args, "y")) { (Some(x), Some(y)) => (x, y), _ => dd.next_artboard_place(w, h) };
+                        let background = if flag(args, "transparent").unwrap_or(false) { None } else { Some(text(args, "background").and_then(|c| parse_color(&c)).unwrap_or([1.0; 3])) };
+                        let id = dd.add_artboard(&name, (x, y, w, h), background)?;
+                        json!({"id": crate::format::upper(id), "x": x, "y": y, "width": w, "height": h})
+                    }
+                    "artboard_from_layers" => { let name = text(args, "name").unwrap_or_else(|| format!("Artboard {}", dd.artboards().len() + 1)); let id = dd.artboard_from_layers(&name)?; json!({"id": crate::format::upper(id)}) }
+                    "move_artboard" => {
+                        let key = text(args, "artboard").unwrap_or_default();
+                        let (id, _, r) = dd.artboards().into_iter().find(|(id, name, _)| crate::format::upper(*id).eq_ignore_ascii_case(&key) || *name == key).ok_or_else(|| anyhow::anyhow!("no artboard called {key}"))?;
+                        dd.set_artboard_frame(id, (num(args, "x").unwrap_or(r.0), num(args, "y").unwrap_or(r.1), num(args, "width").unwrap_or(r.2), num(args, "height").unwrap_or(r.3)))?; json!("moved")
+                    }
+                    "export_artboards" => {
+                        let folder = std::path::PathBuf::from(text(args, "folder").unwrap_or_default());
+                        if folder.as_os_str().is_empty() { bail!("folder needed"); }
+                        let quality = if text(args, "format").unwrap_or_default().to_lowercase().starts_with("jp") { Some(num(args, "quality").map(|q| if q > 1.0 { q / 100.0 } else { q }).unwrap_or(0.9)) } else { None };
+                        let files = dd.export_artboards(&folder, quality)?;
+                        refresh = false; json!({"written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()})
+                    }
                     "rotate_canvas" => { dd.rotate_canvas(num(args, "degrees").unwrap_or(0.0))?; json!("rotated") }
                     "straighten" => {
                         let point = |k: &str| args.get(k).and_then(Value::as_array).and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))).ok_or_else(|| anyhow::anyhow!("{k} must be [x, y]"));
@@ -514,8 +539,9 @@ impl App {
                     }
                     "export_sizes" => {
                         use crate::export_sizes::{Fit, Format, SizePreset};
+                        let as_boards = flag(args, "as_artboards").unwrap_or(false);
                         let folder = std::path::PathBuf::from(text(args, "folder").unwrap_or_default());
-                        if folder.as_os_str().is_empty() { bail!("folder needed"); }
+                        if folder.as_os_str().is_empty() && !as_boards { bail!("folder needed (or as_artboards true)"); }
                         let mut sizes = Vec::new();
                         for item in args.get("sizes").and_then(Value::as_array).cloned().unwrap_or_default() {
                             match &item {
@@ -528,10 +554,15 @@ impl App {
                         let fit = Fit::from_name(&text(args, "fit").unwrap_or_else(|| "reframe".into())).ok_or_else(|| anyhow::anyhow!("fit must be reframe, fill or pad"))?;
                         let format = if text(args, "format").unwrap_or_default().to_lowercase().starts_with("jp") { Format::Jpeg(num(args, "quality").unwrap_or(0.9)) } else { Format::Png };
                         let background = text(args, "background").and_then(|c| parse_color(&c)).unwrap_or([1.0; 3]);
-                        let title = d.title.clone();
-                        let (made, failed) = crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder);
-                        refresh = false;
-                        json!({"written": made.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "failed": failed})
+                        if as_boards {
+                            let (made, failed) = crate::export_sizes::add_as_artboards(&mut d.document, &sizes, fit, background);
+                            json!({"artboards": made.iter().map(|id| crate::format::upper(*id)).collect::<Vec<_>>(), "failed": failed})
+                        } else {
+                            let title = d.title.clone();
+                            let (made, failed) = crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder);
+                            refresh = false;
+                            json!({"written": made.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "failed": failed})
+                        }
                     }
                     "export" => {
                         let path = std::path::PathBuf::from(text(args, "path").unwrap_or_default());

@@ -186,7 +186,7 @@ impl Inner {
                 let collapsed = d.collapsed.contains(&id);
                 if group && collapsed { hidden_below = Some(depth); }
                 let thumbnail = if group || layer.adjustment.is_some() { None } else { d.document.renderer.thumbnail(id, THUMBNAIL).ok().flatten() };
-                let kind = if group { "folder" } else if layer.adjustment.is_some() { "adjustment" } else { "new-layer" };
+                let kind = if layer.is_artboard() { "artboard" } else if group { "folder" } else if layer.adjustment.is_some() { "adjustment" } else { "new-layer" };
                 let mask = d.document.renderer.mask_thumbnail(id, MASK_THUMBNAIL).ok().flatten();
                 let mask_target = d.document.mask_target() && d.document.active == Some(id);
                 infos.push(RowInfo { id, depth, visible, own_visible: layer.is_visible, group, collapsed, name: layer.name.clone(), detail: detail_text(&d.document.renderer, id), thumbnail, kind, mask, mask_enabled: layer.mask_enabled(), mask_target, clipped: layer.mask_source_id.is_some() });
@@ -510,7 +510,7 @@ fn detail_text(renderer: &crate::render::Renderer, id: Uuid) -> String {
     let layer = renderer.layer(id);
     let mut parts = Vec::new();
     if let Some((w, h)) = renderer.image_size(id) { parts.push(format!("{w}×{h}")); }
-    if layer.is_group() { parts.push("Folder".into()); }
+    if let Some(b) = layer.artboard.as_ref().filter(|_| layer.is_group()) { parts.push(format!("Artboard {}×{}", b.width as i64, b.height as i64)); } else if layer.is_group() { parts.push("Folder".into()); }
     if let Some(a) = &layer.adjustment { parts.push(a.kind.clone()); }
     if layer.blend_mode() != BlendMode::Normal { parts.push(layer.blend_mode().name().into()); }
     if layer.opacity() != 1.0 { parts.push(format!("{:.0}%", layer.opacity() * 100.0)); }

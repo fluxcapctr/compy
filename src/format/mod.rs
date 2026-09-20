@@ -249,10 +249,30 @@ pub struct Layer {
     /// Layer effects: shadows, glows, bevel, stroke, overlay (this app's extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<serde_json::Value>,
+    /// An artboard: a folder that owns a rectangle of the canvas; its layers clip to it (this app's extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artboard: Option<Artboard>,
+}
+
+/// An artboard's frame on the canvas and the color behind its layers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Artboard {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<[f64; 3]>,
+}
+
+impl Artboard {
+    pub fn rect(&self) -> (f64, f64, f64, f64) { (self.x, self.y, self.width, self.height) }
+    pub fn is_valid(&self) -> bool { [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite()) && self.width >= 1.0 && self.height >= 1.0 && self.width <= 30_000.0 && self.height <= 30_000.0 && self.background.is_none_or(|c| c.iter().all(|v| (0.0..=1.0).contains(v))) }
 }
 
 impl Layer {
     pub fn is_group(&self) -> bool { self.is_group == Some(true) }
+    pub fn is_artboard(&self) -> bool { self.is_group() && self.artboard.is_some() }
     pub fn opacity(&self) -> f64 { self.opacity.unwrap_or(1.0) }
     pub fn blend_mode(&self) -> BlendMode { self.blend_mode.unwrap_or_default() }
     pub fn mask_enabled(&self) -> bool { self.mask_file.is_some() && self.mask_enabled.unwrap_or(true) }

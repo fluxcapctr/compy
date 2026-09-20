@@ -242,6 +242,8 @@ pub struct Script {
     pub shortcuts: bool,
     /// Opens the Export Sizes dialog (a screenshot check).
     pub export_sizes: bool,
+    /// Adds a story and a square artboard from the document (a screenshot check).
+    pub artboards: bool,
     /// Starts typing on the canvas into the active type layer.
     pub type_edit: bool,
     /// Opens the layers panel's background menu.
@@ -264,7 +266,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.export_sizes || script.type_edit || script.layers_menu || script.assistant || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.export_sizes || script.artboards || script.type_edit || script.layers_menu || script.assistant || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -280,6 +282,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     if script.grid { p.canvas.doc().borrow_mut().document.grid = Some((100.0, 4)); p.canvas.area.queue_draw(); }
                     if script.shortcuts { state.show_shortcuts(); }
                     if script.export_sizes { state.export_sizes(); }
+                    if script.artboards { state.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); let sizes = vec![crate::export_sizes::preset_named("story").unwrap(), crate::export_sizes::preset_named("instagram post").unwrap()]; let _ = crate::export_sizes::add_as_artboards(&mut d.document, &sizes, crate::export_sizes::Fit::Reframe, [1.0; 3]); } p.refresh(); p.canvas.fit(); }); }
                     if let Some(spec) = &script.path {
                         let mut d = p.canvas.doc().borrow_mut();
                         let mut path = crate::path::Path::default();
@@ -430,7 +433,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 116] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 119] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -492,6 +495,9 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("export-sizes", &[], |s| s.export_sizes()),
         ("export-webp", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export WebP", &title, "webp", move |path| state.edit(|d| d.export_webp(&path))); }),
         ("export-layers", &[], |s| s.export_layers()),
+        ("new-artboard", &[], |s| { let state = s.clone(); let count = { let mut n = 0; s.with_current(|p| n = p.canvas.doc().borrow().document.artboards().len()); n }; dialogs::new_artboard(s.window.upcast_ref(), count, move |name, w, h, background| { state.edit(|d| { let (x, y) = d.next_artboard_place(w as f64, h as f64); d.add_artboard(&name, (x, y, w as f64, h as f64), background).map(|_| ()) }); state.with_current(|p| p.canvas.fit()); }); }),
+        ("artboard-from-layers", &[], |s| { let state = s.clone(); let count = { let mut n = 0; s.with_current(|p| n = p.canvas.doc().borrow().document.artboards().len()); n }; dialogs::text(s.window.upcast_ref(), "Artboard from Layers", "Name", &format!("Artboard {}", count + 1), move |name| state.edit(|d| d.artboard_from_layers(&name).map(|_| ()))); }),
+        ("export-artboards", &[], |s| s.export_artboards()),
         ("export-gif", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::save_as(s.window.upcast_ref(), "Export GIF", &title, "gif", move |path| state.edit(|d| d.export_gif(&path))); }),
         ("export-avif", &[], |s| { let state = s.clone(); let title = s.current_title(); dialogs::quality(s.window.upcast_ref(), "Export AVIF", move |q| { let state = state.clone(); let title = title.clone(); let window = state.window.clone(); dialogs::save_as(window.upcast_ref(), "Export AVIF", &title, "avif", move |path| state.edit(|d| d.export_avif(&path, q))); }); }),
         ("history", &["<Alt>h"], |s| { let mut doc = None; let mut refresh: Option<Rc<dyn Fn()>> = None; s.with_current(|p| { doc = Some(p.canvas.doc().clone()); let page = p.canvas.clone(); refresh = Some(Rc::new(move || { if let Some(r) = page.refresh_fn() { r(); } })); }); if let (Some(doc), Some(refresh)) = (doc, refresh) { dialogs::history(s.window.upcast_ref(), doc, refresh); } }),
@@ -694,6 +700,7 @@ fn menu() -> gio::Menu {
     file.append(Some("Export GIF…"), Some("win.export-gif"));
     file.append(Some("Export AVIF…"), Some("win.export-avif"));
     file.append(Some("Export Layers to Files…"), Some("win.export-layers"));
+    file.append(Some("Export Artboards…"), Some("win.export-artboards"));
     file.append(Some("Close"), Some("win.close-tab"));
     menu.append_submenu(Some("File"), &file);
     let edit = gio::Menu::new();
@@ -728,6 +735,8 @@ fn menu() -> gio::Menu {
     let layer = gio::Menu::new();
     layer.append(Some("New Layer"), Some("win.new-layer"));
     layer.append(Some("New Folder"), Some("win.new-folder"));
+    layer.append(Some("New Artboard…"), Some("win.new-artboard"));
+    layer.append(Some("Artboard from Layers…"), Some("win.artboard-from-layers"));
     let adjustments = gio::Menu::new();
     for kind in crate::format::ADJUSTMENT_KINDS { adjustments.append(Some(kind), Some(&format!("win.new-adjustment::{kind}"))); }
     layer.append_submenu(Some("New Adjustment Layer"), &adjustments);
@@ -987,6 +996,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Edit", "Edit > Stroke", "Outline the selection in the foreground color, inside, centered or outside"),
     ("Layer", "Layer > Align, Distribute", "Selected layers to the selection or canvas edges and centers; three or more spaced evenly"),
     ("Layer", "Layer > Shape from Path, Edit Shape Points, Apply Path to Shape", "A Pen path becomes a vector shape; its points can be picked up again and put back"),
+    ("Layer", "Layer > New Artboard, Artboard from Layers", "A board on the canvas whose layers clip to it; File > Export Artboards writes each one"),
     ("Edit", "Edit > Define Pattern, Fill with Pattern", "Save the selection as a tile; fill with a saved tile (the Clone tool's Pattern option stamps one)"),
     ("File", "File > Export Sizes", "The document at several ad and social sizes at once: reframed, filled or padded"),
     ("File", "File > Export WebP, GIF, AVIF, Layers to Files", "A lossless WebP, a 256-color GIF, an AVIF at a quality (through libavif), every layer as its own PNG"),
@@ -1380,6 +1390,22 @@ impl App {
         }
     }
 
+    /// File > Export Artboards: each board's picture as a PNG in a chosen folder.
+    fn export_artboards(self: &Rc<Self>) {
+        let mut doc = None;
+        self.with_current(|p| doc = Some(p.canvas.doc().clone()));
+        let Some(doc) = doc else { return };
+        if doc.borrow().document.artboards().is_empty() { self.alert("No artboards", "Layer > New Artboard makes one, or Artboard from Layers wraps the selected layers in one."); return; }
+        let state = self.clone();
+        let dialog = gtk::FileDialog::builder().title("Export artboards into").modal(true).build();
+        dialog.select_folder(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else { return };
+            let Some(folder) = file.path() else { return };
+            let outcome = doc.borrow_mut().document.export_artboards(&folder, None);
+            match outcome { Ok(files) => state.alert("Export Artboards", &format!("{} artboard{} written to {}.", files.len(), if files.len() == 1 { "" } else { "s" }, folder.display())), Err(e) => state.alert("Could not export", &format!("{e:#}")) }
+        });
+    }
+
     /// File > Export Layers to Files: every visible layer as a PNG in a chosen folder.
     fn export_layers(self: &Rc<Self>) {
         let mut doc = None;
@@ -1403,10 +1429,19 @@ impl App {
         let state = self.clone();
         let title = self.current_title();
         dialogs::export_sizes(self.window.upcast_ref(), &title.clone(), move |sizes, fit, format, background, folder| {
-            let (made, failed) = { let d = doc.borrow(); crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder) };
-            let mut text = format!("{} file{} written to {}.", made.len(), if made.len() == 1 { "" } else { "s" }, folder.display());
-            if !failed.is_empty() { text.push_str(&format!("\n\nNot written:\n{}", failed.join("\n"))); }
-            state.alert("Export Sizes", &text);
+            match folder {
+                Some(folder) => {
+                    let (made, failed) = { let d = doc.borrow(); crate::export_sizes::export_all(&d.document, &title, &sizes, fit, format, background, &folder) };
+                    let mut text = format!("{} file{} written to {}.", made.len(), if made.len() == 1 { "" } else { "s" }, folder.display());
+                    if !failed.is_empty() { text.push_str(&format!("\n\nNot written:\n{}", failed.join("\n"))); }
+                    state.alert("Export Sizes", &text);
+                }
+                None => {
+                    let (made, failed) = { let mut d = doc.borrow_mut(); crate::export_sizes::add_as_artboards(&mut d.document, &sizes, fit, background) };
+                    state.with_current(|p| { p.refresh(); p.canvas.fit(); });
+                    if !failed.is_empty() { state.alert("Export Sizes", &format!("{} artboard{} made.\n\nNot made:\n{}", made.len(), if made.len() == 1 { "" } else { "s" }, failed.join("\n"))); }
+                }
+            }
         });
     }
 

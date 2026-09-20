@@ -121,3 +121,16 @@ pub fn export_all(document: &Document, title: &str, sizes: &[SizePreset], fit: F
     }
     (made, failed)
 }
+
+/// Every size added to `document` as an artboard in a row to the right, each holding a remade copy.
+/// Returns the boards made and any size that failed.
+pub fn add_as_artboards(document: &mut Document, sizes: &[SizePreset], fit: Fit, background: [f64; 3]) -> (Vec<uuid::Uuid>, Vec<String>) {
+    let (mut made, mut failed) = (Vec::new(), Vec::new());
+    let original = match document.duplicate() { Ok(d) => d, Err(e) => { failed.push(format!("{e:#}")); return (made, failed); } };
+    for preset in sizes {
+        let remade = match remake(&original, preset, fit, background) { Ok(d) => d, Err(e) => { failed.push(format!("{}: {e:#}", preset.name)); continue; } };
+        let place = document.next_artboard_place(preset.width as f64, preset.height as f64);
+        match document.import_as_artboard(&preset.name, &remade, place, Some(background)) { Ok(id) => made.push(id), Err(e) => failed.push(format!("{}: {e:#}", preset.name)) }
+    }
+    (made, failed)
+}

@@ -306,6 +306,17 @@ File > Export Layers to Files writes every visible layer as its own PNG, trimmed
 bottom. Compy: layer_style takes gradient_overlay and
 pattern_overlay; rotate_canvas, straighten, export_layers, and export accepts .webp.
 
+**Artboards.** Layer > New Artboard puts a named frame on the canvas, sized from the export presets
+or typed, with a background color or transparent; the canvas grows to hold it and boards line up to the
+right of one another. A board is a folder that owns a rectangle: the layers inside it clip to the frame,
+and between boards the canvas is workspace. Drag a board by the name strip above it with the Move tool
+and its layers come along. Layer > Artboard from Layers wraps the selected layers in a board drawn
+around them. File > Export Artboards writes each board's picture as its own file, named after the
+board. Export Sizes can make artboards instead of files: every ticked size becomes a board holding a
+reframed copy of the document, side by side, for fixing by hand before Export Artboards. In a PSD a
+board goes out as a folder. Compy: new_artboard, artboard_from_layers, move_artboard, export_artboards,
+and export_sizes with as_artboards; the state lists each layer's artboard.
+
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends
 move only up and down, Remove point and Reset curve; the same editor opens for a Curves adjustment layer.

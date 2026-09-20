@@ -575,6 +575,7 @@ impl Renderer {
     pub fn layer_index(&self, id: Uuid) -> Option<usize> { self.index.get(&id).copied() }
     pub fn set_layer_name(&mut self, id: Uuid, name: String) { self.touch(); let i = self.index[&id]; self.layers[i].name = name; }
     pub fn set_layer_parent(&mut self, id: Uuid, parent: Option<Uuid>) { self.touch(); let i = self.index[&id]; self.layers[i].parent_id = parent; }
+    pub fn set_artboard(&mut self, id: Uuid, board: Option<crate::format::Artboard>) { self.touch(); let i = self.index[&id]; self.layers[i].artboard = board; self.placed.clear(); }
     pub fn set_adjustment(&mut self, id: Uuid, adjustment: Option<crate::format::Adjustment>) { self.touch(); let i = self.index[&id]; self.layers[i].adjustment = adjustment; }
     pub fn set_sampling(&mut self, id: Uuid, sampling: Sampling) { self.touch(); let i = self.index[&id]; self.layers[i].transform.sampling = sampling; }
 
@@ -659,9 +660,10 @@ impl Renderer {
             let Some(region) = Region::of(cr)? else { return Ok(()) };
             let (surface, inner) = region.offscreen(cr)?;
             inner.rectangle(region.x as f64, region.y as f64, region.width as f64, region.height as f64);
+            self.draw_artboard_backgrounds(&inner)?;
             for id in visible {
                 let folders = self.folder_masks(id);
-                self.draw_composite(id, &inner, &folders)?;
+                self.draw_within_artboard(id, &inner, &folders)?;
             }
             drop(inner);
             cr.save()?;
@@ -671,12 +673,48 @@ impl Renderer {
             cr.restore()?;
             return Ok(());
         }
+        self.draw_artboard_backgrounds(cr)?;
         for id in visible {
             let folders = self.folder_masks(id);
-            self.draw_composite(id, cr, &folders)?;
+            self.draw_within_artboard(id, cr, &folders)?;
         }
         Ok(())
     }
+
+    /// Every visible artboard's frame filled with its background (white unless set), before any layer.
+    pub(crate) fn draw_artboard_backgrounds(&mut self, cr: &Context) -> Result<()> {
+        let boards: Vec<(f64, f64, f64, f64, [f64; 3])> = entries_ordered(&self.layers, true).into_iter().filter(|e| e.visible && e.layer.is_artboard()).filter_map(|e| e.layer.artboard.as_ref().map(|b| (b.x, b.y, b.width, b.height, b.background.unwrap_or([1.0; 3])))).collect();
+        for (x, y, w, h, c) in boards {
+            cr.save()?;
+            cr.set_source_rgb(c[0], c[1], c[2]);
+            cr.rectangle(x, y, w, h);
+            cr.fill()?;
+            cr.restore()?;
+        }
+        Ok(())
+    }
+
+    /// The frame of the artboard a layer lives in, if any (the nearest artboard among its folders).
+    pub fn artboard_frame(&self, id: Uuid) -> Option<(f64, f64, f64, f64)> {
+        let mut folder = self.parent(id);
+        for _ in 0..64 {
+            let Some(current) = folder else { return None };
+            let layer = self.layer(current);
+            if let Some(b) = layer.artboard.as_ref().filter(|_| layer.is_group()) { return Some(b.rect()); }
+            folder = layer.parent_id;
+        }
+        None
+    }
+
+    /// `draw_composite` clipped to the layer's artboard, when it has one.
+    pub(crate) fn draw_within_artboard(&mut self, id: Uuid, cr: &Context, folders: &[FolderMask]) -> Result<()> {
+        match self.artboard_frame(id) {
+            Some((x, y, w, h)) => { cr.save()?; cr.rectangle(x, y, w, h); cr.clip(); let r = self.draw_composite(id, cr, folders); cr.restore()?; r }
+            None => self.draw_composite(id, cr, folders),
+        }
+    }
+
+    pub fn has_artboards(&self) -> bool { self.layers.iter().any(|l| l.is_artboard()) }
 
     /// An adjustment layer: everything drawn so far in the context's clip region, adjusted, put back through
     /// the folders' masks and the layer's own mask, at its opacity and blend mode (`LiveMaskRenderer.adjust`).

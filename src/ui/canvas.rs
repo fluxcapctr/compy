@@ -52,6 +52,8 @@ pub struct Canvas {
     popover: RefCell<Option<gtk::Popover>>,
     /// Text being typed on the canvas: the type layer and the caret's byte index in its text.
     text_edit: RefCell<Option<(uuid::Uuid, usize)>>,
+    /// An artboard being dragged with the Move tool: which, and the last document point.
+    board_drag: Cell<Option<(uuid::Uuid, (f64, f64))>>,
     /// A Pen drag in progress: the anchor being placed (its handles follow), or an anchor or handle moved.
     pen_drag: Cell<Option<PenDrag>>,
     /// What the picture last showed straight from the GPU: the document revision and viewport, and the size.
@@ -147,7 +149,7 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None), presented_revision: Cell::new(None), presented_size: Cell::new((0, 0, 0)) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), board_drag: Cell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None), presented_revision: Cell::new(None), presented_size: Cell::new((0, 0, 0)) }
         });
         canvas.connect();
         canvas.update_cursor();
@@ -504,6 +506,7 @@ impl Canvas {
                     }
                     if button == 1 && this.begin_guide_from_ruler((x, y)) { this.stroke_start.set((x, y)); return; }
                     if button == 1 && tool == Tool::Move { if let Some(g) = this.guide_at((x, y)) { this.guide_drag.set(Some(g)); this.stroke_start.set((x, y)); return; } }
+                    if button == 1 && tool == Tool::Move && this.begin_board_drag((x, y)) { this.stroke_start.set((x, y)); return; }
                     if button == 1 && tool == Tool::Move { if this.begin_transform((x, y), state) { this.stroke_start.set((x, y)); return; } }
                     if button == 1 && tool == Tool::Pen { this.stroke_start.set((x, y)); this.pen_press((x, y)); return; }
                     if button == 1 && matches!(tool, Tool::Gradient | Tool::Shape | Tool::Crop) {
@@ -528,6 +531,11 @@ impl Canvas {
                         return;
                     }
                     let state = g.current_event_state();
+                    if this.board_drag.get().is_some() {
+                        let (sx, sy) = this.stroke_start.get();
+                        this.update_board_drag((sx + dx, sy + dy));
+                        return;
+                    }
                     if this.transform_drag.borrow().is_some() {
                         let (sx, sy) = this.stroke_start.get();
                         this.update_transform((sx + dx, sy + dy), state);
@@ -562,6 +570,7 @@ impl Canvas {
             }
             drag.connect_drag_end(move |_, _, _| {
                 if this.painting.get() { this.finish_stroke(); }
+                if this.board_drag.get().is_some() { this.finish_board_drag(); }
                 if this.transform_drag.borrow().is_some() { this.finish_transform(); }
                 if this.outline_move.get().is_some() { this.finish_outline_move(); }
                 if this.tool_drag.get().is_some() { this.finish_tool_drag(); }
@@ -828,6 +837,42 @@ impl Canvas {
 
     /// Starts a transform drag at a view point: a handle, or a press inside the active layer (or, with
     /// Ctrl or auto-select, the layer under the pointer). False when nothing here can be dragged.
+    /// A press on an artboard's name strip (just above its frame) picks the board up to drag.
+    fn begin_board_drag(&self, view: (f64, f64)) -> bool {
+        let mut d = self.doc.borrow_mut();
+        if d.document.stroke_active() || !d.document.renderer.has_artboards() { return false; }
+        let size = d.size();
+        let point = d.viewport.document_point(view, size);
+        let strip = 18.0 / d.viewport.zoom().max(1e-6);
+        let hit = d.document.artboards().into_iter().rev().find(|(_, _, (x, y, w, _))| point.0 >= *x && point.0 <= x + w && point.1 >= y - strip && point.1 < *y).map(|(id, _, _)| id);
+        let Some(id) = hit else { return false };
+        d.document.begin_edit("Move Artboard");
+        d.document.select_layer(Some(id));
+        self.board_drag.set(Some((id, point)));
+        true
+    }
+
+    fn update_board_drag(&self, view: (f64, f64)) {
+        let Some((id, last)) = self.board_drag.get() else { return };
+        let mut d = self.doc.borrow_mut();
+        let size = d.size();
+        let point = d.viewport.document_point(view, size);
+        let (dx, dy) = ((point.0 - last.0).round(), (point.1 - last.1).round());
+        if dx == 0.0 && dy == 0.0 { return; }
+        d.document.nudge_artboard(id, dx, dy);
+        self.board_drag.set(Some((id, (last.0 + dx, last.1 + dy))));
+        drop(d);
+        self.area.queue_draw();
+    }
+
+    fn finish_board_drag(&self) {
+        let Some((_, _)) = self.board_drag.take() else { return };
+        let result = { let mut d = self.doc.borrow_mut(); let r = d.document.fit_canvas_to_artboards(); d.document.end_edit(); r };
+        if let Err(e) = result { self.notify(&format!("{e:#}")); }
+        if let Some(refresh) = self.refresh.borrow().as_ref() { refresh(); }
+        self.area.queue_draw();
+    }
+
     fn begin_transform(&self, view: (f64, f64), state: gdk::ModifierType) -> bool {
         let mut d = self.doc.borrow_mut();
         if d.document.stroke_active() { return false; }
@@ -1804,6 +1849,7 @@ fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) ->
         cr.rectangle(rx - spread, ry - spread + 3.0, rw + spread * 2.0, rh + spread * 2.0);
         cr.fill()?;
     }
+    let artboards = doc.document.renderer.has_artboards();
     cr.set_source_rgb(0.30, 0.30, 0.30);
     cr.rectangle(rx, ry, rw, rh);
     cr.fill()?;
@@ -1811,17 +1857,25 @@ fn draw_document(doc: &mut super::Doc, cr: &Context, width: f64, height: f64) ->
     cr.save()?;
     cr.rectangle(vx, vy, vw, vh);
     cr.clip();
-    // Work scales with the visible viewport, not document dimensions.
-    let tile = 10.0;
-    let (min_x, max_x) = (((vx - rx) / tile).floor() as i64, ((vx + vw - rx) / tile).ceil() as i64);
-    let (min_y, max_y) = (((vy - ry) / tile).floor() as i64, ((vy + vh - ry) / tile).ceil() as i64);
-    cr.set_source_rgb(0.35, 0.35, 0.35);
-    for row in min_y..max_y {
-        for column in min_x..max_x {
-            if (row + column) % 2 == 0 { cr.rectangle(rx + column as f64 * tile, ry + row as f64 * tile, tile, tile); }
+    if artboards {
+        // Between artboards the canvas is workspace, not picture: the surround shows through, and each
+        // board paints its own background.
+        cr.set_source_rgb(sr, sg, sb);
+        cr.rectangle(rx, ry, rw, rh);
+        cr.fill()?;
+    } else {
+        // Work scales with the visible viewport, not document dimensions.
+        let tile = 10.0;
+        let (min_x, max_x) = (((vx - rx) / tile).floor() as i64, ((vx + vw - rx) / tile).ceil() as i64);
+        let (min_y, max_y) = (((vy - ry) / tile).floor() as i64, ((vy + vh - ry) / tile).ceil() as i64);
+        cr.set_source_rgb(0.35, 0.35, 0.35);
+        for row in min_y..max_y {
+            for column in min_x..max_x {
+                if (row + column) % 2 == 0 { cr.rectangle(rx + column as f64 * tile, ry + row as f64 * tile, tile, tile); }
+            }
         }
+        cr.fill()?;
     }
-    cr.fill()?;
 
     let ppp = vp.points_per_pixel();
     if vp.zoom() >= CRISP_ZOOM {
@@ -1934,6 +1988,22 @@ fn draw_overlays(doc: &mut super::Doc, cr: &Context, width: f64, height: f64, po
             }
         }
         cr.restore()?;
+    }
+    // Artboards: a name above each frame, in the panel's text color, and a hairline around it.
+    let boards = doc.document.artboards();
+    if !boards.is_empty() {
+        let (fr, fg, fb) = { let c = super::theme::current().and_then(|p| super::theme::hex(&p.foreground)).unwrap_or((0.85, 0.85, 0.85)); c };
+        cr.set_font_size(11.0);
+        for (id, name, (x, y, w, h)) in &boards {
+            let (a, b) = (vp.view_point((*x, *y), size), vp.view_point((x + w, y + h), size));
+            let active = doc.document.artboard_of(doc.document.active.unwrap_or_default()) == Some(*id);
+            cr.set_source_rgba(fr, fg, fb, if active { 0.9 } else { 0.5 });
+            cr.set_line_width(1.0);
+            cr.rectangle(a.0.round() + 0.5, a.1.round() + 0.5, (b.0 - a.0).round(), (b.1 - a.1).round());
+            cr.stroke()?;
+            cr.move_to(a.0.round(), a.1.round() - 5.0);
+            cr.show_text(name)?;
+        }
     }
     // Guides: cyan lines across the canvas, as Photoshop draws them.
     if doc.document.show_guides && !doc.preview && !doc.hide_extras && !(doc.document.guides_v.is_empty() && doc.document.guides_h.is_empty()) {

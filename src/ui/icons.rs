@@ -308,6 +308,12 @@ fn draw_glyph(name: &str, cr: &cairo::Context) {
             cr.move_to(2.0, 5.0); cr.line_to(8.0, 5.0); cr.line_to(10.0, 7.0); cr.line_to(18.0, 7.0); cr.line_to(18.0, 16.0); cr.line_to(2.0, 16.0); cr.close_path();
             cr.fill().ok();
         }
+        "artboard" => {
+            // A frame with a name tab above it.
+            cr.set_line_width(1.5);
+            cr.rectangle(3.5, 6.5, 13.0, 10.0); cr.stroke().ok();
+            cr.rectangle(3.0, 2.5, 7.0, 2.5); cr.fill().ok();
+        }
         "new-layer" => {
             cr.set_line_width(1.5);
             cr.rectangle(3.5, 3.5, 13.0, 13.0); cr.stroke().ok();

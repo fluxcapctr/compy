@@ -954,3 +954,51 @@ fn gif_and_avif_export() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn artboards_clip_grow_move_and_export() {
+    let mut d = Document::blank(100, 100, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 100.0, 100.0), [0.2, 0.2, 0.2], 0.0).unwrap();
+    // A board to the right of the canvas: the canvas grows to hold it, the existing picture stays put.
+    let (x, y) = d.next_artboard_place(50.0, 80.0);
+    assert_eq!((x, y), (140.0, 0.0));
+    let board = d.add_artboard("Story", (x, y, 50.0, 80.0), Some([1.0, 1.0, 1.0])).unwrap();
+    assert_eq!((d.width(), d.height()), (190, 100));
+    assert_eq!(rgb_at(&mut d, 10, 10), [51, 51, 51, 255], "the old picture did not move");
+    assert_eq!(rgb_at(&mut d, 150, 10), [255, 255, 255, 255], "the board's background");
+    assert_eq!(rgb_at(&mut d, 120, 10)[3], 0, "workspace between them is empty");
+    assert!(d.renderer.layer(board).is_artboard());
+    // A layer inside the board clips to it.
+    d.select_layer(Some(board));
+    let red = d.add_shape_layer(false, (130.0, 30.0, 40.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    assert_eq!(d.artboard_of(red), Some(board));
+    assert_eq!(rgb_at(&mut d, 160, 40), [255, 0, 0, 255], "inside the board");
+    assert_eq!(rgb_at(&mut d, 135, 40)[3], 0, "clipped outside it");
+    // Moving the board takes its layer along.
+    d.set_artboard_frame(board, (140.0, 10.0, 50.0, 80.0)).unwrap();
+    assert_eq!(d.renderer.layer(red).transform.origin.1, 40.0);
+    assert_eq!(rgb_at(&mut d, 160, 50), [255, 0, 0, 255]);
+    assert_eq!(d.undo_name(), Some("Move Artboard"));
+    d.undo();
+    assert_eq!(d.renderer.layer(red).transform.origin.1, 30.0);
+    // Artboard from Layers wraps a layer outside any board.
+    let lone = d.add_shape_layer(false, (10.0, 10.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    d.selected = [lone].into_iter().collect();
+    d.select_layer(Some(lone));
+    let wrap = d.artboard_from_layers("Wrap").unwrap();
+    assert_eq!(d.artboard_of(lone), Some(wrap));
+    assert_eq!(d.renderer.layer(wrap).artboard.as_ref().map(|b| b.rect()), Some((10.0, 10.0, 20.0, 20.0)));
+    // Export: one file per board, the board's own size.
+    let dir = std::env::temp_dir().join(format!("compy-boards-{}", std::process::id()));
+    let files = d.export_artboards(&dir, None).unwrap();
+    assert_eq!(files.len(), 2);
+    let story = image::open(files.iter().find(|f| f.file_name().is_some_and(|n| n == "Story.png")).unwrap_or_else(|| panic!("no Story.png among {files:?}"))).unwrap();
+    assert_eq!((story.width(), story.height()), (50, 80));
+    assert_eq!(story.to_rgba8().get_pixel(20, 40).0, [255, 0, 0, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // The record survives a save and load.
+    let manifest = d.manifest();
+    let text = serde_json::to_vec(&manifest).unwrap();
+    let back = compositor::format::Manifest::parse(&text).unwrap();
+    assert!(back.layers.iter().any(|l| l.is_artboard() && l.name == "Story"));
+}

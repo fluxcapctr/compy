@@ -2477,7 +2477,7 @@ impl Document {
         let layer = crate::format::Layer {
             id, name: "Layer 1".into(), is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None,
+            image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None, artboard: None,
         };
         let manifest = crate::format::Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: Some(id), layers: vec![layer] };
         let json = serde_json::to_vec(&manifest)?;
@@ -2548,7 +2548,7 @@ impl Document {
         crate::format::Layer {
             id: Uuid::new_v4(), name, is_visible: true,
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(self.width() as f64, self.height() as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
-            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None,
+            image_file: None, parent_id: parent, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None, artboard: None,
         }
     }
 
@@ -2574,6 +2574,197 @@ impl Document {
         self.select_layer(Some(id));
         self.end_edit();
         id
+    }
+
+    /// Every artboard, bottom to top: id, name and frame.
+    pub fn artboards(&self) -> Vec<(Uuid, String, (f64, f64, f64, f64))> {
+        self.renderer.layers().iter().filter(|l| l.is_artboard()).filter_map(|l| l.artboard.as_ref().map(|b| (l.id, l.name.clone(), b.rect()))).collect()
+    }
+
+    /// The artboard a layer belongs to (itself when it is one).
+    pub fn artboard_of(&self, id: Uuid) -> Option<Uuid> {
+        if !self.has_layer(id) { return None; }
+        if self.renderer.layer(id).is_artboard() { return Some(id); }
+        let mut folder = self.renderer.layer(id).parent_id;
+        for _ in 0..64 { let Some(c) = folder else { return None }; if self.renderer.layer(c).is_artboard() { return Some(c); } folder = self.renderer.layer(c).parent_id; }
+        None
+    }
+
+    /// Grows the canvas so `rect` fits on it, keeping every layer where it is.
+    fn make_room_for(&mut self, rect: (f64, f64, f64, f64)) -> Result<()> {
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let (x0, y0) = (rect.0.floor().min(0.0), rect.1.floor().min(0.0));
+        let (x1, y1) = ((rect.0 + rect.2).ceil().max(w), (rect.1 + rect.3).ceil().max(h));
+        if x0 == 0.0 && y0 == 0.0 && x1 == w && y1 == h { return Ok(()); }
+        self.canvas_size((x1 - x0) as i32, (y1 - y0) as i32, 0, None, Some((-x0, -y0)), "Grow Canvas")?;
+        // Frames of the other boards move with everything else.
+        if x0 != 0.0 || y0 != 0.0 { for (id, _, r) in self.artboards() { self.renderer.set_artboard(id, Some(crate::format::Artboard { x: r.0 - x0, y: r.1 - y0, width: r.2, height: r.3, background: self.renderer.layer(id).artboard.as_ref().and_then(|b| b.background) })); } }
+        Ok(())
+    }
+
+    /// Where a new board goes when no place is given: to the right of the rightmost one, or the canvas.
+    pub fn next_artboard_place(&self, width: f64, height: f64) -> (f64, f64) {
+        let boards = self.artboards();
+        let gap = 40.0;
+        match boards.iter().map(|(_, _, r)| (r.0 + r.2, r.1)).max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)) {
+            Some((right, top)) => (right + gap, top),
+            None => if self.renderer.layers().iter().any(|l| self.renderer.has_image(l.id)) { (self.width() as f64 + gap, 0.0) } else { let _ = (width, height); (0.0, 0.0) },
+        }
+    }
+
+    /// Layer > New Artboard: an empty board named `name` with `frame` on the canvas (grown to hold it).
+    pub fn add_artboard(&mut self, name: &str, frame: (f64, f64, f64, f64), background: Option<[f64; 3]>) -> Result<Uuid> {
+        let board = crate::format::Artboard { x: frame.0.round(), y: frame.1.round(), width: frame.2.round(), height: frame.3.round(), background };
+        if !board.is_valid() { bail!("An artboard runs from 1 to 30,000 pixels on a side."); }
+        self.begin_edit("New Artboard");
+        if let Err(e) = self.make_room_for(board.rect()) { self.abort_edit(); return Err(e); }
+        let layers = self.renderer.layers();
+        // Boards sit at the top level, above everything, under the name given (numbered only on a clash).
+        let taken = self.renderer.layers().iter().any(|l| l.name == name);
+        let mut record = self.blank_record(if taken { self.unique_name(name) } else { name.to_string() }, None);
+        record.is_group = Some(true);
+        record.artboard = Some(board);
+        let id = record.id;
+        self.renderer.insert_layer(layers.len(), record, None, None);
+        self.select_layer(Some(id));
+        self.end_edit();
+        Ok(id)
+    }
+
+    /// Moves a board's frame (its layers come along) or resizes it.
+    pub fn set_artboard_frame(&mut self, id: Uuid, frame: (f64, f64, f64, f64)) -> Result<()> {
+        let Some(old) = self.renderer.layer(id).artboard.clone().filter(|_| self.renderer.layer(id).is_group()) else { bail!("That layer is not an artboard.") };
+        let board = crate::format::Artboard { x: frame.0.round(), y: frame.1.round(), width: frame.2.round(), height: frame.3.round(), background: old.background };
+        if !board.is_valid() { bail!("An artboard runs from 1 to 30,000 pixels on a side."); }
+        let (dx, dy) = (board.x - old.x, board.y - old.y);
+        self.begin_edit("Move Artboard");
+        if let Err(e) = self.make_room_for(board.rect()) { self.abort_edit(); return Err(e); }
+        // make_room_for may have shifted everything; the frame is placed after it, from the shifted old one.
+        let shifted = self.renderer.layer(id).artboard.clone().unwrap_or(old.clone());
+        let target = crate::format::Artboard { x: shifted.x + dx, y: shifted.y + dy, width: board.width, height: board.height, background: old.background };
+        self.renderer.set_artboard(id, Some(target));
+        if dx != 0.0 || dy != 0.0 {
+            let inside: Vec<Uuid> = self.renderer.layers().iter().map(|l| l.id).filter(|l| *l != id && self.artboard_of(*l) == Some(id)).collect();
+            for child in inside {
+                let mut t = self.renderer.layer(child).transform;
+                t.origin = crate::format::Point(t.origin.0 + dx, t.origin.1 + dy);
+                self.renderer.set_layer_transform(child, t);
+                if let Some(mut p) = self.renderer.layer(child).mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(child, Some(p)); }
+            }
+        }
+        self.end_edit();
+        Ok(())
+    }
+
+    /// The board at a document point, topmost first: its frame, or the name strip just above it.
+    pub fn artboard_at(&self, point: (f64, f64), strip: f64) -> Option<Uuid> {
+        self.artboards().into_iter().rev().find(|(_, _, (x, y, w, h))| point.0 >= *x && point.0 <= x + w && point.1 >= y - strip && point.1 <= y + h).map(|(id, _, _)| id)
+    }
+
+    /// Moves a board and its layers by (dx, dy) without recording a step: a drag's motion, between a
+    /// `begin_edit` and an `end_edit` of the caller's.
+    pub fn nudge_artboard(&mut self, id: Uuid, dx: f64, dy: f64) {
+        let Some(mut board) = self.renderer.layer(id).artboard.clone() else { return };
+        board.x += dx;
+        board.y += dy;
+        self.renderer.set_artboard(id, Some(board));
+        let inside: Vec<Uuid> = self.renderer.layers().iter().map(|l| l.id).filter(|l| *l != id && self.artboard_of(*l) == Some(id)).collect();
+        for child in inside {
+            let mut t = self.renderer.layer(child).transform;
+            t.origin = crate::format::Point(t.origin.0 + dx, t.origin.1 + dy);
+            self.renderer.set_layer_transform(child, t);
+            if let Some(mut p) = self.renderer.layer(child).mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(child, Some(p)); }
+        }
+    }
+
+    /// Grows the canvas to hold every board (after a drag past the edge).
+    pub fn fit_canvas_to_artboards(&mut self) -> Result<()> {
+        let boards = self.artboards();
+        let mut b = (0.0f64, 0.0f64, self.width() as f64, self.height() as f64);
+        for (_, _, (x, y, w, h)) in &boards { b.0 = b.0.min(*x); b.1 = b.1.min(*y); b.2 = b.2.max(x + w); b.3 = b.3.max(y + h); }
+        self.make_room_for((b.0, b.1, b.2 - b.0, b.3 - b.1))
+    }
+
+    /// Export Sizes as artboards: `source` (a remade copy of this document at one size) becomes a board
+    /// named `name` at `place`, its layers copied in.
+    pub fn import_as_artboard(&mut self, name: &str, source: &Document, place: (f64, f64), background: Option<[f64; 3]>) -> Result<Uuid> {
+        let (w, h) = (source.width() as f64, source.height() as f64);
+        self.begin_edit("Artboard from Size");
+        let board = match self.add_artboard(name, (place.0, place.1, w, h), background) { Ok(id) => id, Err(e) => { self.abort_edit(); return Err(e); } };
+        // add_artboard may have moved everything to make room; the board's frame says where it ended up.
+        let frame = self.renderer.layer(board).artboard.as_ref().map(|b| b.rect()).unwrap_or((place.0, place.1, w, h));
+        let tops: Vec<Uuid> = source.renderer.layers().iter().filter(|l| l.parent_id.is_none()).map(|l| l.id).collect();
+        let copied = match self.copy_layers(source, &tops, Place::Into(board)) { Ok(ids) => ids, Err(e) => { self.abort_edit(); return Err(e); } };
+        for id in copied {
+            let mut t = self.renderer.layer(id).transform;
+            t.origin = crate::format::Point(t.origin.0 + frame.0, t.origin.1 + frame.1);
+            self.renderer.set_layer_transform(id, t);
+            if let Some(mut p) = self.renderer.layer(id).mask_placement { p.origin = crate::format::Point(p.origin.0 + frame.0, p.origin.1 + frame.1); self.renderer.set_mask_placement(id, Some(p)); }
+        }
+        self.select_layer(Some(board));
+        self.end_edit();
+        Ok(board)
+    }
+
+    pub fn set_artboard_background(&mut self, id: Uuid, background: Option<[f64; 3]>) -> Result<()> {
+        let Some(mut board) = self.renderer.layer(id).artboard.clone() else { bail!("That layer is not an artboard.") };
+        board.background = background;
+        self.begin_edit("Artboard Background");
+        self.renderer.set_artboard(id, Some(board));
+        self.end_edit();
+        Ok(())
+    }
+
+    /// Layer > Artboard from Layers: the selected layers (or the active one) moved into a new board drawn
+    /// around them.
+    pub fn artboard_from_layers(&mut self, name: &str) -> Result<Uuid> {
+        let mut ids: Vec<Uuid> = self.selected.iter().copied().filter(|id| self.has_layer(*id)).collect();
+        if ids.is_empty() { if let Some(a) = self.active { ids.push(a); } }
+        ids.retain(|id| self.artboard_of(*id).is_none() || Some(*id) != self.artboard_of(*id));
+        if ids.is_empty() { bail!("Select the layers the artboard should hold first."); }
+        let mut b = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for id in &ids { let (x0, y0, x1, y1) = self.renderer.layer(*id).transform.bounds(); b.0 = b.0.min(x0); b.1 = b.1.min(y0); b.2 = b.2.max(x1); b.3 = b.3.max(y1); }
+        if !b.0.is_finite() { bail!("Those layers have no bounds."); }
+        let frame = (b.0.floor(), b.1.floor(), (b.2 - b.0.floor()).ceil().max(1.0), (b.3 - b.1.floor()).ceil().max(1.0));
+        self.begin_edit("Artboard from Layers");
+        let board = match self.add_artboard(name, frame, None) { Ok(id) => id, Err(e) => { self.abort_edit(); return Err(e); } };
+        ids.sort_by_key(|id| self.renderer.layer_index(*id));
+        if let Err(e) = self.move_layers(&ids, Place::Into(board)) { self.abort_edit(); return Err(e); }
+        self.select_layer(Some(board));
+        self.end_edit();
+        Ok(board)
+    }
+
+    /// File > Export Artboards: each board's part of the composite as a file in `folder`, named after it.
+    pub fn export_artboards(&mut self, folder: &std::path::Path, jpeg_quality: Option<f64>) -> Result<Vec<std::path::PathBuf>> {
+        let boards = self.artboards();
+        if boards.is_empty() { bail!("There are no artboards in this document."); }
+        std::fs::create_dir_all(folder)?;
+        let flat = self.renderer.render_flat()?;
+        let mut written = Vec::new();
+        for (_, name, (x, y, w, h)) in boards {
+            let (x0, y0) = (x.max(0.0) as i32, y.max(0.0) as i32);
+            let (x1, y1) = (((x + w) as i32).min(self.width()), ((y + h) as i32).min(self.height()));
+            if x1 <= x0 || y1 <= y0 { continue; }
+            let out = new_argb(x1 - x0, y1 - y0)?;
+            { let cr = Context::new(&out)?; cr.set_source_surface(&flat, -(x0 as f64), -(y0 as f64))?; cr.paint()?; }
+            let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+            let path = match jpeg_quality {
+                Some(q) => {
+                    let path = folder.join(format!("{}.jpg", clean.trim()));
+                    let (rgba, cw, ch) = crate::png_io::straight_rgba(&out)?;
+                    let mut rgb = vec![0u8; cw * ch * 3];
+                    for i in 0..cw * ch { let a = rgba[i * 4 + 3] as f64 / 255.0; for k in 0..3 { rgb[i * 3 + k] = (rgba[i * 4 + k] as f64 * a + 255.0 * (1.0 - a)).round().clamp(0.0, 255.0) as u8; } }
+                    let mut bytes = Vec::new();
+                    { let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, (q.clamp(0.0, 1.0) * 100.0).round().max(1.0) as u8); use image::ImageEncoder; encoder.write_image(&rgb, cw as u32, ch as u32, image::ExtendedColorType::Rgb8)?; }
+                    std::fs::write(&path, bytes)?;
+                    path
+                }
+                None => { let path = folder.join(format!("{}.png", clean.trim())); crate::png_io::encode(&out, &path, self.renderer.resolution())?; path }
+            };
+            written.push(path);
+        }
+        Ok(written)
     }
 
     /// A new adjustment layer of `kind` above the active layer, affecting everything beneath it.

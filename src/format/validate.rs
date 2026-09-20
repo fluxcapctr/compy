@@ -38,6 +38,7 @@ pub fn manifest(m: &Manifest) -> Result<(), ProjectError> {
         if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) { return Err(ProjectError::Invalid); }
         if m.version < 3 && !plain { return Err(ProjectError::Invalid); }
         if layer.is_group() && !plain { return Err(ProjectError::Invalid); }
+        if let Some(board) = &layer.artboard { if !layer.is_group() || !board.is_valid() { return Err(ProjectError::Invalid); } }
     }
     hierarchy(&m.layers)?;
     live_mask_graph(&m.layers)?;

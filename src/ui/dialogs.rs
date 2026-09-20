@@ -171,7 +171,7 @@ pub fn pattern_fill(parent: &gtk::Window, names: &[String], done: impl Fn(String
 }
 
 /// File > Export Sizes: which sizes, how the picture meets each frame, the format, and where to write.
-pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::export_sizes::SizePreset>, crate::export_sizes::Fit, crate::export_sizes::Format, [f64; 3], std::path::PathBuf) + 'static) {
+pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::export_sizes::SizePreset>, crate::export_sizes::Fit, crate::export_sizes::Format, [f64; 3], Option<std::path::PathBuf>) + 'static) {
     use crate::export_sizes::{Fit, Format, SizePreset};
     let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(14).margin_bottom(14).margin_start(14).margin_end(14).build();
     content.append(&gtk::Label::builder().label("Sizes").xalign(0.0).css_classes(["heading"]).build());
@@ -207,6 +207,8 @@ pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::
     let choose = gtk::Button::with_label("Choose…");
     grid.attach(&folder_label, 1, 3, 1, 1);
     grid.attach(&choose, 2, 3, 1, 1);
+    let boards = gtk::CheckButton::builder().label("Make artboards in this document instead of files (fix them by hand, then File > Export Artboards)").build();
+    grid.attach(&boards, 0, 4, 3, 1);
     content.append(&grid);
     let status = gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).wrap(true).build();
     content.append(&status);
@@ -233,10 +235,12 @@ pub fn export_sizes(parent: &gtk::Window, title: &str, done: impl Fn(Vec<crate::
             let mut sizes: Vec<SizePreset> = checks.iter().zip(&presets).filter(|(c, _)| c.is_active()).map(|(_, p)| p.clone()).collect();
             if custom.is_active() { sizes.push(SizePreset { name: "Custom".into(), width: cw.value() as i32, height: ch.value() as i32 }); }
             if sizes.is_empty() { status.set_label("Tick at least one size."); return; }
-            let Some(folder) = folder.borrow().clone() else { status.set_label("Choose a folder to export into."); return };
+            let as_boards = boards.is_active();
+            let folder = folder.borrow().clone();
+            if !as_boards && folder.is_none() { status.set_label("Choose a folder to export into, or make artboards."); return; }
             let fit = match fit.selected() { 1 => Fit::Fill, 2 => Fit::Pad, _ => Fit::Reframe };
             let format = if format.selected() == 1 { Format::Jpeg(quality.value() / 100.0) } else { Format::Png };
-            done(sizes, fit, format, background.color(), folder);
+            done(sizes, fit, format, background.color(), if as_boards { None } else { folder });
             w.close();
         });
     }
@@ -291,6 +295,35 @@ pub fn history(parent: &gtk::Window, doc: super::DocRef, refresh: std::rc::Rc<dy
         gtk::glib::ControlFlow::Continue
     });
     window.present();
+}
+
+/// Layer > New Artboard: a name, a size from the presets or typed, and a background.
+pub fn new_artboard(parent: &gtk::Window, count: usize, done: impl Fn(String, i32, i32, Option<[f64; 3]>) + 'static) {
+    let (window, grid, ok) = dialog(parent, "New Artboard");
+    grid.attach(&gtk::Label::builder().label("Name").xalign(0.0).build(), 0, 0, 1, 1);
+    let name = gtk::Entry::builder().text(format!("Artboard {}", count + 1)).hexpand(true).activates_default(true).build();
+    grid.attach(&name, 1, 0, 2, 1);
+    grid.attach(&gtk::Label::builder().label("Size").xalign(0.0).build(), 0, 1, 1, 1);
+    let presets = crate::export_sizes::presets();
+    let mut names: Vec<String> = presets.iter().map(|p| format!("{} ({}x{})", p.name, p.width, p.height)).collect();
+    names.insert(0, "Custom".into());
+    let preset = gtk::DropDown::from_strings(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    preset.set_selected(1);
+    grid.attach(&preset, 1, 1, 2, 1);
+    let width = spin(&grid, 2, "Width", 1.0, 30_000.0, 1.0, presets[0].width as f64, 0);
+    let height = spin(&grid, 3, "Height", 1.0, 30_000.0, 1.0, presets[0].height as f64, 0);
+    { let (width, height) = (width.clone(), height.clone()); let presets = presets.clone(); preset.connect_selected_notify(move |p| { if p.selected() >= 1 { if let Some(pr) = presets.get(p.selected() as usize - 1) { width.set_value(pr.width as f64); height.set_value(pr.height as f64); } } }); }
+    { let preset = preset.clone(); width.connect_value_changed(move |_| { if preset.selected() != 0 { preset.set_selected(0); } }); }
+    grid.attach(&gtk::Label::builder().label("Background").xalign(0.0).build(), 0, 4, 1, 1);
+    let background = super::color_wheel::ColorButton::new([1.0; 3], std::rc::Rc::new(|_| {}));
+    grid.attach(&background.widget, 1, 4, 1, 1);
+    let transparent = gtk::CheckButton::builder().label("Transparent").build();
+    grid.attach(&transparent, 2, 4, 1, 1);
+    let w = window.clone();
+    let entry = name.clone();
+    ok.connect_clicked(move |_| { done(entry.text().to_string(), width.value() as i32, height.value() as i32, if transparent.is_active() { None } else { Some(background.color()) }); w.close(); });
+    window.present();
+    name.grab_focus();
 }
 
 /// A quality from 1 to 100.
