@@ -455,7 +455,8 @@ impl Renderer {
     pub(crate) fn styled(&mut self, id: Uuid, layer: &Layer) -> Result<Option<StyledDraw>> {
         let Some(effects) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).filter(|e| e.is_active()) else { return Ok(None) };
         // Blend If alone draws no buffers; it is applied when the layer is painted.
-        if effects.render(&[0u8; 1], 1, 1).below.is_none() && effects.render(&[0u8; 1], 1, 1).inside.is_none() && effects.render(&[0u8; 1], 1, 1).above.is_none() { return Ok(None); }
+        let probe = effects.render(&[0u8; 1], 1, 1);
+        if probe.below.is_none() && probe.inside.is_none() && probe.above.is_none() { return Ok(None); }
         let Some(image) = self.images.get(&id) else { return Ok(None) };
         let mask_ptr = self.masks.get(&id).map(|m| m.to_raw_none() as usize).unwrap_or(0);
         let key = format!("{:?}|{:?}|{:?}|{}|{}|{}x{}|{}", layer.transform, layer.mask_placement, layer.mask_enabled, image.to_raw_none() as usize, mask_ptr, self.width, self.height, layer.effects.as_ref().map(|e| e.to_string()).unwrap_or_default());
@@ -820,30 +821,34 @@ impl Renderer {
     /// already on the target under it, and put back as the source.
     fn apply_blend_if(&mut self, cr: &Context, b: &crate::effects::BlendIf) -> Result<()> {
         let Some(region) = Region::of(cr)? else { return Ok(()) };
-        let (w, h) = (region.width as usize, region.height as usize);
-        if w == 0 || h == 0 { return Ok(()); }
         // The layer's own pixels, from the group that is now the source.
         let own = cairo::SurfacePattern::try_from(cr.source()).ok().and_then(|p| p.surface().ok()).and_then(|s| ImageSurface::try_from(s).ok());
         let Some(own) = own else { return Ok(()) };
         own.flush();
+        // Device coordinates reach a surface's pixels through its device scale and offset; the group
+        // and the target may each carry their own (the frame cache is scaled on a HiDPI screen).
+        let (sx, sy) = own.device_scale();
         let (ox, oy) = own.device_offset();
+        let (w, h) = (((region.width as f64) * sx).round() as usize, ((region.height as f64) * sy).round() as usize);
+        if w == 0 || h == 0 || w * h > 100_000_000 { return Ok(()); }
         let under = if b.uses_underlying() { ImageSurface::try_from(cr.target()).ok() } else { None };
         if let Some(u) = &under { u.flush(); }
         let mut mask = vec![0u8; w * h];
         let luma = |p: &[u8]| -> Option<f64> { let a = p[3] as f64; if a <= 0.0 { None } else { Some((0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64) / a * 255.0) } };
+        let (base_x, base_y) = (region.x as f64 * sx, region.y as f64 * sy);
+        let under_info = under.as_ref().map(|u| { let (tsx, tsy) = u.device_scale(); let (tox, toy) = u.device_offset(); (u.clone(), u.stride() as usize, u.width() as i64, u.height() as i64, tsx, tsy, tox, toy) });
+        let under_data: Option<Vec<u8>> = under_info.as_ref().and_then(|(u, stride, _, uh, ..)| with_bytes(u, |d, _| d[..stride * *uh as usize].to_vec()).ok());
         with_bytes(&own, |data, stride| {
             let (ow, oh) = (own.width() as i64, own.height() as i64);
-            let under_bytes = under.as_ref().map(|u| (u.clone(), u.stride() as usize, u.width() as i64, u.height() as i64));
-            let under_data: Option<Vec<u8>> = under_bytes.as_ref().and_then(|(u, stride, _, uh)| with_bytes(u, |d, _| d[..stride * *uh as usize].to_vec()).ok());
             for y in 0..h {
                 for x in 0..w {
-                    // Device pixel (region.x + x, region.y + y) sits in the group at that plus the group's offset.
-                    let (gx, gy) = (region.x as i64 + x as i64 + ox as i64, region.y as i64 + y as i64 + oy as i64);
+                    let (gx, gy) = ((base_x + ox) as i64 + x as i64, (base_y + oy) as i64 + y as i64);
                     if gx < 0 || gy < 0 || gx >= ow || gy >= oh { continue; }
                     let p = &data[gy as usize * stride + gx as usize * 4..gy as usize * stride + gx as usize * 4 + 4];
                     let mut wgt = match luma(p) { Some(l) => b.this_weight(l), None => 0.0 };
-                    if let (Some(ud), Some((_, ustride, uw, uh))) = (&under_data, &under_bytes) {
-                        let (ux, uy) = (region.x as i64 + x as i64, region.y as i64 + y as i64);
+                    if let (Some(ud), Some((_, ustride, uw, uh, tsx, tsy, tox, toy))) = (&under_data, &under_info) {
+                        // The same device point on the target, in that surface's own pixels.
+                        let (ux, uy) = (((region.x as f64 + x as f64 / sx) * tsx + tox) as i64, ((region.y as f64 + y as f64 / sy) * tsy + toy) as i64);
                         if ux >= 0 && uy >= 0 && ux < *uw && uy < *uh {
                             let q = &ud[uy as usize * ustride + ux as usize * 4..uy as usize * ustride + ux as usize * 4 + 4];
                             wgt *= match luma(q) { Some(l) => b.under_weight(l), None => b.under_weight(0.0) };
@@ -857,6 +862,7 @@ impl Renderer {
         let mut packed = vec![0u8; stride * h];
         for y in 0..h { packed[y * stride..y * stride + w].copy_from_slice(&mask[y * w..(y + 1) * w]); }
         let mask = crate::raster::a8_from_data(w as i32, h as i32, packed, stride as i32)?;
+        mask.set_device_scale(sx, sy);
         cr.push_group();
         cr.save()?;
         cr.identity_matrix();

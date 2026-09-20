@@ -115,7 +115,15 @@ pub struct OptionsBar {
     jitter: gtk::SpinButton,
     type_page: TypePage,
     gradient_preview: gtk::DrawingArea,
+    pattern_list: gtk::DropDown,
     syncing: std::cell::Cell<bool>,
+}
+
+/// The Pattern Stamp's choices: none, then every saved pattern.
+fn pattern_choices() -> Vec<String> {
+    let mut names = vec!["None (sampled pixels)".to_string()];
+    names.extend(crate::patterns::list());
+    names
 }
 
 /// A gradient over a checkerboard, as the options bar and the editor show it.
@@ -452,12 +460,12 @@ impl OptionsBar {
         { let doc = doc.clone(); clone_source.connect_selected_notify(move |s| { if let Ok(mut d) = doc.try_borrow_mut() { d.clone_all_layers = s.selected() == 1; } }); }
         clone.append(&clone_source);
         clone.append(&gtk::Label::new(Some("Pattern")));
-        let mut pattern_names = vec!["None (sampled pixels)".to_string()];
-        pattern_names.extend(crate::patterns::list());
-        let pattern = gtk::DropDown::from_strings(&pattern_names.iter().map(String::as_str).collect::<Vec<_>>());
+        let pattern_model = gtk::StringList::new(&pattern_choices().iter().map(String::as_str).collect::<Vec<_>>());
+        let pattern = gtk::DropDown::builder().model(&pattern_model).build();
         pattern.set_tooltip_text(Some("The Pattern Stamp: paint a saved pattern instead of sampled pixels (Edit > Define Pattern makes one)"));
-        { let doc = doc.clone(); pattern.connect_selected_notify(move |p| { if let Ok(mut d) = doc.try_borrow_mut() { d.clone_pattern = if p.selected() == 0 { None } else { pattern_names.get(p.selected() as usize).cloned() }; } }); }
+        { let doc = doc.clone(); pattern.connect_selected_notify(move |p| { let name = p.selected_item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()); if let Ok(mut d) = doc.try_borrow_mut() { d.clone_pattern = if p.selected() == 0 { None } else { name }; } }); }
         clone.append(&pattern);
+        let pattern_list = pattern.clone();
         clone.append(&gtk::Label::builder().label("Alt-click to set the source").css_classes(["dim-label"]).build());
         extra.add_named(&clone, Some("clone"));
         brushes.append(&extra);
@@ -549,7 +557,7 @@ impl OptionsBar {
         eye.append(&gtk::Label::builder().label("Click picks the foreground color; Alt-click the background").css_classes(["dim-label"]).build());
         stack.add_named(&eye, Some("eyedropper"));
 
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, pattern_list, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -612,6 +620,7 @@ impl OptionsBar {
                 if let Some(brushes) = self.widget.child_by_name("brushes") {
                     if let Some(extra) = brushes.last_child().and_downcast::<gtk::Stack>() {
                         extra.set_visible_child_name(match t { Tool::Brush => "brush", Tool::Eraser => "eraser", Tool::Heal => "heal", Tool::Clone => "clone", Tool::Dodge => "dodge", _ => "blur" });
+                        if t == Tool::Clone { self.refresh_patterns(); }
                     }
                 }
             }
@@ -631,6 +640,18 @@ impl OptionsBar {
 
     /// The gradient preview follows the palette (the foreground presets are made from it).
     pub fn sync_gradient(&self) { self.gradient_preview.queue_draw(); }
+
+    /// The Pattern Stamp's list follows the patterns folder, keeping the chosen one by name.
+    pub fn refresh_patterns(&self) {
+        let names = pattern_choices();
+        let current = self.pattern_list.selected_item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string());
+        let existing: Vec<String> = self.pattern_list.model().and_downcast::<gtk::StringList>().map(|m| (0..m.n_items()).filter_map(|i| m.string(i).map(|s| s.to_string())).collect()).unwrap_or_default();
+        if existing == names { return; }
+        let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        self.pattern_list.set_model(Some(&model));
+        let index = current.and_then(|c| names.iter().position(|n| *n == c)).unwrap_or(0);
+        self.pattern_list.set_selected(index as u32);
+    }
 
     pub fn sync_brush(&self, settings: &crate::brush::BrushSettings) {
         self.size.set_value(settings.diameter);

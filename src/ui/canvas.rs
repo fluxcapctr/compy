@@ -460,7 +460,7 @@ impl Canvas {
                         this.area.queue_draw();
                     }
                     Tool::Eyedropper => this.sample_at(x, y, state.contains(gdk::ModifierType::ALT_MASK)),
-                    Tool::Type if g.current_button() == 1 && n == 1 => this.type_at(x, y),
+                    Tool::Type if g.current_button() == 1 && n == 1 => { this.type_at(x, y); this.stroke_start.set((x, y)); this.begin_tool_drag((x, y), state); }
                     Tool::Brush if state.contains(gdk::ModifierType::ALT_MASK) => this.sample_at(x, y, false),
                     Tool::Wand => {
                         let mode = selection_mode(state, this.doc.borrow().mode);
@@ -1002,14 +1002,13 @@ impl Canvas {
     /// The gradient the options describe: a palette preset made from the current colors, a built-in one,
     /// or the custom gradient; reversed when asked; gray when a mask is the target.
     pub fn current_gradient(d: &super::Doc) -> crate::gradient::Gradient {
-        let g = gradient_for(d.gradient_preset, d.brush.color, d.background, &d.gradient_custom);
-        let g = if d.gradient_reversed { g.reversed() } else { g };
+        let mut g = gradient_for(d.gradient_preset, d.brush.color, d.background, &d.gradient_custom);
         if d.document.mask_target() {
             // On a mask the palette presets paint white (or black) toward the other, as the Brush does.
             let w = if d.mask_paint_white { 1.0 } else { 0.0 };
-            return match d.gradient_preset { 0 => crate::gradient::Gradient::two([w; 3], [1.0 - w; 3]), 1 => crate::gradient::Gradient::to_transparent([w; 3]), _ => g.grayed() };
+            g = match d.gradient_preset { 0 => crate::gradient::Gradient::two([w; 3], [1.0 - w; 3]), 1 => crate::gradient::Gradient::to_transparent([w; 3]), _ => g.grayed() };
         }
-        g
+        if d.gradient_reversed { g.reversed() } else { g }
     }
 
     fn crop_ratio(d: &super::Doc) -> Option<f64> {

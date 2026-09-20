@@ -82,8 +82,17 @@ impl Gradient {
     }
 
     /// Adds the stops to a Cairo gradient over `t` from 0 to 1 (colors given straight; Cairo premultiplies).
+    /// Two stops at one position make a hard edge: both sides go in, in order, as Cairo allows.
     pub fn fill_pattern(&self, pattern: &cairo::Gradient, from: f64, to: f64) {
-        for k in self.knots() { let c = self.at(k); pattern.add_color_stop_rgba(from + (to - from) * k, c[0], c[1], c[2], c[3]); }
+        const EPS: f64 = 1e-6;
+        for k in self.knots() {
+            let (before, after) = (self.at((k - EPS).max(0.0)), self.at((k + EPS).min(1.0)));
+            let offset = from + (to - from) * k;
+            if k > 0.0 && k < 1.0 && before.iter().zip(&after).any(|(a, b)| (a - b).abs() > 1e-4) {
+                pattern.add_color_stop_rgba(offset, before[0], before[1], before[2], before[3]);
+            }
+            pattern.add_color_stop_rgba(offset, after[0], after[1], after[2], after[3]);
+        }
     }
 
     /// 256 entries of straight RGB bytes, for a Gradient Map.
@@ -185,6 +194,17 @@ mod tests {
         assert_eq!(n.stops[1].color, [1.0, 0.0, 0.5]);
         assert_eq!(n.alphas.len(), 2);
         assert_eq!(g.knots(), vec![0.0, 0.5, 1.0]);
+        // Two stops at one position: a hard edge, kept on both sides in a Cairo pattern.
+        let hard = Gradient { stops: vec![Stop { position: 0.0, color: [0.0; 3] }, Stop { position: 0.5, color: [0.0; 3] }, Stop { position: 0.5, color: [1.0; 3] }, Stop { position: 1.0, color: [1.0; 3] }], alphas: vec![] };
+        let surface = crate::raster::new_argb(100, 1).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        let p = cairo::LinearGradient::new(0.0, 0.0, 100.0, 0.0);
+        hard.fill_pattern(&p, 0.0, 1.0);
+        cr.set_source(&p).unwrap();
+        cr.paint().unwrap();
+        drop(cr);
+        let (a, b) = crate::raster::with_bytes(&surface, |d, _| (d[25 * 4], d[75 * 4])).unwrap();
+        assert!(a < 8 && b > 247, "black before the edge, white after it: {a} {b}");
         assert_eq!(Shape::from_name("diamond"), Some(Shape::Diamond));
     }
 

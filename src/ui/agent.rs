@@ -64,7 +64,9 @@ pub fn serve(app: Rc<App>) {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let Ok(clone) = stream.try_clone() else { return };
-                let mut reader = BufReader::new(clone);
+                // A request arrives within a minute and within 16 MB, or the connection is dropped.
+                let _ = clone.set_read_timeout(Some(std::time::Duration::from_secs(60)));
+                let mut reader = BufReader::new(std::io::Read::take(clone, 16 << 20));
                 let mut line = String::new();
                 while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
                     if !line.ends_with('\n') { break; }
@@ -220,6 +222,10 @@ impl App {
                 None => bail!("no such job"),
                 Some((_, None)) => Ok(json!({"job": job})),
                 Some((_, Some(result))) => {
+                    // A result must not land in the middle of a stroke, a transform or a dialog: the poll
+                    // keeps coming back until the document is free.
+                    let busy = JOBS.with(|jobs| jobs.borrow().get(&job).map(|j| j.document)).map(|id| { let mut busy = false; self.with_document(id, |p| { busy = p.canvas.text_editing() || p.canvas.doc().borrow().document.busy_editing(); }); busy }).unwrap_or(false);
+                    if busy { return Ok(json!({"job": job})); }
                     let Some(job) = JOBS.with(|jobs| jobs.borrow_mut().remove(&job)) else { bail!("no such job") };
                     // The finished generation lands on the document here, on the GTK thread.
                     let value = result.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -321,8 +327,8 @@ impl App {
                             "photo_filter" => { if let Some(c) = text(args, "color").and_then(|c| parse_color(&c)) { s.photo_filter.color = c; } if let Some(v) = num(args, "density") { s.photo_filter.density = v; } if let Some(b) = flag(args, "preserve_luminosity") { s.photo_filter.preserve_luminosity = b; } Kind::PhotoFilter }
                             "threshold" => { s.threshold.level = num(args, "level").unwrap_or(128.0); Kind::Threshold }
                             "posterize" => { s.posterize.levels = num(args, "levels").unwrap_or(4.0); Kind::Posterize }
-                            "shadows_highlights" => { if let Some(v) = num(args, "shadows") { s.shadows_highlights.shadows = v; } if let Some(v) = num(args, "highlights") { s.shadows_highlights.highlights = v; } if let Some(v) = num(args, "radius") { s.shadows_highlights.radius = v; } Kind::ShadowsHighlights }
-                            "selective_color" => { let range = text(args, "range").unwrap_or_else(|| "Reds".into()); s.selective.range = range.clone(); s.selective.set_adjustment(&range, [num(args, "cyan").unwrap_or(0.0), num(args, "magenta").unwrap_or(0.0), num(args, "yellow").unwrap_or(0.0), num(args, "black").unwrap_or(0.0)]); if let Some(b) = flag(args, "relative") { s.selective.relative = b; } Kind::SelectiveColor }
+                            "shadows_highlights" => { if let Some(v) = num(args, "shadow_amount").or_else(|| num(args, "shadows")) { s.shadows_highlights.shadows = v; } if let Some(v) = num(args, "highlight_amount").or_else(|| num(args, "highlights")) { s.shadows_highlights.highlights = v; } if let Some(v) = num(args, "radius") { s.shadows_highlights.radius = v; } Kind::ShadowsHighlights }
+                            "selective_color" => { let range = text(args, "range").unwrap_or_else(|| "Reds".into()); s.selective.range = range.clone(); s.selective.set_adjustment(&range, [num(args, "cyan").unwrap_or(0.0), num(args, "magenta").unwrap_or(0.0), num(args, "yellow").unwrap_or(0.0), num(args, "black_amount").or_else(|| num(args, "black")).unwrap_or(0.0)]); if let Some(b) = flag(args, "relative") { s.selective.relative = b; } Kind::SelectiveColor }
                             "channel_mixer" => { let row = |k: &str| args.get(k).and_then(Value::as_array).map(|a| [a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0), a.get(2).and_then(Value::as_f64).unwrap_or(0.0), a.get(3).and_then(Value::as_f64).unwrap_or(0.0)]); if let Some(r) = row("red") { s.mixer.red = r; } if let Some(r) = row("green") { s.mixer.green = r; } if let Some(r) = row("blue") { s.mixer.blue = r; } if let Some(b) = flag(args, "monochrome") { s.mixer.monochrome = b; } Kind::ChannelMixer }
                             "high_pass" => { s.high_pass = num(args, "radius").unwrap_or(10.0); Kind::HighPass }
                             "radial_blur" => { s.radial.amount = num(args, "amount").unwrap_or(10.0); s.radial.zoom = text(args, "method").unwrap_or_default() == "zoom"; Kind::RadialBlur }
@@ -950,6 +956,7 @@ impl Assistant {
                 this.status.set_label(&text);
             }
             // A turn that says nothing for five minutes is stuck: stop it and say so.
+            if running_job_status().is_some() { quiet_since = std::time::Instant::now(); }
             if quiet_since.elapsed() > std::time::Duration::from_secs(300) && this.child_pid.get() == Some(pid) { let _ = std::process::Command::new("kill").arg(pid.to_string()).status(); this.child_pid.set(None); }
             while let Ok((kind, line)) = rx.try_recv() {
                 quiet_since = std::time::Instant::now();

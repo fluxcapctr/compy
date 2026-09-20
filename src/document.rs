@@ -20,6 +20,8 @@ pub struct Document {
     pub history: History<State>,
     stroke: Option<crate::brush::Stroke>,
     warp: Option<crate::warp::Warp>,
+    /// The layer a stroke or warp began on: where it lands, whatever is active when it ends.
+    stroke_layer: Option<Uuid>,
     stroke_mask: bool,
     mask_target: bool,
     pub document_id: Uuid,
@@ -112,7 +114,7 @@ impl Document {
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -1161,7 +1163,11 @@ impl Document {
 
     /// Fills the selection (or the whole layer) with `color` on the active image layer, or with black or
     /// white on its mask when the mask is targeted, as one undo step (`fillSelection`).
-    pub fn fill(&mut self, color: [f64; 3]) -> Result<()> {
+    pub fn fill(&mut self, color: [f64; 3]) -> Result<()> { self.fill_with(color, 1.0) }
+
+    /// `fill` at an opacity: on a mask the coverage is scaled by it, on pixels the color is painted at it.
+    pub fn fill_with(&mut self, color: [f64; 3], alpha: f64) -> Result<()> {
+        let alpha = alpha.clamp(0.0, 1.0);
         let Some(id) = self.active else { bail!("Select a layer first.") };
         if self.selection.as_ref().is_some_and(|s| s.is_empty()) { return Ok(()); }
         if let Some((_, mask, grid)) = self.active_mask() {
@@ -1170,7 +1176,8 @@ impl Document {
             let target = if (w, h) == (mask.width(), mask.height()) { mask } else { let v = with_bytes(&mask, |d, _| d[0])?; crate::raster::a8_filled(w, h, v)? };
             let coverage = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&grid, w, h)?), None => None };
             let value = if white { 255 } else { 0 };
-            let cov = coverage.map(|c| with_bytes(&c, |d, stride| (0..h as usize).flat_map(|y| d[y * stride..y * stride + w as usize].to_vec()).collect::<Vec<u8>>())).transpose()?;
+            let mut cov = coverage.map(|c| with_bytes(&c, |d, stride| (0..h as usize).flat_map(|y| d[y * stride..y * stride + w as usize].to_vec()).collect::<Vec<u8>>())).transpose()?;
+            if alpha < 1.0 { let full = cov.take().unwrap_or_else(|| vec![255u8; w as usize * h as usize]); cov = Some(full.into_iter().map(|c| (c as f64 * alpha).round() as u8).collect()); }
             let filled = crate::raster::a8_filled(w, h, value)?;
             let result = if let Some(cov) = cov {
                 let (wu, hu) = (w as usize, h as usize);
@@ -1192,7 +1199,7 @@ impl Document {
         {
             let cr = Context::new(&result)?;
             if let Some(image) = self.renderer.image(id) { cr.set_source_surface(image, 0.0, 0.0)?; cr.paint()?; }
-            cr.set_source_rgb(color[0], color[1], color[2]);
+            cr.set_source_rgba(color[0], color[1], color[2], alpha);
             match &self.selection {
                 Some(sel) => { let coverage = sel.coverage_on_layer(&layer.transform, w, h)?; cr.mask_surface(&coverage, 0.0, 0.0)?; }
                 None => cr.paint()?,
@@ -1256,7 +1263,7 @@ impl Document {
         let Some(id) = self.active else { return Ok(()) };
         if let Some(mut stroke) = self.stroke.take() {
             let result = stroke.replay(rest).and_then(|_| self.sync_mask_preview(id, &stroke));
-            self.stroke = Some(stroke);
+            self.stroke = Some(stroke); self.stroke_layer = Some(id);
             if let Err(e) = result { self.cancel_stroke(); return Err(e); }
         }
         self.finish_stroke()
@@ -1469,12 +1476,12 @@ impl Document {
         let mut warp = crate::warp::Warp::new(surface.clone(), mode, settings);
         warp.append(point)?;
         self.renderer.set_preview_placed(id, surface, canvas);
-        self.warp = Some(warp);
+        self.warp = Some(warp); self.stroke_layer = Some(id);
         Ok(())
     }
 
     fn continue_warp(&mut self, point: (f64, f64)) -> Result<()> {
-        let Some(id) = self.active else { return Ok(()) };
+        let Some(id) = self.stroke_layer.or(self.active) else { return Ok(()) };
         let Some(warp) = self.warp.as_mut() else { return Ok(()) };
         warp.append(point)?;
         if let Some(rect) = warp.changed {
@@ -1488,7 +1495,7 @@ impl Document {
     /// Paints the warp's result into the layer's pixels along the stroke, as one undo step (`finishWarp`).
     fn finish_warp(&mut self) -> Result<()> {
         let Some(warp) = self.warp.take() else { return Ok(()) };
-        let Some(id) = self.active else { return Ok(()) };
+        let Some(id) = self.stroke_layer.take().or(self.active) else { return Ok(()) };
         self.renderer.set_preview(id, None);
         if warp.points.is_empty() { return Ok(()); }
         let (w, h) = (warp.surface.width() as usize, warp.surface.height() as usize);
@@ -1503,7 +1510,7 @@ impl Document {
         let mut stroke = crate::brush::Stroke::new(true, size, &layer.transform, canvas, &settings, crate::brush::Kind::Clone { sample, offset: (0.0, 0.0), replaces: true }, self.selection.clone(), true,
             |x0, y0, gw, gh, transform| renderer.begin_preview(id, -x0, -y0, gw, gh, transform))?;
         stroke.replay(&warp.points)?;
-        self.stroke = Some(stroke);
+        self.stroke = Some(stroke); self.stroke_layer = Some(id);
         self.stroke_mask = false;
         let name = warp.mode.name();
         self.finish_stroke_named(name)
@@ -1533,7 +1540,8 @@ impl Document {
     pub fn replay_stroke(&mut self, points: &[(f64, f64)], settings: &crate::brush::BrushSettings, kind: StrokeKind) -> Result<()> {
         let Some((first, rest)) = points.split_first() else { return Ok(()) };
         self.begin_stroke(*first, settings, kind)?;
-        if let Some(stroke) = self.stroke.as_mut() { stroke.replay(rest)?; if let Some(rect) = stroke.changed { self.renderer.preview_changed(self.active.unwrap(), rect)?; } }
+        let id = self.stroke_layer.or(self.active).ok_or_else(|| anyhow::anyhow!("no layer for the stroke"))?;
+        if let Some(stroke) = self.stroke.as_mut() { stroke.replay(rest)?; if let Some(rect) = stroke.changed { self.renderer.preview_changed(id, rect)?; } }
         self.finish_stroke()
     }
 
@@ -1571,13 +1579,13 @@ impl Document {
             |x0, y0, w, h, transform| renderer.begin_preview(id, -x0, -y0, w, h, transform))?;
         stroke.append(point)?;
         if let Some(rect) = stroke.changed { self.renderer.preview_changed(id, rect)?; }
-        self.stroke = Some(stroke);
+        self.stroke = Some(stroke); self.stroke_layer = Some(id);
         Ok(())
     }
 
     pub fn continue_stroke(&mut self, point: (f64, f64)) -> Result<()> {
         if self.warp.is_some() { return self.continue_warp(point); }
-        let Some(id) = self.active else { return Ok(()) };
+        let Some(id) = self.stroke_layer.or(self.active) else { return Ok(()) };
         let Some(mut stroke) = self.stroke.take() else { return Ok(()) };
         let result = stroke.append(point);
         if result.is_ok() { if let Some(rect) = stroke.changed { self.mark_dirty_grid(&stroke, rect); } }
@@ -1586,14 +1594,14 @@ impl Document {
             (Ok(()), false) => stroke.changed.map_or(Ok(()), |rect| self.renderer.preview_changed(id, rect)),
             _ => Ok(()),
         };
-        self.stroke = Some(stroke);
+        self.stroke = Some(stroke); self.stroke_layer = Some(id);
         result.and(sync)
     }
 
     pub fn cancel_stroke(&mut self) {
         self.stroke = None;
         self.warp = None;
-        if let Some(id) = self.active { self.renderer.set_preview(id, None); self.renderer.end_mask_preview(id); }
+        if let Some(id) = self.stroke_layer.take().or(self.active) { self.renderer.set_preview(id, None); self.renderer.end_mask_preview(id); }
         self.stroke_mask = false;
     }
 
@@ -1606,7 +1614,8 @@ impl Document {
 
     fn finish_stroke_named(&mut self, name: &str) -> Result<()> {
         let Some(mut stroke) = self.stroke.take() else { return Ok(()) };
-        let Some(id) = self.active else { return Ok(()) };
+        let Some(id) = self.stroke_layer.take().or(self.active) else { return Ok(()) };
+        if !self.has_layer(id) { self.stroke_mask = false; return Ok(()); }
         if std::mem::take(&mut self.stroke_mask) {
             let result = stroke.flush().and_then(|_| self.sync_mask_preview(id, &stroke));
             if result.is_ok() && stroke.touched_anything() {
@@ -2294,7 +2303,7 @@ impl Document {
         stroke.append(point)?;
         self.stroke_mask = true;
         self.sync_mask_preview(id, &stroke)?;
-        self.stroke = Some(stroke);
+        self.stroke = Some(stroke); self.stroke_layer = Some(id);
         Ok(())
     }
 
@@ -2598,7 +2607,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None };
         self.copy_layers(&snapshot, ids, place)
     }
 
@@ -2924,7 +2933,7 @@ impl Document {
             let _ = (id, mask, grid);
             self.begin_edit("Stroke");
             let saved = self.selection.replace(band);
-            let result = self.fill(color);
+            let result = self.fill_with(color, opacity);
             self.selection = saved;
             return match result { Ok(()) => { self.end_edit(); Ok(()) } Err(e) => { self.abort_edit(); Err(e) } };
         }
@@ -3061,13 +3070,15 @@ impl Document {
         let (pw, ph) = (x1 - x0, y1 - y0);
         if pw < 1 || ph < 1 { bail!("The pattern would be empty."); }
         if pw > 4096 || ph > 4096 { bail!("A pattern can be up to 4096 pixels on a side; select a smaller area."); }
+        let whole_layer = self.selection.as_ref().and_then(|s| s.bounds).is_none();
         let tile = new_argb(pw, ph)?;
         {
             let cr = Context::new(&tile)?;
             cr.translate(-x0 as f64, -y0 as f64);
             cr.rectangle(x0 as f64, y0 as f64, pw as f64, ph as f64);
             cr.clip();
-            self.renderer.draw(&cr)?;
+            // The selection takes the composite; a whole layer is that layer alone, background and all others left out.
+            match (whole_layer, self.active) { (true, Some(id)) => self.renderer.draw_layer_plain(id, &cr)?, _ => self.renderer.draw(&cr)? }
         }
         crate::patterns::save(name, &tile)?;
         Ok(())

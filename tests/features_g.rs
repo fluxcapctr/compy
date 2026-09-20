@@ -703,6 +703,7 @@ fn paragraph_text_wraps_at_its_width_and_shapes_come_from_paths() {
 #[test]
 fn patterns_define_fill_and_stamp() {
     let dir = std::env::temp_dir().join(format!("compy-patterns-{}", std::process::id()));
+    let saved_home = std::env::var_os("XDG_DATA_HOME");
     unsafe { std::env::set_var("XDG_DATA_HOME", &dir); }
     let mut d = Document::blank(40, 40, 72.0).unwrap();
     d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 1.0, 1.0], 0.0).unwrap();
@@ -735,4 +736,82 @@ fn patterns_define_fill_and_stamp() {
     assert_eq!(rgb_at(&mut d, 22, 20), [255, 255, 255, 255]);
     assert_eq!(rgb_at(&mut d, 2, 38), [0, 0, 255, 255], "far from the stroke, untouched");
     let _ = std::fs::remove_dir_all(&dir);
+    match saved_home { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
+}
+
+#[test]
+fn round_seven_fixes_hold() {
+    use compositor::effects::{BlendIf, Effects};
+    use compositor::filters::{Kind, Settings};
+    // A stroke lands on the layer it began on, even when another layer became active meanwhile.
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let a = d.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    let mut brush = compositor::brush::BrushSettings::default();
+    brush.diameter = 10.0;
+    brush.color = [1.0, 0.0, 0.0];
+    d.begin_stroke((20.0, 20.0), &brush, compositor::document::StrokeKind::Paint).unwrap();
+    let blue = compositor::raster::new_argb(40, 40).unwrap();
+    { let cr = cairo::Context::new(&blue).unwrap(); cr.set_source_rgb(0.0, 0.0, 1.0); cr.paint().unwrap(); }
+    let b = d.add_image_surface(blue, "Generated", (0.0, 0.0), (40.0, 40.0)).unwrap();
+    assert_eq!(d.active, Some(b));
+    d.finish_stroke().unwrap();
+    d.set_visible(b, false);
+    assert_eq!(rgb_at(&mut d, 20, 20), [255, 0, 0, 255], "the stroke went onto its own layer");
+    d.set_visible(b, true);
+    d.select_layer(Some(b));
+    d.set_visible(a, false);
+    assert_eq!(rgb_at(&mut d, 20, 20), [0, 0, 255, 255], "the generated layer is untouched");
+    // Blend If reads the same pixels on a scaled (HiDPI) target as on a plain one.
+    let mut e = Document::blank(40, 40, 72.0).unwrap();
+    e.add_shape_layer(false, (0.0, 0.0, 20.0, 40.0), [0.1, 0.1, 0.1], 0.0).unwrap();
+    e.add_shape_layer(false, (20.0, 0.0, 20.0, 40.0), [0.9, 0.9, 0.9], 0.0).unwrap();
+    let top = e.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let mut fx = Effects::default();
+    fx.blend_if = Some(BlendIf { under_black: 128.0, feather: 0.0, ..BlendIf::default() });
+    e.set_effects(top, Some(&fx)).unwrap();
+    let hi = compositor::raster::new_argb(80, 80).unwrap();
+    hi.set_device_scale(2.0, 2.0);
+    { let cr = cairo::Context::new(&hi).unwrap(); cr.rectangle(0.0, 0.0, 40.0, 40.0); cr.clip(); e.renderer.draw(&cr).unwrap(); }
+    let (left, right) = compositor::raster::with_bytes(&hi, |b, stride| { let p = |x: usize, y: usize| { let i = y * stride + x * 4; [b[i + 2], b[i + 1], b[i], b[i + 3]] }; (p(10, 40), p(70, 40)) }).unwrap();
+    assert!(left[0] < 40, "hidden over the dark half at 2x: {left:?}");
+    assert_eq!(right, [255, 0, 0, 255], "shown over the light half at 2x");
+    // A mask stroke at zero opacity changes nothing; at half it paints half.
+    let mut m = Document::blank(40, 40, 72.0).unwrap();
+    let id = m.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    m.add_mask(false).unwrap();
+    m.set_mask_target(true);
+    m.select_box(10.0, 10.0, 20.0, 20.0, false, Mode::Replace, false).unwrap();
+    m.stroke_selection(2.0, [1.0; 3], 0, 0.0).unwrap();
+    let mask_max = |m: &Document| compositor::raster::with_bytes(m.renderer.mask(id).unwrap(), |b, _| b.iter().copied().max().unwrap_or(0)).unwrap();
+    assert_eq!(mask_max(&m), 0, "zero opacity leaves the mask black");
+    m.stroke_selection(2.0, [1.0; 3], 0, 0.5).unwrap();
+    let v = mask_max(&m);
+    assert!((120..=136).contains(&v), "half opacity paints half: {v}");
+    // Sharpening a flat color against transparency leaves the color alone.
+    let mut f = Document::blank(30, 10, 72.0).unwrap();
+    let cut = compositor::raster::new_argb(30, 10).unwrap();
+    { let cr = cairo::Context::new(&cut).unwrap(); cr.set_source_rgb(0.5, 0.5, 0.5); cr.rectangle(0.0, 0.0, 15.0, 10.0); cr.fill().unwrap(); }
+    let layer = f.add_image_surface(cut, "cutout", (0.0, 0.0), (30.0, 10.0)).unwrap();
+    f.select_layer(Some(layer));
+    let mut s = Settings::default();
+    s.sharpen.amount = 100.0;
+    s.sharpen.radius = 2.0;
+    s.sharpen.threshold = 0.0;
+    f.apply_filter(Kind::UnsharpMask, &s).unwrap();
+    let edge = rgb_at(&mut f, 14, 5);
+    assert!((125..=131).contains(&edge[0]) && edge[3] == 255, "gray stays gray at the cutout's edge: {edge:?}");
+    // Define Pattern without a selection takes the layer alone, background left out.
+    let dir = std::env::temp_dir().join(format!("compy-patterns-b-{}", std::process::id()));
+    let saved = std::env::var_os("XDG_DATA_HOME");
+    unsafe { std::env::set_var("XDG_DATA_HOME", &dir); }
+    let mut g = Document::blank(20, 20, 72.0).unwrap();
+    g.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    g.add_shape_layer(false, (5.0, 5.0, 4.0, 4.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    g.define_pattern("Alone").unwrap();
+    let tile = compositor::patterns::load("Alone").unwrap();
+    assert_eq!((tile.width(), tile.height()), (4, 4));
+    let px = compositor::raster::with_bytes(&tile, |b, _| [b[2], b[1], b[0], b[3]]).unwrap();
+    assert_eq!(px, [255, 0, 0, 255], "the red layer alone, no blue behind it: {px:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+    match saved { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
 }

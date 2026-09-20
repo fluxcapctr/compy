@@ -388,23 +388,30 @@ pub fn sharpen(pixels: &mut [u8], w: usize, h: usize, s: &Sharpen, luminosity_on
     crate::blur::gaussian(&mut blurred, w, h, 4, s.radius);
     let amount = s.amount / 100.0;
     for (p, b) in pixels.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
-        if p[3] == 0 { continue; }
+        let a = p[3] as f64;
+        if a <= 0.0 { continue; }
+        // Straight colors on both sides, so an edge against transparency is not taken for a dark edge.
+        let straight = [p[0] as f64 / a * 255.0, p[1] as f64 / a * 255.0, p[2] as f64 / a * 255.0];
+        let ba = b[3] as f64;
+        let blurred_straight = if ba <= 0.0 { straight } else { [b[0] as f64 / ba * 255.0, b[1] as f64 / ba * 255.0, b[2] as f64 / ba * 255.0] };
+        let mut out = straight;
         if luminosity_only {
-            let lp = 0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64;
-            let lb = 0.114 * b[0] as f64 + 0.587 * b[1] as f64 + 0.299 * b[2] as f64;
+            let lp = 0.114 * straight[0] + 0.587 * straight[1] + 0.299 * straight[2];
+            let lb = 0.114 * blurred_straight[0] + 0.587 * blurred_straight[1] + 0.299 * blurred_straight[2];
             let diff = lp - lb;
             // Reduce Noise: differences below a few levels fade out rather than switch off.
             let gate = (s.noise / 100.0) * 12.0;
             let keep = if gate <= 0.0 { 1.0 } else { (diff.abs() / gate).min(1.0) };
             let add = diff * amount * keep;
-            for k in 0..3 { p[k] = (p[k] as f64 + add).round().clamp(0.0, p[3] as f64) as u8; }
+            for k in 0..3 { out[k] = straight[k] + add; }
         } else {
             for k in 0..3 {
-                let diff = p[k] as f64 - b[k] as f64;
+                let diff = straight[k] - blurred_straight[k];
                 if diff.abs() < s.threshold { continue; }
-                p[k] = (p[k] as f64 + diff * amount).round().clamp(0.0, p[3] as f64) as u8;
+                out[k] = straight[k] + diff * amount;
             }
         }
+        for k in 0..3 { p[k] = (out[k].clamp(0.0, 255.0) / 255.0 * a).round() as u8; }
     }
 }
 
