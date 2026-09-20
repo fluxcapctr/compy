@@ -172,6 +172,7 @@ fn state_of(doc: &Doc) -> Value {
         "tool": format!("{:?}", doc.tool), "zoom_percent": (doc.viewport.zoom() * 100.0).round(),
         "foreground_color": format!("#{:02x}{:02x}{:02x}", (doc.brush.color[0] * 255.0) as u8, (doc.brush.color[1] * 255.0) as u8, (doc.brush.color[2] * 255.0) as u8),
         "selection": selection, "layers": layers, "patterns": crate::patterns::list(),
+        "brush_tips": super::brushes::presets().iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
     })
 }
 
@@ -414,6 +415,49 @@ impl App {
                         }
                         if g.stops.len() < 2 { bail!("give at least two stops"); }
                         dd.gradient_fill(start, end, shape, &g, num(args, "opacity").unwrap_or(1.0), true)?; json!("gradient drawn")
+                    }
+                    "brush_stroke" => {
+                        let points: Vec<(f64, f64)> = args.get("points").and_then(Value::as_array).map(|a| a.iter().filter_map(|p| { let q = p.as_array()?; Some((q.first()?.as_f64()?, q.get(1)?.as_f64()?)) }).collect()).unwrap_or_default();
+                        if points.len() < 2 { bail!("points needs at least two [x, y] pairs"); }
+                        if points.len() > 5000 { bail!("at most 5000 points in one stroke"); }
+                        let mut settings = d.brush.clone();
+                        settings.preset = None;
+                        settings.spacing = None;
+                        settings.angle_jitter = 0.0;
+                        if let Some(v) = num(args, "diameter") { settings.diameter = v.clamp(1.0, 2000.0); }
+                        if let Some(v) = num(args, "hardness") { settings.hardness = v.clamp(0.0, 1.0); }
+                        if let Some(v) = num(args, "opacity") { settings.opacity = v.clamp(0.0, 1.0); }
+                        if let Some(c) = text(args, "color").and_then(|c| parse_color(&c)) { settings.color = c; }
+                        if let Some(tip) = text(args, "tip").filter(|t| !t.trim().is_empty()) {
+                            let want = tip.trim().to_lowercase();
+                            let found = super::brushes::presets().into_iter().find(|p| p.name.to_lowercase() == want).or_else(|| super::brushes::presets().into_iter().find(|p| p.name.to_lowercase().contains(&want)));
+                            let Some(preset) = found else { bail!("no brush tip called {tip}; the state lists brush_tips") };
+                            settings.spacing = Some(preset.spacing / 100.0);
+                            settings.angle_jitter = preset.jitter;
+                            settings.preset = Some(preset);
+                        }
+                        if let Some(v) = num(args, "spacing") { settings.spacing = Some(v.clamp(0.02, 2.0)); }
+                        let range = match text(args, "range").unwrap_or_default().as_str() { "shadows" => 0u8, "highlights" => 2, _ => 1 };
+                        let kind = match text(args, "kind").unwrap_or_else(|| "paint".into()).as_str() {
+                            "paint" => crate::document::StrokeKind::Paint,
+                            "erase" => crate::document::StrokeKind::Erase,
+                            "dodge" => crate::document::StrokeKind::Dodge { burn: false, range },
+                            "burn" => crate::document::StrokeKind::Dodge { burn: true, range },
+                            "saturate" => crate::document::StrokeKind::Sponge { desaturate: false },
+                            "desaturate" => crate::document::StrokeKind::Sponge { desaturate: true },
+                            "blur" => crate::document::StrokeKind::Blur,
+                            "heal" => crate::document::StrokeKind::Heal { mode: 0 },
+                            "pattern" => crate::document::StrokeKind::Pattern { name: text(args, "pattern").ok_or_else(|| anyhow::anyhow!("kind pattern needs a pattern name"))? },
+                            other => bail!("unknown stroke kind {other}"),
+                        };
+                        let dd = &mut d.document;
+                        if dd.mask_target() {
+                            match kind {
+                                crate::document::StrokeKind::Paint | crate::document::StrokeKind::Erase => { let white = matches!(kind, crate::document::StrokeKind::Paint) && settings.color[0] + settings.color[1] + settings.color[2] > 1.5; dd.replay_mask_stroke(&points, &settings, white)?; }
+                                _ => bail!("only paint and erase strokes work on a mask; target the layer for the rest"),
+                            }
+                        } else { dd.replay_stroke(&points, &settings, kind)?; }
+                        json!("stroked")
                     }
                     "define_pattern" => { dd.define_pattern(&text(args, "name").unwrap_or_default())?; json!("pattern saved") }
                     "fill_pattern" => { dd.fill_pattern(&text(args, "name").unwrap_or_default(), num(args, "scale").unwrap_or(1.0), num(args, "opacity").unwrap_or(1.0))?; json!("filled") }

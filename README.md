@@ -266,7 +266,10 @@ Pattern Stamp. The Type tool makes paragraph text: drag out a box when you place
 options bar, and the lines wrap there (0 is a single line). The Pen's Make Shape turns a path into a
 vector shape layer in the foreground color; Layer > Edit Shape Points puts its points back on the Pen
 and Apply to Shape (or the Pen's button) writes them back, and the shape redraws crisp at any size.
-Compy: layer_style takes blend_if; define_pattern and fill_pattern; text_layer and set_text take width.
+Compy: layer_style takes blend_if; define_pattern and fill_pattern; text_layer and set_text take width;
+and `brush_stroke` paints along a list of points with any kind (paint, erase, dodge, burn, saturate,
+desaturate, blur, heal, pattern), a diameter, hardness, opacity, color and a textured tip by name (the
+state lists `brush_tips`), so it can lay texture, dodge and burn, or stamp a pattern by hand.
 
 **Curves, Color Balance, Auto and Fade.** Image > Curves (Ctrl+M) opens the Photoshop-style curve: the
 histogram behind a grid, a channel dropdown, click to add a point (up to 32), drag to move one, the ends

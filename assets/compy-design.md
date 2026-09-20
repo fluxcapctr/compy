@@ -88,6 +88,17 @@ before you say a job is done.
   named place. "Save four hours a week" over "save time".
 - Lead with the surprising fact or the feeling, not the product name. Say it the way a person says it.
 
+## Texture and hand work
+
+- Texture goes on its own layer, never on the photo: a new layer, strokes with a textured tip (Grain,
+  Chalk, Sponge, Spatter, Watercolor, Stipple) at 10 to 30 percent opacity, then a blend mode such as
+  Overlay, Soft Light or Multiply and the layer's opacity to taste.
+- Several short strokes in different directions read as texture; one long stroke reads as a stroke.
+  Vary the diameter between them.
+- A saved pattern tiles evenly; break it up with a mask or a second pass at another scale so the
+  repeat does not show.
+- Dodge and burn in passes at low exposure (10 to 20 percent), never in one heavy stroke.
+
 ## Offering options
 
 - When asked for options or layouts, make two or three, each in its own tab, named for what differs
