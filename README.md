@@ -1,11 +1,42 @@
 # Compy
 
-Compy is the app's name on the desktop and in its window; the binary and the crate are still `compositor`, so every
-command below keeps working.
+A layer-based image editor for Linux, in the shape of Photoshop, with an AI assistant built in. Native
+GTK4, written in Rust, built for Omarchy and at home on any Linux desktop.
 
-A Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a layer-based image editor for
-macOS. The original app's C pixel core (`csrc/`) is compiled unchanged; the rest is rebuilt in Rust on Cairo,
-with the Swift app checked out as a read-only submodule in `reference/` and used as the specification.
+![Compy](assets/screenshot.png)
+
+Compy started as a Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a macOS
+editor whose C pixel core (`csrc/`) is compiled here unchanged. Everything around it is new: the
+compositing engine, the tools, the file formats and the assistant.
+
+## Highlights
+
+- **Layers the way you expect.** Groups, masks, clipping masks, adjustment layers (15 kinds), blend modes,
+  opacity, layer styles (drop and inner shadow, glows, bevel, stroke, color, gradient and pattern overlays,
+  Blend If), artboards, and a history panel. Every change is one undo step.
+- **The tools.** Move with snapping and free transform, marquee, lasso, magic wand, color range, crop and
+  straighten, brush with Photoshop `.abr` and GIMP brush tips, eraser, clone and pattern stamp, spot
+  healing, blur and smudge, liquify, dodge, burn and sponge, gradients with any number of stops, pen paths
+  that become editable vector shapes, point and paragraph type, eyedropper, zoom and hand.
+- **Adjustments and filters.** Levels, curves, exposure, hue and saturation, color balance, vibrance,
+  black and white, photo filter, threshold, posterize, shadows and highlights, selective color, channel
+  mixer, gradient map, grain, auto tone, contrast and color; gaussian, motion and radial blur, unsharp
+  mask, smart sharpen, high pass, noise, lens correction, content-aware fill, and a fade for whatever you
+  did last.
+- **Files.** Its own `.comp` project package, Photoshop `.psd` in and out (editable type and layer styles
+  survive the round trip), and PNG, JPEG, TIFF, GIF, WebP, AVIF, BMP and HEIC. Export one document to
+  every ad and social size at once, with the layout reframed, or as artboards to fix by hand.
+- **Compy, the assistant.** Ctrl+K opens Compy, which runs Claude Code against the open document through
+  a set of editor tools: it selects, paints, adjusts, styles, sets type, exports, and, with a fal.ai key,
+  generates and edits pictures (Generative Fill and Expand, Nano Banana, GPT Image, upscaling,
+  relighting). It talks about the picture, not the tools, and every tool call is an undoable step you
+  watch happen. Dictation works through voxtype.
+- **Made for Omarchy.** The chrome follows the active Omarchy theme, the app icon and header mark take
+  the accent color, and it is one AUR package away. Autosave every two minutes with recovery on the start
+  page, rulers, guides, a grid, Photoshop shortcuts, and a right-click brush popover.
+
+The binary and the crate are still called `compositor`, so every command below keeps working; `compy`
+is an alias.
 
 ## Install
 
