@@ -840,7 +840,8 @@ impl Canvas {
     /// A press on an artboard's name strip (just above its frame) picks the board up to drag.
     fn begin_board_drag(&self, view: (f64, f64)) -> bool {
         let mut d = self.doc.borrow_mut();
-        if d.document.stroke_active() || !d.document.renderer.has_artboards() { return false; }
+        // Not during a stroke, a transform or any other open edit: the drag would join that step.
+        if d.document.busy_editing() || !d.document.renderer.has_artboards() { return false; }
         let size = d.size();
         let point = d.viewport.document_point(view, size);
         let strip = 18.0 / d.viewport.zoom().max(1e-6);

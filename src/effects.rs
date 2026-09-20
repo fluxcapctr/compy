@@ -185,7 +185,11 @@ impl Effects {
     }
 
     /// Everything the effects draw around `alpha` (`w` x `h`, a coverage from 0 to 255).
-    pub fn render(&self, alpha: &[u8], w: usize, h: usize) -> Rendered {
+    pub fn render(&self, alpha: &[u8], w: usize, h: usize) -> Rendered { self.render_at(alpha, w, h, (0, 0)) }
+
+    /// `render` with the layer's top left corner at `anchor` in the buffer (the buffer is padded by the
+    /// effects' reach), so a pattern tiles from the layer's corner whatever its contents or mask cover.
+    pub fn render_at(&self, alpha: &[u8], w: usize, h: usize, anchor: (i64, i64)) -> Rendered {
         let n = w * h;
         let mut below: Option<Vec<u8>> = None;
         let mut inside: Option<Vec<u8>> = None;
@@ -236,14 +240,14 @@ impl Effects {
         if let Some(p) = self.pattern_overlay.as_ref().filter(|e| e.enabled) {
             if let Ok(tile) = crate::patterns::load(&p.pattern) {
                 if let Ok((rgba, tw, th)) = crate::png_io::straight_rgba(&tile) {
-                    let (bx0, by0, _, _) = coverage_box(alpha, w, h).unwrap_or((0, 0, w, h));
+                    let (bx0, by0) = anchor;
                     let scale = if p.scale.is_finite() { p.scale.clamp(0.05, 20.0) } else { 1.0 };
                     let buf = layer(&mut inside, n);
                     for y in 0..h {
                         for x in 0..w {
                             let i = y * w + x;
                             if a01[i] <= 0.0 { continue; }
-                            let (sx, sy) = ((((x as i64 - bx0 as i64) as f64 / scale).floor() as i64).rem_euclid(tw as i64) as usize, (((y as i64 - by0 as i64) as f64 / scale).floor() as i64).rem_euclid(th as i64) as usize);
+                            let (sx, sy) = ((((x as i64 - bx0) as f64 / scale).floor() as i64).rem_euclid(tw as i64) as usize, (((y as i64 - by0) as f64 / scale).floor() as i64).rem_euclid(th as i64) as usize);
                             let px = &rgba[(sy * tw + sx) * 4..(sy * tw + sx) * 4 + 4];
                             let cov = (px[3] as f64 / 255.0 * p.opacity) as f32;
                             paint_one(&mut buf[i * 4..i * 4 + 4], cov, [px[0] as f64 / 255.0, px[1] as f64 / 255.0, px[2] as f64 / 255.0]);

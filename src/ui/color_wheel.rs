@@ -80,20 +80,31 @@ impl ColorButton {
     pub fn color(&self) -> [f64; 3] { self.color.get() }
 }
 
-/// Saved swatches, kept in `~/.config/compositor/swatches.json` as hex strings.
-fn swatches_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".config"));
-    base.join("compositor/swatches.json")
+/// Saved swatches, kept in `~/.config/compositor/swatches.json` as hex strings. With neither
+/// XDG_CONFIG_HOME nor HOME set there is nowhere to keep them, and nothing is written.
+fn swatches_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("compositor/swatches.json"))
 }
 pub fn swatches() -> Vec<[f64; 3]> {
-    std::fs::read_to_string(swatches_path()).ok().and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()).map(|v| v.iter().filter_map(|h| parse_hex(h)).collect()).unwrap_or_default()
+    swatches_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()).map(|v| v.iter().filter_map(|h| parse_hex(h)).collect()).unwrap_or_default()
 }
 fn save_swatches(list: &[[f64; 3]]) {
-    let path = swatches_path();
+    let Some(path) = swatches_path() else { return };
     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
     let _ = std::fs::write(&path, serde_json::to_string_pretty(&list.iter().map(|c| hex(*c)).collect::<Vec<_>>()).unwrap_or_default());
 }
-pub fn add_swatch(c: [f64; 3]) { let mut list = swatches(); list.retain(|x| hex(*x) != hex(c)); list.push(c); if list.len() > 64 { list.remove(0); } save_swatches(&list); }
+const SWATCH_CAP: usize = 64;
+/// The list with `c` on the end, once, and the oldest dropped past the cap (however long a hand-edited
+/// file made it).
+pub fn with_swatch(mut list: Vec<[f64; 3]>, c: [f64; 3]) -> Vec<[f64; 3]> {
+    list.retain(|x| hex(*x) != hex(c));
+    list.push(c);
+    let excess = list.len().saturating_sub(SWATCH_CAP);
+    list.drain(..excess);
+    list
+}
+pub fn add_swatch(c: [f64; 3]) { save_swatches(&with_swatch(swatches(), c)); }
 pub fn remove_swatch(c: [f64; 3]) { let mut list = swatches(); list.retain(|x| hex(*x) != hex(c)); save_swatches(&list); }
 
 fn remember(c: [f64; 3]) {
@@ -328,5 +339,18 @@ mod tests {
         assert_eq!(parse_hex("#ff8000"), Some([1.0, 128.0 / 255.0, 0.0]));
         assert_eq!(parse_hex("f80").map(hex), Some("#ff8800".to_string()));
         assert_eq!(parse_hex("nope"), None);
+    }
+
+    #[test]
+    fn the_swatch_cap_holds_however_long_the_file_was() {
+        let long: Vec<[f64; 3]> = (0..100).map(|i| [i as f64 / 255.0, 0.0, 0.0]).collect();
+        let kept = with_swatch(long, [0.0, 1.0, 0.0]);
+        assert_eq!(kept.len(), 64);
+        assert_eq!(kept.last(), Some(&[0.0, 1.0, 0.0]));
+        assert_eq!(kept[0], [37.0 / 255.0, 0.0, 0.0], "the oldest went first");
+        // A color already there moves to the end rather than doubling.
+        let again = with_swatch(kept.clone(), kept[10]);
+        assert_eq!(again.len(), 64);
+        assert_eq!(again.last(), Some(&kept[10]));
     }
 }

@@ -1002,3 +1002,118 @@ fn artboards_clip_grow_move_and_export() {
     let back = compositor::format::Manifest::parse(&text).unwrap();
     assert!(back.layers.iter().any(|l| l.is_artboard() && l.name == "Story"));
 }
+
+/// Round 8 review: Export Layers as the layer shows, transparent boards, boards exported alone at full
+/// size with names kept apart, frames turned with the canvas, outward rounding, Reframe by visible
+/// coverage, nested boards flattened on import, one undo for a batch of boards, a board drag during an
+/// open edit refused, the pattern anchored to the layer, 180 kept as 180.
+#[test]
+fn round_eight_fixes() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use compositor::effects::{Effects, PatternOverlay, Shadow};
+    use compositor::export_sizes::{Fit, Format, SizePreset, add_as_artboards, export_all, remake};
+    let dir = std::env::temp_dir().join(format!("compy-r8-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 1. Export Layers: a hide-all mask leaves the file clear; a drop shadow widens the trimmed file.
+    let mut d = Document::blank(40, 40, 72.0).unwrap();
+    let masked = d.add_shape_layer(false, (10.0, 10.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    d.select_layer(Some(masked));
+    d.add_mask(false).unwrap();
+    let shadowed = d.add_shape_layer(false, (10.0, 10.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let mut fx = Effects::default();
+    fx.drop_shadow = Some(Shadow { enabled: true, color: [0.0; 3], opacity: 1.0, angle: 135.0, distance: 3.0, size: 2.0 });
+    d.set_effects(shadowed, Some(&fx)).unwrap();
+    let files = d.export_layers(&dir.join("layers"), true).unwrap();
+    assert_eq!(files.len(), 2);
+    let hidden = image::open(&files[0]).unwrap().to_rgba8();
+    assert_eq!(hidden.get_pixel(10, 10).0[3], 0, "the hide-all mask applies to the exported layer");
+    let shadow = image::open(&files[1]).unwrap();
+    assert!(shadow.width() > 20 && shadow.height() > 20, "the file holds the shadow: {} x {}", shadow.width(), shadow.height());
+
+    // 2. A transparent board stays clear; 3. boards export alone, at full size, with names kept apart.
+    let mut b = Document::blank(60, 40, 72.0).unwrap();
+    let clear = b.add_artboard("Clear", (0.0, 0.0, 30.0, 40.0), None).unwrap();
+    assert_eq!(rgb_at(&mut b, 5, 5)[3], 0, "no white behind a transparent board");
+    b.select_layer(Some(clear));
+    b.add_shape_layer(false, (0.0, 0.0, 30.0, 40.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    // A second board overlapping the first, running past the canvas, named so it cleans to the same text.
+    let over = b.add_artboard("A/B", (20.0, 0.0, 30.0, 40.0), Some([0.0, 0.0, 1.0])).unwrap();
+    let third = b.add_artboard("A?B", (100.0, 0.0, 50.0, 40.0), Some([0.0, 1.0, 0.0])).unwrap();
+    b.set_artboard_frame(third, (120.0, 0.0, 50.0, 40.0)).unwrap();
+    let files = b.export_artboards(&dir.join("boards"), None).unwrap();
+    assert_eq!(files.len(), 3);
+    let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect();
+    assert!(names.contains(&"A_B.png".to_string()) && names.contains(&"A_B-2.png".to_string()), "both boards kept: {names:?}");
+    let first = image::open(&files[0]).unwrap().to_rgba8();
+    assert_eq!(first.dimensions(), (30, 40));
+    assert_eq!(first.get_pixel(25, 20).0, [255, 0, 0, 255], "the overlapping blue board does not show in the red one's file");
+    let second = image::open(&files[1]).unwrap().to_rgba8();
+    assert_eq!(second.get_pixel(2, 20).0, [0, 0, 255, 255], "the red layer of the other board does not show in the blue one's file");
+    let _ = over;
+
+    // 4 and 5. Rotating turns the frame and rounds the canvas outward; 17. 180 stays 180.
+    let mut r = Document::blank(30, 20, 72.0).unwrap();
+    let board = r.add_artboard("Tile", (0.0, 0.0, 10.0, 10.0), Some([1.0; 3])).unwrap();
+    r.rotate_canvas(90.0).unwrap();
+    assert_eq!((r.width(), r.height()), (20, 30));
+    assert_eq!(r.renderer.layer(board).artboard.as_ref().map(|a| a.rect()), Some((10.0, 0.0, 10.0, 10.0)), "the frame went to the top right with the picture");
+    let mut q = Document::blank(10, 10, 72.0).unwrap();
+    let sq = q.add_shape_layer(false, (0.0, 0.0, 10.0, 10.0), [0.0; 3], 0.0).unwrap();
+    q.rotate_canvas(45.0).unwrap();
+    assert_eq!((q.width(), q.height()), (15, 15), "14.14 rounds up, not down");
+    q.rotate_canvas(135.0).unwrap();
+    assert!((q.renderer.layer(sq).transform.rotation - 180.0).abs() < 1e-9, "180, not -180: {}", q.renderer.layer(sq).transform.rotation);
+
+    // 6. Reframe judges an element by what shows: a small logo in a full-size clear layer moves.
+    let mut e = Document::blank(200, 100, 72.0).unwrap();
+    e.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.2, 0.4, 0.8], 0.0).unwrap();
+    let sheet = compositor::raster::new_argb(200, 100).unwrap();
+    { let cr = cairo::Context::new(&sheet).unwrap(); cr.set_source_rgb(1.0, 0.0, 0.0); cr.rectangle(170.0, 10.0, 20.0, 10.0); cr.fill().unwrap(); }
+    let logo = e.add_image_surface(sheet, "Logo sheet", (0.0, 0.0), (200.0, 100.0)).unwrap();
+    let story = SizePreset { name: "Story".into(), width: 90, height: 160 };
+    let mut reframed = remake(&e, &story, Fit::Reframe, [1.0; 3]).unwrap();
+    let px = |doc: &mut Document, x, y| rgb_at(doc, x, y);
+    // The logo's visible box lands in the top right inside the margin, not cropped away.
+    let mut found = None;
+    for y in 0..80 { for x in 45..90 { if px(&mut reframed, x, y) == [255, 0, 0, 255] { found = Some((x, y)); break; } } if found.is_some() { break; } }
+    assert!(found.is_some(), "the logo shows in the top right after reframing");
+    assert!(found.unwrap().0 <= 90 - 4 && found.unwrap().1 >= 4, "inside the margin: {found:?}");
+    let _ = logo;
+    // 10. Two presets that clean to the same file name both get written.
+    let (made, failed) = export_all(&e, "T", &[SizePreset { name: "A/B".into(), width: 20, height: 10 }, SizePreset { name: "A?B".into(), width: 20, height: 10 }], Fit::Fill, Format::Png, [1.0; 3], &dir.join("sizes"));
+    assert_eq!((made.len(), failed.len()), (2, 0));
+    assert_ne!(made[0], made[1]);
+    assert!(made.iter().all(|p| p.exists()));
+
+    // 7 and 9. Sizes as artboards from a document that already has boards: one undo, no nested boards.
+    let mut n = Document::blank(40, 40, 72.0).unwrap();
+    n.add_artboard("Inner", (0.0, 0.0, 20.0, 20.0), Some([1.0, 0.0, 0.0])).unwrap();
+    let before = n.artboards().len();
+    let (made, failed) = add_as_artboards(&mut n, &[SizePreset { name: "S1".into(), width: 20, height: 20 }, SizePreset { name: "S2".into(), width: 30, height: 20 }], Fit::Fill, [1.0; 3]);
+    assert_eq!((made.len(), failed.len()), (2, 0));
+    assert_eq!(n.artboards().len(), before + 2, "the source's board came in as a plain folder, not a board inside a board");
+    assert!(n.renderer.layers().iter().all(|l| l.artboard.is_none() || n.renderer.artboard_owner(l.id).is_none()), "no board lives inside another");
+    n.undo();
+    assert_eq!(n.artboards().len(), before, "one undo removes the whole batch");
+
+    // 11. A pattern overlay tiles from the layer's corner, whatever the pixels cover.
+    let saved_home = std::env::var_os("XDG_DATA_HOME");
+    let pdir = dir.join("data");
+    unsafe { std::env::set_var("XDG_DATA_HOME", &pdir); }
+    let tile = compositor::raster::new_argb(2, 2).unwrap();
+    { let cr = cairo::Context::new(&tile).unwrap(); cr.set_source_rgb(0.0, 1.0, 0.0); cr.rectangle(0.0, 0.0, 1.0, 2.0); cr.fill().unwrap(); cr.set_source_rgb(0.0, 0.0, 0.0); cr.rectangle(1.0, 0.0, 1.0, 2.0); cr.fill().unwrap(); }
+    compositor::patterns::save("Stripes8", &tile).unwrap();
+    let mut g = Document::blank(20, 20, 72.0).unwrap();
+    let sheet = compositor::raster::new_argb(20, 20).unwrap();
+    { let cr = cairo::Context::new(&sheet).unwrap(); cr.set_source_rgb(0.5, 0.5, 0.5); cr.rectangle(3.0, 0.0, 17.0, 20.0); cr.fill().unwrap(); }
+    let bar = g.add_image_surface(sheet, "Margin", (0.0, 0.0), (20.0, 20.0)).unwrap();
+    let mut fx = Effects::default();
+    fx.pattern_overlay = Some(PatternOverlay { enabled: true, pattern: "Stripes8".into(), scale: 1.0, opacity: 1.0 });
+    g.set_effects(bar, Some(&fx)).unwrap();
+    // Column 3 is odd from the layer's corner: black. Anchored to the coverage it would have been green.
+    assert_eq!(rgb_at(&mut g, 3, 10), [0, 0, 0, 255]);
+    assert_eq!(rgb_at(&mut g, 4, 10), [0, 255, 0, 255]);
+    match saved_home { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
+    let _ = std::fs::remove_dir_all(&dir);
+}

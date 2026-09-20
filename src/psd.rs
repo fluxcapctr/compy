@@ -773,7 +773,11 @@ fn read_tysh(block: &[u8], resolution: f64) -> Result<crate::text::TextStyle> {
     let version = u16::from_be_bytes([block[0], block[1]]);
     if version != 1 { bail!("type tool version {version}"); }
     let f = |i: usize| f64::from_be_bytes(block[2 + i * 8..10 + i * 8].try_into().unwrap());
-    let (xx, yy) = (f(0), f(3));
+    // The matrix [xx xy yx yy tx ty] maps the type's own space onto the document: its vertical scale is
+    // the length of the y basis vector, its horizontal the x one, whatever the turn or shear (a quarter
+    // turn puts the scale in the off-diagonal terms).
+    let (xx, xy, yx, yy) = (f(0), f(1), f(2), f(3));
+    let (scale_x, scale_y) = (xx.hypot(xy), yx.hypot(yy));
     let text_version = u16::from_be_bytes([block[50], block[51]]);
     if text_version != 50 { bail!("text version {text_version}"); }
     let (d, _) = crate::psd_desc::parse(&block[56..])?;
@@ -781,8 +785,9 @@ fn read_tysh(block: &[u8], resolution: f64) -> Result<crate::text::TextStyle> {
     let engine = d.data("EngineData").unwrap_or(&[]);
     let mut style = crate::text::TextStyle { text, ..crate::text::TextStyle::default() };
     // Points at the document's resolution, through the type's own scale.
-    let scale = if yy.abs() > 1e-6 { yy.abs() } else if xx.abs() > 1e-6 { xx.abs() } else { 1.0 };
+    let scale = if scale_y > 1e-6 { scale_y } else if scale_x > 1e-6 { scale_x } else { 1.0 };
     let to_px = scale * resolution / 72.0;
+    let to_px_x = (if scale_x > 1e-6 { scale_x } else { scale }) * resolution / 72.0;
     if let Some(size) = engine_number(engine, b"/FontSize") { style.size = (size * to_px).clamp(1.0, 2000.0); }
     if let Some(values) = engine_values(engine, b"/FillColor") { if values.len() >= 4 { style.color = [values[1].clamp(0.0, 1.0), values[2].clamp(0.0, 1.0), values[3].clamp(0.0, 1.0)]; } }
     let font_index = engine_number(engine, b"/Font ").unwrap_or(0.0).max(0.0) as usize;
@@ -799,37 +804,66 @@ fn read_tysh(block: &[u8], resolution: f64) -> Result<crate::text::TextStyle> {
     if !engine_bool(engine, b"/AutoLeading") { if let Some(leading) = engine_number(engine, b"/Leading") { if let Some(size) = engine_number(engine, b"/FontSize") { if size > 0.0 { style.leading = (leading / size).clamp(0.5, 5.0); } } } }
     if let Some(tracking) = engine_number(engine, b"/Tracking") { style.tracking = tracking / 1000.0 * style.size; }
     style.align = match engine_number(engine, b"/Justification").unwrap_or(0.0) as i32 { 1 => 2, 2 => 1, _ => 0 };
-    if engine_number(engine, b"/ShapeType").unwrap_or(0.0) as i32 == 1 { if let Some(b) = engine_values(engine, b"/BoxBounds") { if b.len() >= 4 { let w = (b[2] - b[0]).abs() * to_px; if w >= 1.0 { style.width = Some(w.round()); } } } }
+    if engine_number(engine, b"/ShapeType").unwrap_or(0.0) as i32 == 1 { if let Some(b) = engine_values(engine, b"/BoxBounds") { if b.len() >= 4 { let w = (b[2] - b[0]).abs() * to_px_x; if w >= 1.0 { style.width = Some(w.round()); } } } }
     Ok(style)
+}
+
+/// Where `key` (a "/Name" token, given with or without a trailing space) stands as a token in engine
+/// data at or after `from`: outside any "( ... )" string, and not as the start of a longer name
+/// ("/Font" does not match "/FontSize"). The text of a type layer, or a font name, cannot pass for a
+/// setting this way.
+fn find_key(data: &[u8], key: &[u8], from: usize) -> Option<usize> {
+    let key = key.strip_suffix(b" ").unwrap_or(key);
+    if key.is_empty() { return None; }
+    let name_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-';
+    let mut i = from;
+    let mut depth = 0usize;
+    while i < data.len() {
+        let b = data[i];
+        if depth > 0 {
+            match b { b'\\' => i += 1, b'(' => depth += 1, b')' => depth -= 1, _ => {} }
+            i += 1;
+            continue;
+        }
+        if b == b'(' { depth = 1; i += 1; continue; }
+        if b == b'/' && data[i..].starts_with(key) && !data.get(i + key.len()).copied().is_some_and(name_char) { return Some(i); }
+        i += 1;
+    }
+    None
 }
 
 /// The number after `key` in engine data ("/FontSize 48.0").
 fn engine_number(data: &[u8], key: &[u8]) -> Option<f64> {
-    let at = find(data, key, 0)?;
-    let rest = &data[at + key.len()..];
+    let at = find_key(data, key, 0)?;
+    let rest = &data[at + key.strip_suffix(b" ").unwrap_or(key).len()..];
     let text: String = rest.iter().skip_while(|b| **b == b' ').take_while(|b| b.is_ascii_digit() || **b == b'.' || **b == b'-').map(|b| *b as char).collect();
     text.parse().ok()
 }
 
 fn engine_bool(data: &[u8], key: &[u8]) -> bool {
-    find(data, key, 0).is_some_and(|at| data[at + key.len()..].iter().skip_while(|b| **b == b' ').take(4).map(|b| *b as char).collect::<String>() == "true")
+    find_key(data, key, 0).is_some_and(|at| data[at + key.strip_suffix(b" ").unwrap_or(key).len()..].iter().skip_while(|b| **b == b' ').take(4).map(|b| *b as char).collect::<String>() == "true")
 }
 
-/// The numbers in the first "[ ... ]" after `key`.
+/// The numbers in the "[ ... ]" that follows `key`.
 fn engine_values(data: &[u8], key: &[u8]) -> Option<Vec<f64>> {
-    let at = find(data, key, 0)?;
-    let open = find(data, b"[", at)?;
+    let at = find_key(data, key, 0)?;
+    let after = at + key.strip_suffix(b" ").unwrap_or(key).len();
+    // Straight to the list: "/Values [" or, for a color, "/FillColor << /Type 1 /Values [".
+    let open = find(data, b"[", after).filter(|o| *o - after <= 64)?;
     let close = find(data, b"]", open)?;
     Some(String::from_utf8_lossy(&data[open + 1..close]).split_whitespace().filter_map(|t| t.parse().ok()).collect())
 }
 
-/// The font names in the FontSet, in order.
+/// The font names in the FontSet, in order: each entry's "/Name (...)" as a token, not text inside one.
 fn engine_font_names(data: &[u8]) -> Vec<String> {
-    let Some(start) = find(data, b"/FontSet", 0) else { return Vec::new() };
+    let Some(start) = find_key(data, b"/FontSet", 0) else { return Vec::new() };
     let mut names = Vec::new();
     let mut at = start;
-    while let Some(n) = find(data, b"/Name (", at) {
-        let open = n + b"/Name (".len();
+    while let Some(n) = find_key(data, b"/Name", at) {
+        let mut open = n + b"/Name".len();
+        while open < data.len() && data[open] == b' ' { open += 1; }
+        if data.get(open) != Some(&b'(') { at = open; continue; }
+        open += 1;
         // Up to the closing parenthesis that is not escaped.
         let mut i = open;
         while i < data.len() && !(data[i] == b')' && data[i - 1] != b'\\') { i += 1; }
@@ -859,6 +893,32 @@ fn find(data: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
+
+    #[test]
+    fn engine_scanners_skip_strings_and_partial_names() {
+        let data = b"<< /Editor << /Text (/FontSize 999 and /Name (fake) here) >> /StyleRun << /StyleSheetData << /Font 2 /FontSize 48.0 /FauxBold false /FillColor << /Type 1 /Values [ 1.0 0.5 0.25 0.0 ] >> >> >> /ResourceDict << /FontSet [ << /Name (Helvetica-Bold) >> << /Name (Arial) >> << /Name (Times\\)New) >> ] >> >>";
+        assert_eq!(engine_number(data, b"/FontSize"), Some(48.0), "the size in the text is not the setting");
+        assert_eq!(engine_number(data, b"/Font "), Some(2.0), "/Font is not /FontSize");
+        assert!(!engine_bool(data, b"/FauxBold"));
+        assert_eq!(engine_values(data, b"/FillColor"), Some(vec![1.0, 0.5, 0.25, 0.0]));
+        assert_eq!(engine_font_names(data), vec!["Helvetica-Bold".to_string(), "Arial".to_string(), "Times)New".to_string()]);
+    }
+
+    #[test]
+    fn a_turned_type_matrix_keeps_its_scale() {
+        // A quarter turn at scale 2: the diagonal is zero, the scale sits off it.
+        let mut block = Vec::new();
+        block.extend_from_slice(&1u16.to_be_bytes());
+        for v in [0.0f64, 2.0, -2.0, 0.0, 10.0, 20.0] { block.extend_from_slice(&v.to_be_bytes()); }
+        block.extend_from_slice(&50u16.to_be_bytes());
+        block.extend_from_slice(&16u32.to_be_bytes());
+        let mut d = Descriptor::new("TxLr");
+        d.push("Txt ", Item::Text("Hi".into()));
+        d.push("EngineData", Item::Data(b"<< /StyleSheetData << /FontSize 12.0 >> >>".to_vec()));
+        block.extend_from_slice(&crate::psd_desc::write(&d));
+        let style = read_tysh(&block, 72.0).unwrap();
+        assert!((style.size - 24.0).abs() < 1e-9, "12 pt at scale 2: {}", style.size);
+    }
 
     #[test]
     fn effects_round_trip_through_lfx2_and_type_reads_from_tysh() {

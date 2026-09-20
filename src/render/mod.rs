@@ -14,7 +14,7 @@ mod gpu_plan;
 
 use crate::format::{BlendMode, Layer, Project, Sampling, Transform, entries_ordered, visible_layers};
 use crate::raster::{halve, level_for, new_argb, with_bytes};
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use cairo::{Antialias, Context, Extend, Filter, ImageSurface, Matrix, Operator, SurfacePattern};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -483,7 +483,7 @@ impl Renderer {
         let mut alpha = vec![0u8; wu * hu];
         with_bytes(&surface, |data, stride| crate::ffi::extract_alpha(data, stride, &mut alpha, wu, wu, hu))?;
         drop(surface);
-        let rendered = effects.render(&alpha, wu, hu);
+        let rendered = effects.render_at(&alpha, wu, hu, (bx0.floor() as i64 - x0, by0.floor() as i64 - y0));
         let below = rendered.below.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
         let inside = rendered.inside.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
         let above = rendered.above.map(|b| crate::raster::argb_from_packed(w, h, b)).transpose()?;
@@ -681,9 +681,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// Every visible artboard's frame filled with its background (white unless set), before any layer.
+    /// Every visible artboard's frame filled with its background, before any layer; a board without one
+    /// (transparent) is left clear.
     pub(crate) fn draw_artboard_backgrounds(&mut self, cr: &Context) -> Result<()> {
-        let boards: Vec<(f64, f64, f64, f64, [f64; 3])> = entries_ordered(&self.layers, true).into_iter().filter(|e| e.visible && e.layer.is_artboard()).filter_map(|e| e.layer.artboard.as_ref().map(|b| (b.x, b.y, b.width, b.height, b.background.unwrap_or([1.0; 3])))).collect();
+        let boards: Vec<(f64, f64, f64, f64, [f64; 3])> = entries_ordered(&self.layers, true).into_iter().filter(|e| e.visible && e.layer.is_artboard()).filter_map(|e| e.layer.artboard.as_ref().and_then(|b| b.background.map(|c| (b.x, b.y, b.width, b.height, c)))).collect();
         for (x, y, w, h, c) in boards {
             cr.save()?;
             cr.set_source_rgb(c[0], c[1], c[2]);
@@ -694,16 +695,68 @@ impl Renderer {
         Ok(())
     }
 
-    /// The frame of the artboard a layer lives in, if any (the nearest artboard among its folders).
-    pub fn artboard_frame(&self, id: Uuid) -> Option<(f64, f64, f64, f64)> {
+    /// The artboard a layer lives in, if any (the nearest artboard among its folders).
+    pub fn artboard_owner(&self, id: Uuid) -> Option<Uuid> {
         let mut folder = self.parent(id);
         for _ in 0..64 {
             let Some(current) = folder else { return None };
             let layer = self.layer(current);
-            if let Some(b) = layer.artboard.as_ref().filter(|_| layer.is_group()) { return Some(b.rect()); }
+            if layer.artboard.is_some() && layer.is_group() { return Some(current); }
             folder = layer.parent_id;
         }
         None
+    }
+
+    /// The frame of the artboard a layer lives in, if any.
+    pub fn artboard_frame(&self, id: Uuid) -> Option<(f64, f64, f64, f64)> {
+        self.artboard_owner(id).and_then(|b| self.layer(b).artboard.as_ref().map(|a| a.rect()))
+    }
+
+    /// One artboard's picture by itself: its background and the layers inside it, at the board's full
+    /// size even where the board runs past the canvas (Export Artboards). Overlapping boards and layers
+    /// outside the board do not show.
+    pub fn render_artboard(&mut self, board: Uuid) -> Result<ImageSurface> {
+        let Some(frame) = self.layer(board).artboard.clone().filter(|_| self.layer(board).is_group()) else { bail!("That layer is not an artboard.") };
+        let (w, h) = (frame.width.round().max(1.0) as i32, frame.height.round().max(1.0) as i32);
+        let out = new_argb(w, h)?;
+        {
+            let cr = Context::new(&out)?;
+            cr.translate(-frame.x, -frame.y);
+            cr.rectangle(frame.x, frame.y, frame.width, frame.height);
+            cr.clip();
+            if let Some(c) = frame.background { cr.set_source_rgb(c[0], c[1], c[2]); cr.paint()?; }
+            self.live.reset();
+            let visible = visible_layers(&self.layers);
+            self.prepare_stacks(&visible);
+            for id in visible {
+                if self.artboard_owner(id) != Some(board) { continue; }
+                let folders = self.folder_masks(id);
+                self.draw_composite(id, &cr, &folders)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// One layer as it composites by itself (through its mask and effects, at its opacity, with any
+    /// layers clipped to it), drawn at `scale` into a `w` x `h` surface whose top left is the document
+    /// point (`x0`, `y0`): Export Layers, and coverage checks at a small scale.
+    pub fn render_layer(&mut self, id: Uuid, x0: f64, y0: f64, w: i32, h: i32, scale: f64) -> Result<ImageSurface> {
+        let out = new_argb(w.max(1), h.max(1))?;
+        if !self.index.contains_key(&id) { return Ok(out); }
+        {
+            let cr = Context::new(&out)?;
+            cr.scale(scale, scale);
+            cr.translate(-x0, -y0);
+            cr.rectangle(x0, y0, w as f64 / scale, h as f64 / scale);
+            cr.clip();
+            self.live.reset();
+            let visible = visible_layers(&self.layers);
+            self.prepare_stacks(&visible);
+            let folders = self.folder_masks(id);
+            // A layer clipped to another draws as part of its base; alone, it draws as itself.
+            if self.live.stacked.contains(&id) { self.draw_own(id, &cr, None, &[])?; } else { self.draw_composite(id, &cr, &folders)?; }
+        }
+        Ok(out)
     }
 
     /// `draw_composite` clipped to the layer's artboard, when it has one.

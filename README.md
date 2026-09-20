@@ -310,7 +310,8 @@ way, a half turn or any angle, the canvas growing to hold the picture; Image > S
 Line levels a horizon: two Pen points along it, then the command turns and crops the canvas upright.
 File > Export WebP writes a lossless WebP, Export GIF a single-frame 256-color GIF with transparency,
 Export AVIF an AVIF at a quality (100 is lossless) through libavif's `avifenc`, which Omarchy ships;
-File > Export Layers to Files writes every visible layer as its own PNG, trimmed and numbered from the
+File > Export Layers to Files writes every visible layer as its own PNG, as it shows (through its mask
+and layer style, at its opacity), trimmed to its bounds plus the style's reach and numbered from the
 bottom. Compy: layer_style takes gradient_overlay and
 pattern_overlay; rotate_canvas, straighten, export_layers, and export accepts .webp.
 
@@ -319,8 +320,8 @@ or typed, with a background color or transparent; the canvas grows to hold it an
 right of one another. A board is a folder that owns a rectangle: the layers inside it clip to the frame,
 and between boards the canvas is workspace. Drag a board by the name strip above it with the Move tool
 and its layers come along. Layer > Artboard from Layers wraps the selected layers in a board drawn
-around them. File > Export Artboards writes each board's picture as its own file, named after the
-board. Export Sizes can make artboards instead of files: every ticked size becomes a board holding a
+around them. File > Export Artboards writes each board's own picture (its background and layers,
+nothing from a board it overlaps) as its own file at the board's full size, named after the board. Export Sizes can make artboards instead of files: every ticked size becomes a board holding a
 reframed copy of the document, side by side, for fixing by hand before Export Artboards. In a PSD a
 board goes out as a folder. Compy: new_artboard, artboard_from_layers, move_artboard, export_artboards,
 and export_sizes with as_artboards; the state lists each layer's artboard.

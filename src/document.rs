@@ -1168,7 +1168,9 @@ impl Document {
         let corners = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| ((x - cx) * cs - (y - cy) * sn, (x - cx) * sn + (y - cy) * cs));
         let (nx0, ny0) = (corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min), corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min));
         let (nx1, ny1) = (corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max), corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max));
-        let (nw, nh) = ((nx1 - nx0).round().max(1.0), (ny1 - ny0).round().max(1.0));
+        // Rounded outward, so a fractional extent never clips the picture's edge (a hair under a whole
+        // number, from floating point at a quarter turn, does not add a pixel).
+        let (nw, nh) = ((nx1 - nx0 - 1e-6).ceil().max(1.0), (ny1 - ny0 - 1e-6).ceil().max(1.0));
         if nw > 30_000.0 || nh > 30_000.0 || nw * nh > 100_000_000.0 { bail!("The turned canvas would pass the 30,000-pixel side or 100-megapixel limit."); }
         let (ncx, ncy) = (nw / 2.0, nh / 2.0);
         let turn = |t: Transform| -> Transform {
@@ -1178,8 +1180,9 @@ impl Document {
             let mut out = t;
             // A flipped layer turns the other way, as its axes are mirrored.
             let sign = if t.flip_x != t.flip_y { -1.0 } else { 1.0 };
-            // Kept in the half-open turn around zero, as the inspector shows it.
-            out.rotation = (t.rotation + sign * angle + 180.0).rem_euclid(360.0) - 180.0;
+            // Kept in (-180, 180], as the inspector shows it.
+            let r = (t.rotation + sign * angle).rem_euclid(360.0);
+            out.rotation = if r > 180.0 { r - 360.0 } else { r };
             out.origin = crate::format::Point(moved.0 - t.size.0 / 2.0, moved.1 - t.size.1 / 2.0);
             out
         };
@@ -1187,6 +1190,14 @@ impl Document {
         for layer in self.renderer.layers().to_vec() {
             self.renderer.set_layer_transform(layer.id, turn(layer.transform));
             if let Some(p) = layer.mask_placement { self.renderer.set_mask_placement(layer.id, Some(turn(p))); }
+            // An artboard's frame stays upright: it becomes the box around its turned corners (exact at a
+            // quarter or half turn).
+            if let Some(b) = layer.artboard.as_ref().filter(|_| layer.is_group()) {
+                let pts = [(b.x, b.y), (b.x + b.width, b.y), (b.x + b.width, b.y + b.height), (b.x, b.y + b.height)].map(|(x, y)| { let (dx, dy) = (x - cx, y - cy); (ncx + dx * cs - dy * sn, ncy + dx * sn + dy * cs) });
+                let (fx0, fy0) = (pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min));
+                let (fx1, fy1) = (pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max), pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max));
+                self.renderer.set_artboard(layer.id, Some(crate::format::Artboard { x: fx0.round(), y: fy0.round(), width: (fx1 - fx0).round().max(1.0), height: (fy1 - fy0).round().max(1.0), background: b.background }));
+            }
         }
         let selection = self.selection.take();
         self.renderer.set_size(nw as i32, nh as i32);
@@ -1254,7 +1265,7 @@ impl Document {
         let encoder = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("avifenc")).find(|p| p.exists()));
         let Some(encoder) = encoder else { bail!("AVIF needs libavif's encoder: run `omarchy pkg add libavif`, then try again.") };
         let temp = path.with_extension(format!("avif-source-{}.png", std::process::id()));
-        self.export_png(&temp)?;
+        if let Err(e) = self.export_png(&temp) { let _ = std::fs::remove_file(&temp); return Err(e); }
         let q = quality.clamp(0.0, 100.0).round() as i64;
         let mut command = std::process::Command::new(encoder);
         if q >= 100 { command.arg("--lossless"); } else { command.args(["-q", &q.to_string(), "--speed", "6"]); }
@@ -1265,31 +1276,45 @@ impl Document {
         Ok(())
     }
 
-    /// File > Export Layers: every visible pixel, type and shape layer as its own PNG in `folder`, at its
-    /// own bounds (`trim`) or on the full canvas, numbered from the bottom. Returns the files written.
+    /// File > Export Layers: every visible pixel, type and shape layer as its own PNG in `folder`, as it
+    /// shows (through its mask and layer style, at its opacity, with layers clipped to it), at its own
+    /// bounds plus its style's reach (`trim`) or on the full canvas, numbered from the bottom. Returns
+    /// the files written.
     pub fn export_layers(&mut self, folder: &std::path::Path, trim: bool) -> Result<Vec<std::path::PathBuf>> {
         std::fs::create_dir_all(folder)?;
         let (w, h) = (self.width(), self.height());
         let mut written = Vec::new();
-        let layers: Vec<crate::format::Layer> = self.renderer.layers().iter().filter(|l| l.is_visible && !l.is_group() && l.adjustment.is_none()).cloned().collect();
+        let layers: Vec<crate::format::Layer> = crate::format::visible_layers(self.renderer.layers()).into_iter().map(|id| self.renderer.layer(id).clone()).filter(|l| l.adjustment.is_none() && l.mask_source_id.is_none()).collect();
         for layer in layers.iter() {
             if !self.renderer.has_image(layer.id) { continue; }
-            let (x0, y0, x1, y1) = if trim { let b = layer.transform.bounds(); (b.0.floor().max(0.0) as i32, b.1.floor().max(0.0) as i32, (b.2.ceil() as i32).min(w), (b.3.ceil() as i32).min(h)) } else { (0, 0, w, h) };
+            let reach = layer.effects.as_ref().and_then(crate::effects::Effects::from_record).map(|e| e.reach() as f64).unwrap_or(0.0);
+            let (x0, y0, x1, y1) = if trim { let b = layer.transform.bounds(); ((b.0 - reach).floor().max(0.0) as i32, (b.1 - reach).floor().max(0.0) as i32, ((b.2 + reach).ceil() as i32).min(w), ((b.3 + reach).ceil() as i32).min(h)) } else { (0, 0, w, h) };
             if x1 <= x0 || y1 <= y0 { continue; }
-            let surface = new_argb(x1 - x0, y1 - y0)?;
-            {
-                let cr = Context::new(&surface)?;
-                cr.translate(-(x0 as f64), -(y0 as f64));
-                cr.rectangle(x0 as f64, y0 as f64, (x1 - x0) as f64, (y1 - y0) as f64);
-                cr.clip();
-                self.renderer.draw_layer_plain(layer.id, &cr)?;
-            }
-            let clean: String = layer.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
-            let path = folder.join(format!("{:02}-{}.png", written.len() + 1, clean.trim()));
+            let surface = self.renderer.render_layer(layer.id, x0 as f64, y0 as f64, x1 - x0, y1 - y0, 1.0)?;
+            let path = folder.join(format!("{:02}-{}.png", written.len() + 1, clean_file_name(&layer.name)));
             crate::png_io::encode(&surface, &path, self.renderer.resolution())?;
             written.push(path);
         }
         Ok(written)
+    }
+
+    /// How much of the canvas a layer's visible pixels cover (through its mask), as a fraction, with the
+    /// box around them in document pixels; None when nothing shows. Judged at a small scale.
+    pub fn layer_coverage(&mut self, id: Uuid) -> Result<Option<(f64, (f64, f64, f64, f64))>> {
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        let scale = (256.0 / w.max(h)).min(1.0);
+        let (sw, sh) = (((w * scale).ceil() as i32).max(1), ((h * scale).ceil() as i32).max(1));
+        let surface = self.renderer.render_layer(id, 0.0, 0.0, sw, sh, scale)?;
+        let mut count = 0usize;
+        let mut b = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        crate::raster::with_bytes(&surface, |data, stride| {
+            for y in 0..sh { for x in 0..sw {
+                if data[y as usize * stride + x as usize * 4 + 3] > 8 { count += 1; b.0 = b.0.min(x); b.1 = b.1.min(y); b.2 = b.2.max(x); b.3 = b.3.max(y); }
+            } }
+        })?;
+        if count == 0 { return Ok(None); }
+        let fraction = count as f64 / (sw as f64 * sh as f64);
+        Ok(Some((fraction, (b.0 as f64 / scale, b.1 as f64 / scale, (b.2 + 1) as f64 / scale, (b.3 + 1) as f64 / scale))))
     }
 
     /// What crop edges snap to: the canvas edges and every visible layer's bounds, in whole pixels.
@@ -2696,6 +2721,9 @@ impl Document {
         let tops: Vec<Uuid> = source.renderer.layers().iter().filter(|l| l.parent_id.is_none()).map(|l| l.id).collect();
         let copied = match self.copy_layers(source, &tops, Place::Into(board)) { Ok(ids) => ids, Err(e) => { self.abort_edit(); return Err(e); } };
         for id in copied {
+            // A board inside a board would clip and fill at the source's coordinates: the copies come in
+            // as plain folders (the source's board backgrounds were baked when it was remade).
+            if self.renderer.layer(id).artboard.is_some() { self.renderer.set_artboard(id, None); }
             let mut t = self.renderer.layer(id).transform;
             t.origin = crate::format::Point(t.origin.0 + frame.0, t.origin.1 + frame.1);
             self.renderer.set_layer_transform(id, t);
@@ -2735,23 +2763,19 @@ impl Document {
         Ok(board)
     }
 
-    /// File > Export Artboards: each board's part of the composite as a file in `folder`, named after it.
+    /// File > Export Artboards: each board's own picture (its background and layers, nothing from an
+    /// overlapping board or outside it) as a file in `folder`, named after it, at the board's full size.
     pub fn export_artboards(&mut self, folder: &std::path::Path, jpeg_quality: Option<f64>) -> Result<Vec<std::path::PathBuf>> {
         let boards = self.artboards();
         if boards.is_empty() { bail!("There are no artboards in this document."); }
         std::fs::create_dir_all(folder)?;
-        let flat = self.renderer.render_flat()?;
         let mut written = Vec::new();
-        for (_, name, (x, y, w, h)) in boards {
-            let (x0, y0) = (x.max(0.0) as i32, y.max(0.0) as i32);
-            let (x1, y1) = (((x + w) as i32).min(self.width()), ((y + h) as i32).min(self.height()));
-            if x1 <= x0 || y1 <= y0 { continue; }
-            let out = new_argb(x1 - x0, y1 - y0)?;
-            { let cr = Context::new(&out)?; cr.set_source_surface(&flat, -(x0 as f64), -(y0 as f64))?; cr.paint()?; }
-            let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+        let mut used = std::collections::HashSet::new();
+        for (id, name, _) in boards {
+            let out = self.renderer.render_artboard(id)?;
             let path = match jpeg_quality {
                 Some(q) => {
-                    let path = folder.join(format!("{}.jpg", clean.trim()));
+                    let path = unique_file(folder, &clean_file_name(&name), "jpg", &mut used);
                     let (rgba, cw, ch) = crate::png_io::straight_rgba(&out)?;
                     let mut rgb = vec![0u8; cw * ch * 3];
                     for i in 0..cw * ch { let a = rgba[i * 4 + 3] as f64 / 255.0; for k in 0..3 { rgb[i * 3 + k] = (rgba[i * 4 + k] as f64 * a + 255.0 * (1.0 - a)).round().clamp(0.0, 255.0) as u8; } }
@@ -2760,7 +2784,7 @@ impl Document {
                     std::fs::write(&path, bytes)?;
                     path
                 }
-                None => { let path = folder.join(format!("{}.png", clean.trim())); crate::png_io::encode(&out, &path, self.renderer.resolution())?; path }
+                None => { let path = unique_file(folder, &clean_file_name(&name), "png", &mut used); crate::png_io::encode(&out, &path, self.renderer.resolution())?; path }
             };
             written.push(path);
         }
@@ -3666,4 +3690,22 @@ fn path_shape_image(local: &crate::path::Path, base: (f64, f64), w: i32, h: i32,
     closed.trace(&cr, |p| (p.0 * sx, p.1 * sy));
     cr.fill()?;
     Ok(out)
+}
+
+/// A layer or board name as a file name: letters, digits, spaces, dashes and underscores.
+pub fn clean_file_name(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+    let clean = clean.trim().to_string();
+    if clean.is_empty() { "untitled".to_string() } else { clean }
+}
+
+/// `stem.ext` in `folder`, or `stem-2.ext` and on when that name is already taken in this batch, so two
+/// names that clean to the same text never overwrite each other.
+pub fn unique_file(folder: &std::path::Path, stem: &str, ext: &str, used: &mut std::collections::HashSet<String>) -> std::path::PathBuf {
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+        if used.insert(name.to_lowercase()) { return folder.join(name); }
+        n += 1;
+    }
 }
