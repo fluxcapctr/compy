@@ -122,13 +122,17 @@ impl ShadowsHighlights {
         let n = self.normalized();
         if n.shadows == 0.0 && n.highlights == 0.0 { return; }
         // The neighbourhood brightness: luminosity blurred by the radius.
+        // Luma weighted by coverage and the coverage itself, blurred alike, so transparent surroundings
+        // count for nothing rather than for black.
         let mut luma = vec![0u8; w * h];
-        for (i, p) in pixels.chunks_exact(4).enumerate() { let a = p[3] as f64; luma[i] = if a <= 0.0 { 0 } else { ((0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64) / a * 255.0).round().clamp(0.0, 255.0) as u8 }; }
+        let mut cover = vec![0u8; w * h];
+        for (i, p) in pixels.chunks_exact(4).enumerate() { luma[i] = (0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64).round().clamp(0.0, 255.0) as u8; cover[i] = p[3]; }
         crate::blur::gaussian(&mut luma, w, h, 1, n.radius / 2.0);
+        crate::blur::gaussian(&mut cover, w, h, 1, n.radius / 2.0);
         for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
             let a = p[3] as f64;
             if a <= 0.0 { continue; }
-            let lb = luma[i] as f64 / 255.0;
+            let lb = if cover[i] == 0 { 0.5 } else { (luma[i] as f64 / cover[i] as f64).clamp(0.0, 1.0) };
             // A gamma lift where the surroundings are dark, a gamma drop where they are bright.
             let lift = 1.0 / (1.0 + n.shadows / 100.0 * (1.0 - lb).powi(2) * 2.0);
             let drop = 1.0 + n.highlights / 100.0 * lb.powi(2) * 2.0;
@@ -211,9 +215,9 @@ impl RadialBlur {
         let (cx, cy) = (n.center.0 * w as f64, n.center.1 * h as f64);
         let steps = 24usize;
         let fetch = |x: f64, y: f64| -> [f64; 4] {
-            let (xi, yi) = (x.round() as isize, y.round() as isize);
-            if xi < 0 || yi < 0 || xi >= w as isize || yi >= h as isize { return [0.0; 4]; }
-            let i = (yi as usize * w + xi as usize) * 4;
+            // Past the layer the edge pixel repeats, so corners do not fade toward transparency.
+            let (xi, yi) = ((x.round() as isize).clamp(0, w as isize - 1) as usize, (y.round() as isize).clamp(0, h as isize - 1) as usize);
+            let i = (yi * w + xi) * 4;
             [source[i] as f64, source[i + 1] as f64, source[i + 2] as f64, source[i + 3] as f64]
         };
         for y in 0..h {
@@ -248,7 +252,13 @@ pub fn high_pass(pixels: &mut [u8], w: usize, h: usize, radius: f64) {
     for (p, b) in pixels.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
         let a = p[3] as f64;
         if a <= 0.0 { continue; }
-        for k in 0..3 { p[k] = (p[k] as f64 - b[k] as f64 + a / 2.0).round().clamp(0.0, a) as u8; }
+        // Straight colors on both sides, so an edge against transparency is not taken for a color edge.
+        let ba = b[3] as f64;
+        for k in 0..3 {
+            let own = p[k] as f64 / a * 255.0;
+            let soft = if ba <= 0.0 { own } else { b[k] as f64 / ba * 255.0 };
+            p[k] = ((own - soft + 127.5).clamp(0.0, 255.0) * a / 255.0).round().clamp(0.0, a) as u8;
+        }
     }
 }
 
@@ -614,10 +624,8 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
                 for (slot, channel) in [3usize, 2, 1].into_iter().enumerate() {
                     for v in 0..256 { tables[slot * 256 + v] = settings.levels.apply(v as f64 / 255.0, channel) as f32; }
                 }
-                // Soft edges are adjusted like the colour they are: unpremultiplied around the lookup.
-                unpremultiply_partial(&mut pixels);
+                // `levels_apply` works on the straight color itself, so soft edges come out right.
                 ffi::levels(&mut pixels, w * h, &tables);
-                premultiply_partial(&mut pixels);
             }
         }
         Kind::ContentAwareFill => {
@@ -680,7 +688,7 @@ pub fn run(kind: Kind, source: &ImageSurface, settings: &Settings, coverage: Opt
 /// the image. Rows are split across threads.
 pub fn motion_blur(pixels: &mut [u8], w: usize, h: usize, angle: f64, distance: f64) {
     if distance < 1.0 || w == 0 || h == 0 { return; }
-    let samples = (distance.ceil() as usize).clamp(2, 96);
+    let samples = (distance.ceil() as usize).clamp(2, 400);
     let (dx, dy) = (angle.to_radians().cos(), -angle.to_radians().sin());
     let source = pixels.to_vec();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
@@ -871,7 +879,7 @@ impl HueSaturation {
         let amount;
         if self.colorize {
             let a = self.adjustment(&self.range);
-            hue = a[0] % 360.0;
+            hue = a[0].rem_euclid(360.0);
             saturation = (a[1] / 100.0).clamp(0.0, 1.0);
             amount = a[2] / 100.0;
         } else {
@@ -948,14 +956,14 @@ impl Curves {
     }
 }
 
-/// Applies a per-channel table (RGB order, 3 x 256, values 0 to 1) to packed BGRA premultiplied pixels the
-/// way the reference applies `levels_apply`: straight colors around the lookup for soft edges.
+/// Applies a per-channel table (RGB order, 3 x 256, values 0 to 1) to packed BGRA premultiplied pixels.
+/// `levels_apply` itself looks the table up on the straight color and premultiplies the result, so soft
+/// edges are adjusted like the color they are; a second pass around it would divide by alpha twice and
+/// cap every soft pixel at its own alpha.
 fn apply_tables(pixels: &mut [u8], count: usize, rgb: &[[f32; 256]; 3]) {
     let mut tables = [0f32; 768];
     for (slot, channel) in [2usize, 1, 0].into_iter().enumerate() { tables[slot * 256..(slot + 1) * 256].copy_from_slice(&rgb[channel]); }
-    unpremultiply_partial(pixels);
     ffi::levels(pixels, count, &tables);
-    premultiply_partial(pixels);
 }
 
 /// One adjustment layer's settings, read from the file's JSON and written back the same way.

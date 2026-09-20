@@ -88,6 +88,7 @@ fn descriptor(r: &mut R, depth: usize) -> Result<Descriptor> {
 }
 
 fn item(r: &mut R, depth: usize) -> Result<Item> {
+    if depth > 32 { bail!("the descriptor nests too deeply"); }
     let kind = r.bytes(4)?;
     Ok(match kind {
         b"Objc" | b"GlbO" => Item::Desc(descriptor(r, depth + 1)?),
@@ -169,6 +170,19 @@ fn write_item(w: &mut W, v: &Item) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_nested_without_end_is_refused_not_overflowed() {
+        // A descriptor whose one item is a list of a list of a list... thousands deep.
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); data.extend_from_slice(b"null");
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); data.extend_from_slice(b"test");
+        for _ in 0..20_000 { data.extend_from_slice(b"VlLs"); data.extend_from_slice(&1u32.to_be_bytes()); }
+        data.extend_from_slice(b"bool"); data.push(1);
+        assert!(parse(&data).is_err());
+    }
 
     #[test]
     fn descriptors_round_trip() {

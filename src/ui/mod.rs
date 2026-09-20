@@ -378,7 +378,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
     // Follow the Omarchy theme; every canvas rebuilds its frame when the palette changes.
     {
         let weak = Rc::downgrade(&state);
-        theme::start(Rc::new(move || { if let Some(state) = weak.upgrade() { for page in state.pages.borrow().iter() { page.canvas.drop_cache(); } } }));
+        theme::start(Rc::new(move || { if let Some(state) = weak.upgrade() { for page in state.pages.borrow().iter() { page.canvas.drop_cache(); } state.window.queue_draw(); } }));
     }
 
     // Space held turns a drag into a pan; single letters pick tools, unless a text field has focus.
@@ -425,6 +425,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         });
     }
     window.add_controller(keys);
+    // Focus leaving the window (Alt+Tab with Space held) would leave the canvas panning for good.
+    { let state = state.clone(); window.connect_is_active_notify(move |w| { if !w.is_active() && state.space_held.get() { state.space_held.set(false); state.current_canvas_cursor(); } }); }
     // The agent socket: Claude Code and the assistant panel act on the open document through it.
     agent::serve(state.clone());
     {
@@ -470,8 +472,8 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("zoom-out", &["<Control>minus", "<Control>KP_Subtract"], |s| s.with_current(|p| p.canvas.zoom_by(0.5))),
         ("zoom-fit", &["<Control>0"], |s| s.with_current(|p| p.canvas.fit())),
         ("zoom-actual", &["<Control>1"], |s| s.with_current(|p| p.canvas.zoom_to(1.0))),
-        ("undo", &["<Control>z", "<Control><Alt>z"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().document.undo(); p.refresh(); })),
-        ("redo", &["<Control><Shift>z", "<Control>y"], |s| s.with_current(|p| { p.canvas.doc().borrow_mut().document.redo(); p.refresh(); })),
+        ("undo", &["<Control>z", "<Control><Alt>z"], |s| s.with_current(|p| { if p.canvas.is_dragging() { return; } p.canvas.doc().borrow_mut().document.undo(); p.refresh(); })),
+        ("redo", &["<Control><Shift>z", "<Control>y"], |s| s.with_current(|p| { if p.canvas.is_dragging() { return; } p.canvas.doc().borrow_mut().document.redo(); p.refresh(); })),
         ("select-all", &["<Control>a"], |s| s.edit(|d| d.select_all())),
         ("deselect", &["<Control>d"], |s| s.edit(|d| { d.deselect(); Ok(()) })),
         ("invert-selection", &["<Control><Shift>i"], |s| s.edit(|d| d.invert_selection())),
@@ -1034,8 +1036,14 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
 
 impl App {
     fn open_path(self: &Rc<Self>, path: &Path) -> bool {
+        // Already open: that tab comes to the front (two tabs on one file would fight over its autosave).
+        let already = self.pages.borrow().iter().position(|p| p.canvas.doc().borrow().document.path.as_deref() == Some(path));
+        if let Some(index) = already { self.notebook.set_current_page(Some(index as u32)); return true; }
         match open_document(path) {
             Ok((mut doc, notes)) => {
+                // A copy of an open package carries the same document id: this one gets its own, so the two
+                // never share a recovery file.
+                if self.pages.borrow().iter().any(|p| p.canvas.doc().borrow().document.document_id == doc.document.document_id) { doc.document.document_id = uuid::Uuid::new_v4(); }
                 if crate::autosave::is_autosave(path) {
                     // Recovered: untitled again, so Save asks where; the autosave stays until it is saved.
                     let title = crate::autosave::recoverable().into_iter().find(|r| r.path == path).map(|r| r.title).unwrap_or_else(|| "Recovered".into());
@@ -1150,6 +1158,9 @@ impl App {
     fn edit(self: &Rc<Self>, f: impl FnOnce(&mut Document) -> Result<()>) {
         let mut failure = None;
         self.with_current(|p| {
+            // A live preview (a stroke, a pixel drag, the Layer Style window) would be snapshotted into
+            // this command's undo step: it waits.
+            if p.canvas.doc().borrow().document.preview_busy() { failure = Some("Finish the stroke, drag or Layer Style window first.".to_string()); return; }
             let result = f(&mut p.canvas.doc().borrow_mut().document);
             p.refresh();
             if let Err(error) = result { failure = Some(format!("{error:#}")); }
@@ -1327,6 +1338,7 @@ impl App {
     fn prune(&self) {
         let any = {
             let mut pages = self.pages.borrow_mut();
+            for p in pages.iter().filter(|p| self.notebook.page_num(&p.root).is_none()) { p.canvas.dispose(); }
             pages.retain(|p| self.notebook.page_num(&p.root).is_some());
             !pages.is_empty()
         };

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const FORMAT: &str = "com.compositor.project";
-pub const VERSIONS: std::ops::RangeInclusive<i64> = 1..=7;
+pub const VERSIONS: std::ops::RangeInclusive<i64> = 1..=8;
 pub const MAX_SIDE: i64 = 30_000;
 pub const MAX_PIXELS: i64 = 100_000_000;
 pub const MAX_LAYERS: usize = 10_000;
@@ -33,7 +33,7 @@ impl fmt::Display for ProjectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid => write!(f, "This is not a valid Compositor project, or its metadata is damaged."),
-            Self::Version(v) => write!(f, "This project uses format version {v}. This app supports versions 1–7."),
+            Self::Version(v) => write!(f, "This project uses format version {v}. This app supports versions 1 to 8."),
             Self::MissingImage => write!(f, "An image inside the project is missing or damaged."),
             Self::TooLarge => write!(f, "This project exceeds the supported canvas, layer, file-size, or 100-megapixel image limit."),
         }
@@ -105,7 +105,7 @@ impl Transform {
     pub fn radians(&self) -> f64 { (self.rotation % 360.0).to_radians() }
     pub fn is_valid(&self) -> bool {
         [self.origin.0, self.origin.1, self.size.0, self.size.1, self.rotation].iter().all(|v| v.is_finite())
-            && (1.0..=300_000.0).contains(&self.size.0) && (1.0..=300_000.0).contains(&self.size.1)
+            && (1.0..=30_000.0).contains(&self.size.0) && (1.0..=30_000.0).contains(&self.size.1)
             && self.origin.0.abs() <= 1_000_000.0 && self.origin.1.abs() <= 1_000_000.0
     }
     /// The document point a unit-square point (0 to 1, y down) lands on.
@@ -294,10 +294,34 @@ pub struct Manifest {
     #[serde(default, rename = "activeLayerID", skip_serializing_if = "Option::is_none", serialize_with = "upper_uuid_opt")]
     pub active_layer_id: Option<Uuid>,
     pub layers: Vec<Layer>,
+    /// Ruler guides, this port's own (the macOS app ignores the key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guides: Option<Guides>,
 }
 
-/// The current format version, what saves declare.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Guides {
+    #[serde(default)] pub vertical: Vec<f64>,
+    #[serde(default)] pub horizontal: Vec<f64>,
+}
+
+/// The format version saves declare: 7, which the macOS app reads, unless the document uses something
+/// that app has no spelling for (a Pen shape, an adjustment kind past its six), which makes it 8 so the
+/// Mac refuses the file with an honest version message instead of "damaged metadata".
 pub const SAVE_VERSION: i64 = 7;
+pub const PORT_VERSION: i64 = 8;
+
+/// The adjustment kinds and shape kinds the macOS app knows.
+const MAC_ADJUSTMENTS: [&str; 6] = ["Hue/Saturation", "Levels", "Curves", "Exposure", "Gradient Map", "Grain"];
+
+/// The version a manifest must declare for its layers: see `SAVE_VERSION`.
+pub fn version_for(layers: &[Layer]) -> i64 {
+    let port_only = layers.iter().any(|l| {
+        l.adjustment.as_ref().is_some_and(|a| !MAC_ADJUSTMENTS.contains(&a.kind.as_str()))
+            || l.shape.as_ref().and_then(|s| s.get("kind")).and_then(serde_json::Value::as_str).is_some_and(|k| k != "Rectangle" && k != "Ellipse")
+    });
+    if port_only { PORT_VERSION } else { SAVE_VERSION }
+}
 
 /// Writes a `.comp` package: the manifest and every layer's image and mask as PNG, staged beside the
 /// destination and swapped into place only once complete, as the reference's coordinated write does.
@@ -403,9 +427,9 @@ fn check_size(width: i64, height: i64, used: &mut i64) -> Result<(), ProjectErro
 /// A regular, non-symlinked file inside the package, no larger than `maximum` bytes.
 fn check_file(file: &Path, package: &Path, maximum: u64) -> Result<(), ProjectError> {
     let root = package.canonicalize().map_err(|_| ProjectError::Invalid)?;
-    let resolved = file.canonicalize().map_err(|_| ProjectError::TooLarge)?;
+    let resolved = file.canonicalize().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { ProjectError::MissingImage } else { ProjectError::TooLarge })?;
     if !resolved.starts_with(&root) { return Err(ProjectError::Invalid); }
-    let link = std::fs::symlink_metadata(file).map_err(|_| ProjectError::TooLarge)?;
+    let link = std::fs::symlink_metadata(file).map_err(|_| ProjectError::MissingImage)?;
     if link.file_type().is_symlink() || !link.is_file() || link.len() > maximum { return Err(ProjectError::TooLarge); }
     Ok(())
 }

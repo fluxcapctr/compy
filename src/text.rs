@@ -34,7 +34,16 @@ impl Default for TextStyle {
 
 impl TextStyle {
     pub fn to_record(&self) -> serde_json::Value { serde_json::to_value(self).unwrap_or(serde_json::Value::Null) }
-    pub fn from_record(value: &serde_json::Value) -> Option<TextStyle> { serde_json::from_value(value.clone()).ok() }
+    pub fn from_record(value: &serde_json::Value) -> Option<TextStyle> {
+        let mut t: TextStyle = serde_json::from_value(value.clone()).ok()?;
+        let c = |v: f64, lo: f64, hi: f64, or: f64| if v.is_finite() { v.clamp(lo, hi) } else { or };
+        t.size = c(t.size, 1.0, 2000.0, 48.0);
+        t.leading = c(t.leading, 0.5, 5.0, 1.2);
+        t.tracking = c(t.tracking, -1000.0, 1000.0, 0.0);
+        t.color = t.color.map(|v| c(v, 0.0, 1.0, 0.0));
+        t.width = t.width.map(|w| c(w, 1.0, 30_000.0, 100.0));
+        Some(t)
+    }
     fn description(&self) -> pango::FontDescription {
         let mut d = pango::FontDescription::new();
         d.set_family(&self.family);

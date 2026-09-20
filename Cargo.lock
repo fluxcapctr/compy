@@ -216,6 +216,7 @@ dependencies = [
  "ash",
  "cairo-rs",
  "cc",
+ "flate2",
  "gtk4",
  "image",
  "libc",

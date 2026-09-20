@@ -247,8 +247,8 @@ fn rejects_bad_projects() {
     fn err(f: &Fixture) -> ProjectError { f.load().err().expect("should be rejected") }
 
     let mut f = Fixture::new("future", 1, 1);
-    f.version = 8;
-    assert_eq!(err(&f), ProjectError::Version(8));
+    f.version = 9;
+    assert_eq!(err(&f), ProjectError::Version(9));
 
     let mut f = Fixture::new("format", 1, 1);
     f.extra.insert("format".into(), serde_json::json!("com.example.other"));
@@ -289,7 +289,7 @@ fn rejects_bad_projects() {
     f.add(Spec { pixels: Some(solid(1, 1, RED)), ..Spec::default() });
     let dir = f.write();
     for entry in std::fs::read_dir(dir.join("images")).unwrap() { std::fs::remove_file(entry.unwrap().path()).unwrap(); }
-    assert_eq!(err(&f), ProjectError::TooLarge);
+    assert_eq!(err(&f), ProjectError::MissingImage);
 
     let mut f = Fixture::new("mask-rgba", 1, 1);
     let id = f.add(Spec { pixels: Some(solid(1, 1, RED)), mask: Some((1, 1, vec![255])), ..Spec::default() });

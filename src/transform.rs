@@ -108,6 +108,10 @@ impl Geometry {
     pub fn hit(&self, point: (f64, f64)) -> Option<Mode> {
         let near = |o: (f64, f64)| (point.0 - o.0).hypot(point.1 - o.1) <= 10.0;
         if near(self.rotation) { return Some(Mode::Rotate); }
+        // A box smaller than its handles' reach (a tiny layer, or far zoomed out) is moved, not resized:
+        // every handle would otherwise claim the whole box.
+        let (w, h) = ((self.handles[2].0 - self.handles[0].0).hypot(self.handles[2].1 - self.handles[0].1), (self.handles[6].0 - self.handles[0].0).hypot(self.handles[6].1 - self.handles[0].1));
+        if w < 24.0 || h < 24.0 { return None; }
         if let Some(i) = self.handles.iter().position(|h| near(*h)) { return Some(Mode::Resize(i)); }
         for (start, end, handle) in [(0, 2, 1), (2, 4, 3), (4, 6, 5), (6, 0, 7)] {
             let (a, b) = (self.handles[start], self.handles[end]);

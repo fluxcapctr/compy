@@ -117,6 +117,8 @@ pub struct OptionsBar {
     gradient_preview: gtk::DrawingArea,
     pattern_list: gtk::DropDown,
     syncing: std::cell::Cell<bool>,
+    /// Repaints the canvas after a field changed the document (set by the canvas that owns this bar).
+    redraw: RedrawHook,
 }
 
 /// The Pattern Stamp's choices: none, then every saved pattern.
@@ -152,8 +154,11 @@ pub struct TypePage {
     status: gtk::Label,
 }
 
+type RedrawHook = Rc<std::cell::RefCell<Option<Rc<dyn Fn()>>>>;
+fn call_redraw(hook: &RedrawHook) { if let Some(f) = hook.borrow().as_ref() { f(); } }
+
 impl TypePage {
-    fn build(doc: &DocRef) -> (gtk::Box, TypePage) {
+    fn build(doc: &DocRef, redraw: &RedrawHook) -> (gtk::Box, TypePage) {
         let page = row();
         let names = crate::text::families();
         let families = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
@@ -200,36 +205,43 @@ impl TypePage {
         let status = gtk::Label::builder().css_classes(["dim-label"]).build();
         page.append(&status);
         let this = TypePage { families, family, size, bold, italic, align, leading, tracking, width, google, status };
-        this.connect(doc);
+        this.connect(doc, redraw);
         { let google = this.google.clone(); get.connect_clicked(move |_| google.emit_activate()); }
         (page, this)
     }
 
     /// Each control changes the style for new text and, with a type layer active, that layer.
-    fn connect(&self, doc: &DocRef) {
-        fn apply(doc: &DocRef, change: &dyn Fn(&mut crate::text::TextStyle)) {
-            let Ok(mut d) = doc.try_borrow_mut() else { return };
-            if d.syncing_inspector { return; }
-            change(&mut d.text_style);
-            if let Some(id) = d.document.active {
-                if let Some(mut style) = d.document.text_style(id) {
-                    change(&mut style);
-                    if let Err(error) = d.document.set_text(id, &style) { eprintln!("type: {error:#}"); }
-                    d.needs_redraw = true;
+    fn connect(&self, doc: &DocRef, redraw: &RedrawHook) {
+        let redraw = redraw.clone();
+        let apply = move |doc: &DocRef, change: &dyn Fn(&mut crate::text::TextStyle)| {
+            let changed = {
+                let Ok(mut d) = doc.try_borrow_mut() else { return };
+                if d.syncing_inspector { return; }
+                change(&mut d.text_style);
+                let mut changed = false;
+                if let Some(id) = d.document.active {
+                    if let Some(mut style) = d.document.text_style(id) {
+                        change(&mut style);
+                        if let Err(error) = d.document.set_text(id, &style) { eprintln!("type: {error:#}"); }
+                        changed = true;
+                    }
                 }
-            }
-        }
-        { let doc = doc.clone(); self.family.connect_selected_notify(move |f| { let Some(name) = f.selected_item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()) else { return }; apply(&doc, &|s| s.family = name.clone()); }); }
-        { let doc = doc.clone(); self.size.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.size = v); }); }
-        { let doc = doc.clone(); self.bold.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.bold = v); }); }
-        { let doc = doc.clone(); self.italic.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.italic = v); }); }
-        { let doc = doc.clone(); self.align.connect_selected_notify(move |a| { let v = a.selected(); apply(&doc, &|st| st.align = v); }); }
-        { let doc = doc.clone(); self.leading.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.leading = v); }); }
-        { let doc = doc.clone(); self.tracking.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.tracking = v); }); }
-        { let doc = doc.clone(); self.width.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.width = if v >= 1.0 { Some(v) } else { None }); }); }
+                changed
+            };
+            if changed { call_redraw(&redraw); }
+        };
+        let apply = Rc::new(apply);
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.family.connect_selected_notify(move |f| { let Some(name) = f.selected_item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()) else { return }; apply(&doc, &|s| s.family = name.clone()); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.size.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.size = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.bold.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.bold = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.italic.connect_toggled(move |b| { let v = b.is_active(); apply(&doc, &|st| st.italic = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.align.connect_selected_notify(move |a| { let v = a.selected(); apply(&doc, &|st| st.align = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.leading.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.leading = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.tracking.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.tracking = v); }); }
+        { let (doc, apply) = (doc.clone(), apply.clone()); self.width.connect_value_changed(move |s| { let v = s.value(); apply(&doc, &|st| st.width = if v >= 1.0 { Some(v) } else { None }); }); }
         {
             let (families, family, status) = (self.families.clone(), self.family.clone(), self.status.clone());
-            let doc = doc.clone();
+            let (doc, apply) = (doc.clone(), apply.clone());
             self.google.connect_activate(move |entry| {
                 let name = entry.text().trim().to_string();
                 if name.is_empty() { return; }
@@ -237,7 +249,7 @@ impl TypePage {
                 entry.set_sensitive(false);
                 let (tx, rx) = std::sync::mpsc::channel();
                 { let name = name.clone(); std::thread::spawn(move || { let _ = tx.send(crate::text::fetch_google_family(&name)); }); }
-                let (families, family, status, entry, doc) = (families.clone(), family.clone(), status.clone(), entry.clone(), doc.clone());
+                let (families, family, status, entry, doc, apply) = (families.clone(), family.clone(), status.clone(), entry.clone(), doc.clone(), apply.clone());
                 glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
                     let Ok(result) = rx.try_recv() else { return glib::ControlFlow::Continue };
                     entry.set_sensitive(true);
@@ -299,7 +311,7 @@ impl OptionsBar {
         // Move: the transform inspector.
         let mv = row();
         let mut move_fields = Vec::new();
-        for (label, low, high, tip) in [("X", -1.0e6, 1.0e6, "Left edge, document pixels"), ("Y", -1.0e6, 1.0e6, "Top edge, document pixels"), ("W", 1.0, 300_000.0, "Width, document pixels"), ("H", 1.0, 300_000.0, "Height, document pixels"), ("Angle", -3600.0, 3600.0, "Clockwise rotation in degrees")] {
+        for (label, low, high, tip) in [("X", -1.0e6, 1.0e6, "Left edge, document pixels"), ("Y", -1.0e6, 1.0e6, "Top edge, document pixels"), ("W", 1.0, 30_000.0, "Width, document pixels"), ("H", 1.0, 30_000.0, "Height, document pixels"), ("Angle", -3600.0, 3600.0, "Clockwise rotation in degrees")] {
             mv.append(&gtk::Label::new(Some(label)));
             let spin = gtk::SpinButton::with_range(low, high, 1.0);
             spin.set_digits(if label == "Angle" { 1 } else { 0 });
@@ -512,7 +524,8 @@ impl OptionsBar {
         stack.add_named(&gradient, Some("gradient"));
 
         // Type.
-        let (type_row, type_page) = TypePage::build(&doc);
+        let redraw: RedrawHook = Rc::new(std::cell::RefCell::new(None));
+        let (type_row, type_page) = TypePage::build(&doc, &redraw);
         stack.add_named(&type_row, Some("type"));
 
         // Pen: what to do with the path.
@@ -558,7 +571,7 @@ impl OptionsBar {
         stack.add_named(&eye, Some("eyedropper"));
 
         super::center_spins(&stack);
-        let bar = OptionsBar { widget: stack, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, pattern_list, syncing: std::cell::Cell::new(false) };
+        let bar = OptionsBar { widget: stack, redraw, size, hardness, opacity, move_fields, mask_paint, color, picker, spacing, angle, roundness, jitter, type_page, gradient_preview, pattern_list, syncing: std::cell::Cell::new(false) };
         bar.connect_move_fields(&doc);
         bar.update(doc.borrow().tool);
         bar
@@ -569,15 +582,18 @@ impl OptionsBar {
         for (i, spin) in self.move_fields.iter().enumerate() {
             let doc = doc.clone();
             let fields: Vec<gtk::SpinButton> = self.move_fields.clone();
+            let redraw = self.redraw.clone();
             spin.connect_value_changed(move |_| {
-                let Ok(mut d) = doc.try_borrow_mut() else { return };
-                if d.syncing_inspector { return; }
-                let Some(id) = d.document.active else { return };
-                let mut t = d.document.renderer.layer(id).transform;
-                let v: Vec<f64> = fields.iter().map(|f| f.value()).collect();
-                match i { 0 => t.origin.0 = v[0], 1 => t.origin.1 = v[1], 2 => t.size.0 = v[2], 3 => t.size.1 = v[3], _ => t.rotation = v[4] }
-                d.document.set_transform(id, t, "Transform Layer");
-                d.needs_redraw = true;
+                {
+                    let Ok(mut d) = doc.try_borrow_mut() else { return };
+                    if d.syncing_inspector { return; }
+                    let Some(id) = d.document.active else { return };
+                    let mut t = d.document.renderer.layer(id).transform;
+                    let v: Vec<f64> = fields.iter().map(|f| f.value()).collect();
+                    match i { 0 => t.origin.0 = v[0], 1 => t.origin.1 = v[1], 2 => t.size.0 = v[2], 3 => t.size.1 = v[3], _ => t.rotation = v[4] }
+                    d.document.set_transform(id, t, "Transform Layer");
+                }
+                call_redraw(&redraw);
             });
         }
     }
@@ -637,6 +653,8 @@ impl OptionsBar {
 
     /// Reflects settings changed from the keyboard.
     /// Opens the color picker once the button is on screen (the options page may just have switched).
+    pub fn set_redraw(&self, f: Option<Rc<dyn Fn()>>) { *self.redraw.borrow_mut() = f; }
+
     pub fn show_color_picker(&self) { let button = self.color.widget.clone(); gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || button.popup()); }
 
     /// The gradient preview follows the palette (the foreground presets are made from it).

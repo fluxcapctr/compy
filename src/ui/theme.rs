@@ -61,14 +61,18 @@ pub fn parse(text: &str) -> Option<Palette> {
         let line = line.trim();
         if line.starts_with('#') { continue; }
         let Some((key, value)) = line.split_once('=') else { continue };
-        map.insert(key.trim(), value.trim().trim_matches('"'));
+        // A quoted value up to its closing quote; a bare one up to a trailing comment.
+        let value = value.trim();
+        let value = if let Some(rest) = value.strip_prefix('"') { rest.split('"').next().unwrap_or("") } else { value.split('#').next().unwrap_or("").trim() };
+        map.insert(key.trim(), value);
     }
     let get = |key: &str| map.get(key).filter(|v| hex(v).is_some()).map(|v| v.to_string());
     let background = get("background")?;
     let foreground = get("foreground")?;
     let accent_hex = get("accent").unwrap_or_else(|| foreground.clone());
     Some(Palette {
-        dark: map.get("mode").is_none_or(|m| *m != "light"),
+        // "mode" when the theme says; else judged from the background's brightness.
+        dark: match map.get("mode") { Some(m) => *m != "light", None => hex(&background).is_some_and(|(r, g, b)| 0.299 * r + 0.587 * g + 0.114 * b < 0.5) },
         accent: hex(&accent_hex)?,
         dark_background: get("dark_background").unwrap_or_else(|| background.clone()),
         darker_background: get("darker_background").or_else(|| get("dark_background")).unwrap_or_else(|| background.clone()),
@@ -85,7 +89,8 @@ pub fn parse(text: &str) -> Option<Palette> {
 pub fn css(p: &Palette) -> String {
     let (bg, dbg, ddbg, lbg) = (&p.background, &p.dark_background, &p.darker_background, &p.lighter_background);
     let (fg, dfg, bfg, sel, muted, accent) = (&p.foreground, &p.dark_foreground, &p.bright_foreground, &p.selection, &p.muted, &p.accent_hex);
-    let on_accent = if p.dark { dbg } else { bfg };
+    // Text on the accent: the dark background on a bright accent, the light background on a dark one.
+    let on_accent = if p.dark { dbg } else { bg };
     format!("
         @define-color accent_color {accent};
         @define-color accent_bg_color {accent};

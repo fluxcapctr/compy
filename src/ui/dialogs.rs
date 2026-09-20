@@ -12,6 +12,7 @@ use std::rc::Rc;
 pub fn floating(parent: &gtk::Window, title: &str, modal: bool, width: i32, content: &impl IsA<gtk::Widget>) -> gtk::Window {
     let window = gtk::Window::builder().title(title).transient_for(parent).modal(modal).resizable(false).default_width(width).build();
     window.set_application(parent.application().as_ref());
+    { let keys = gtk::EventControllerKey::new(); let w = window.clone(); keys.connect_key_pressed(move |_, key, _, _| { if key == gtk::gdk::Key::Escape { w.close(); glib::Propagation::Stop } else { glib::Propagation::Proceed } }); window.add_controller(keys); }
     let header = gtk::HeaderBar::builder().show_title_buttons(true).build();
     header.set_title_widget(Some(&gtk::Label::builder().label(title).css_classes(["title", "dialog-title"]).build()));
     window.set_titlebar(Some(&header));
@@ -265,7 +266,7 @@ pub fn history(parent: &gtk::Window, doc: super::DocRef, refresh: std::rc::Rc<dy
             while let Some(child) = list.first_child() { list.remove(&child); }
             let (past, future) = doc.borrow().document.history_names();
             let row = |text: &str, dim: bool| { let l = gtk::Label::builder().label(text).xalign(0.0).margin_start(6).margin_end(6).margin_top(3).margin_bottom(3).build(); if dim { l.add_css_class("dim-label"); } gtk::ListBoxRow::builder().child(&l).build() };
-            list.append(&row("Open", past.is_empty() && false));
+            list.append(&row("Open", false));
             for name in &past { list.append(&row(name, false)); }
             for name in &future { list.append(&row(name, true)); }
             list.select_row(list.row_at_index(past.len() as i32).as_ref());
@@ -405,7 +406,8 @@ pub fn save_as(parent: &gtk::Window, title: &str, initial: &str, extension: &'st
     dialog.save(Some(parent), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
         let Some(mut path) = file.path() else { return };
-        if path.extension().is_none_or(|e| e != extension) { path.set_extension(extension); }
+        // "Poster v1.2" keeps its dot: the extension is added, not swapped in.
+        if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case(extension)) { path = std::path::PathBuf::from(format!("{}.{extension}", path.display())); }
         done(path);
     });
 }
@@ -446,7 +448,8 @@ pub fn new_guide(parent: &gtk::Window, done: impl Fn(bool, f64) + 'static) {
     let orientation = gtk::DropDown::from_strings(&["Vertical", "Horizontal"]);
     grid.attach(&orientation, 1, 0, 1, 1);
     let position = spin(&grid, 1, "Position (px)", -100000.0, 100000.0, 1.0, 0.0, 0);
-    ok.connect_clicked(move |_| { done(orientation.selected() == 0, position.value()); window.close(); });
+    { let window = window.clone(); ok.connect_clicked(move |_| { done(orientation.selected() == 0, position.value()); window.close(); }); }
+    window.present();
 }
 
 pub fn is_project(path: &Path) -> bool { path.is_dir() && path.join("manifest.json").exists() }

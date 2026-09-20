@@ -55,8 +55,9 @@ impl Renderer {
         let (mut group, gcr) = region.offscreen(cr)?;
         self.draw_own(id, &gcr, None, &[])?;
         drop(gcr);
-        let (w, h) = (region.width as usize, region.height as usize);
-        let alpha_stride = Format::A8.stride_for_width(region.width as u32)? as usize;
+        // The group's own pixels (more than the region's units on a HiDPI frame).
+        let (w, h) = (group.width() as usize, group.height() as usize);
+        let alpha_stride = Format::A8.stride_for_width(group.width() as u32)? as usize;
         let mut coverage = vec![0u8; alpha_stride * h];
         with_bytes_mut(&mut group, |data, stride| {
             ffi::extract_alpha(data, stride, &mut coverage, alpha_stride, w, h);
@@ -64,11 +65,13 @@ impl Renderer {
         })?;
         for child in children {
             let gcr = Context::new(&group)?;
-            gcr.set_matrix(Matrix_for(cr, region));
-            // A clip, not a path: a path left pending would widen the child's own clip to the whole region
-            // and smear its edge pixels across the base.
+            // A clip, not a path (a path left pending would widen the child's own clip to the whole region
+            // and smear its edge pixels across the base), set in the group's own space: the region's size
+            // is in device units, not document ones.
+            gcr.identity_matrix();
             gcr.rectangle(0.0, 0.0, region.width as f64, region.height as f64);
             gcr.clip();
+            gcr.set_matrix(Matrix_for(cr, region));
             if self.layer(child).adjustment.is_some() { self.adjust(child, &gcr, &[])?; } else { self.draw_own(child, &gcr, None, &[])?; }
         }
         with_bytes_mut(&mut group, |data, stride| {
@@ -109,13 +112,15 @@ impl Renderer {
         drop(pcr);
         self.live.visiting.remove(&id);
         drawn?;
-        let (w, h) = (region.width as usize, region.height as usize);
-        let alpha_stride = Format::A8.stride_for_width(region.width as u32)? as usize;
+        let (w, h) = (pixels.width() as usize, pixels.height() as usize);
+        let alpha_stride = Format::A8.stride_for_width(pixels.width() as u32)? as usize;
         let mut alpha = vec![0u8; alpha_stride * h];
         with_bytes(&mut pixels, |data, stride| {
             ffi::extract_alpha(data, stride, &mut alpha, alpha_stride, w, h);
         })?;
-        let surface = a8_from_data(region.width, region.height, alpha, alpha_stride as i32)?;
+        let surface = a8_from_data(pixels.width(), pixels.height(), alpha, alpha_stride as i32)?;
+        let (sx, sy) = pixels.device_scale();
+        surface.set_device_scale(sx, sy);
         self.live.coverage.insert(id, (surface.clone(), region));
         Ok(Some((surface, region)))
     }

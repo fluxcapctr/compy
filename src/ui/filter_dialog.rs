@@ -100,7 +100,8 @@ impl FilterDialog {
         buttons.append(&cancel);
         buttons.append(&ok);
         content.append(&buttons);
-        let window = super::dialogs::floating(parent, &title, false, 360, &content);
+        // Modal: the preview and the commit belong to the layer the dialog opened on.
+        let window = super::dialogs::floating(parent, &title, true, 360, &content);
         { let window = window.clone(); cancel.connect_clicked(move |_| window.close()); }
         { let (this, window) = (this.clone(), window.clone()); ok.connect_clicked(move |_| { this.commit(); window.close(); }); }
         { let this = this.clone(); window.connect_close_request(move |_| {

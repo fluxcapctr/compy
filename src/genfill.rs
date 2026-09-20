@@ -172,13 +172,6 @@ pub fn agent_body(model: &str, prompt: &str, source: Option<&str>, width: usize,
     body
 }
 
-/// The pixel size in a PNG's header.
-pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let reader = decoder.read_info().ok()?;
-    let info = reader.info();
-    Some((info.width, info.height))
-}
 
 /// Writes the key to `~/.config/compositor/fal.key`, readable by the user only.
 pub fn save_key(key: &str) -> Result<()> {
@@ -376,7 +369,6 @@ mod tests {
         assert_eq!(nearest_aspect(64, 64), "1:1");
         assert_eq!(agent_body("fal-ai/nano-banana-2", "x", None, 64, 64, 9, false)["num_images"], 4, "count is capped at four");
         assert_eq!(agent_body("fal-ai/nano-banana-2", "x", None, 64, 64, 1, false)["resolution"], "1K");
-        assert!(png_size(&[137, 80, 78, 71, 13, 10]).is_none(), "a truncated PNG has no size");
         assert_eq!(nearest_aspect(1920, 1080), "16:9");
         assert_eq!(nearest_aspect(1000, 1000), "1:1");
         assert_eq!(nearest_aspect(800, 1000), "4:5");

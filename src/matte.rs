@@ -179,7 +179,8 @@ pub fn guided(mask: &[f32], guide: &[f32], width: usize, height: usize, radius: 
 /// The image's gray levels, 0 to 1, over `w` x `h` (the image's own grid).
 fn gray_levels(image: &ImageSurface) -> Result<Vec<f32>> {
     let (w, h) = (image.width() as usize, image.height() as usize);
-    with_bytes(image, |d, stride| (0..h).flat_map(|y| (0..w).map(move |x| { let i = y * stride + x * 4; (0.114 * d[i] as f32 + 0.587 * d[i + 1] as f32 + 0.299 * d[i + 2] as f32) / 255.0 })).collect())
+    // Straight luminance: a change in alpha alone must not read as an edge for the guided filter.
+    with_bytes(image, |d, stride| (0..h).flat_map(|y| (0..w).map(move |x| { let i = y * stride + x * 4; let a = d[i + 3] as f32; if a <= 0.0 { 0.0 } else { ((0.114 * d[i] as f32 + 0.587 * d[i + 1] as f32 + 0.299 * d[i + 2] as f32) / a).clamp(0.0, 1.0) } })).collect())
 }
 
 /// The refinements over the raw mask (`SubjectRemoval.refined`), on the image's own grid. `limit` caps the

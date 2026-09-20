@@ -49,15 +49,18 @@ fn oversized_image_header_is_refused_before_decoding() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 3. A brush that would be wider than 3,000 layer pixels is refused rather than allocated.
+/// 3. A brush on a layer squeezed to a sliver never allocates a tip thousands of pixels wide: the
+/// layer is first rasterized to the pixels it shows (square, at canvas scale), then painted.
 #[test]
 fn brush_tip_is_bounded() {
     let mut f = Fixture::new("review2-tip", 1, 1);
     let id = f.add(Spec { size: (1.0, 1.0), pixels: Some(solid(10_000, 1, RED)), ..Default::default() });
     let mut d = Document::new(f.load().unwrap()).unwrap();
     d.active = Some(id);
-    let message = match d.begin_stroke((0.5, 0.5), &BrushSettings { diameter: 2000.0, ..Default::default() }, StrokeKind::Paint) { Err(e) => e.to_string(), Ok(()) => panic!("stroke began") };
-    assert!(message.contains("3000"), "{message}");
+    d.begin_stroke((0.5, 0.5), &BrushSettings { diameter: 2000.0, ..Default::default() }, StrokeKind::Paint).unwrap();
+    assert_eq!(d.renderer.image_size(id), Some((1, 1)), "the sliver became the one pixel it shows");
+    assert!(d.stroke_active());
+    d.cancel_stroke();
     assert!(!d.stroke_active());
     // A brush within the limit on a less extreme layer still works.
     let mut f = Fixture::new("review2-tip-ok", 4, 4);

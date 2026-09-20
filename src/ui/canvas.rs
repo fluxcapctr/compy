@@ -56,6 +56,8 @@ pub struct Canvas {
     board_drag: Cell<Option<(uuid::Uuid, (f64, f64))>>,
     /// A Pen drag in progress: the anchor being placed (its handles follow), or an anchor or handle moved.
     pen_drag: Cell<Option<PenDrag>>,
+    /// The event controllers on the area: they hold this canvas, so a closing tab removes them (`dispose`).
+    controllers: RefCell<Vec<gtk::EventController>>,
     /// What the picture last showed straight from the GPU: the document revision and viewport, and the size.
     presented_revision: Cell<Option<(u64, crate::viewport::Viewport)>>,
     presented_size: Cell<(i32, i32, i32)>,
@@ -149,14 +151,29 @@ impl Canvas {
             widget.append(&rail.widget);
             widget.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             widget.append(&column);
-            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), board_drag: Cell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None), presented_revision: Cell::new(None), presented_size: Cell::new((0, 0, 0)) }
+            Canvas { widget: widget.clone(), area: area.clone(), zoom_label, message, doc, space_held, pointer: Rc::new(Cell::new((-1.0e9, -1.0e9))), dragging: Rc::new(Cell::new(false)), rail, options, ants: Cell::new(None), painting: Cell::new(false), stroke_start: Cell::new((0.0, 0.0)), refresh: RefCell::new(None), transform_drag: RefCell::new(None), pixel_moving: Cell::new(false), picture: picture.clone(), tool_drag: Cell::new(None), guide_drag: Cell::new(None), options_scroller: options_scroller.clone(), status: status.clone(), draft: RefCell::new(None), outline_move: Cell::new(None), cache: RefCell::new(None), popover: RefCell::new(None), text_edit: RefCell::new(None), board_drag: Cell::new(None), handles_parked: Cell::new(None), pen_drag: Cell::new(None), controllers: RefCell::new(Vec::new()), presented_revision: Cell::new(None), presented_size: Cell::new((0, 0, 0)) }
         });
         canvas.connect();
+        { let weak = Rc::downgrade(&canvas); canvas.options.set_redraw(Some(Rc::new(move || { if let Some(c) = weak.upgrade() { c.area.queue_draw(); } }))); }
         canvas.update_cursor();
         canvas
     }
 
     pub fn doc(&self) -> &DocRef { &self.doc }
+
+    /// A closing tab: the timer stops and the widget's callbacks let go of this canvas, so it and its
+    /// document are freed (the draw function and controllers hold it by reference).
+    pub fn dispose(&self) {
+        if let Some(id) = self.ants.take() { id.remove(); }
+        self.area.unset_draw_func();
+        for c in self.controllers.borrow_mut().drain(..) { self.area.remove_controller(&c); }
+        *self.refresh.borrow_mut() = None;
+        *self.cache.borrow_mut() = None;
+        self.options.set_redraw(None);
+    }
+
+    /// Whether a pointer drag of any kind is in progress (a transform, a stroke, a board, a tool).
+    pub fn is_dragging(&self) -> bool { self.dragging.get() || self.painting.get() || self.transform_drag.borrow().is_some() || self.board_drag.get().is_some() || self.tool_drag.get().is_some() }
     /// The panel-and-canvas refresh the page installed, for windows that change the document.
     pub fn refresh_fn(&self) -> Option<Rc<dyn Fn()>> { self.refresh.borrow().clone() }
 
@@ -295,6 +312,7 @@ impl Canvas {
             let left = self.clone();
             motion.connect_leave(move |_| { left.pointer.set((-1.0e9, -1.0e9)); left.area.queue_draw(); });
         }
+        self.controllers.borrow_mut().push(motion.clone().upcast());
         area.add_controller(motion);
 
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
@@ -317,6 +335,7 @@ impl Canvas {
                 glib::Propagation::Stop
             });
         }
+        self.controllers.borrow_mut().push(scroll.clone().upcast());
         area.add_controller(scroll);
 
         let pinch = gtk::GestureZoom::new();
@@ -333,6 +352,7 @@ impl Canvas {
                 this.area.queue_draw();
             });
         }
+        self.controllers.borrow_mut().push(pinch.clone().upcast());
         area.add_controller(pinch);
 
         let context = gtk::GestureClick::new();
@@ -416,6 +436,7 @@ impl Canvas {
                 popover.popup();
             });
         }
+        self.controllers.borrow_mut().push(context.clone().upcast());
         area.add_controller(context);
         let click = gtk::GestureClick::new();
         click.set_button(1);
@@ -482,6 +503,7 @@ impl Canvas {
                 }
             });
         }
+        self.controllers.borrow_mut().push(click.clone().upcast());
         area.add_controller(click);
 
         let drag = gtk::GestureDrag::new();
@@ -581,10 +603,19 @@ impl Canvas {
                 this.update_cursor();
             });
         }
+        self.controllers.borrow_mut().push(drag.clone().upcast());
         area.add_controller(drag);
     }
 
     fn tool_changed(&self) {
+        // Whatever the pointer is in the middle of ends first, as a step of its own; otherwise the new
+        // tool's state would take over a drag the old one started (or a mask stroke would be lost).
+        if self.painting.get() { self.finish_stroke(); }
+        if self.board_drag.get().is_some() { self.finish_board_drag(); }
+        if self.transform_drag.borrow().is_some() { self.finish_transform(); }
+        if self.outline_move.get().is_some() { self.finish_outline_move(); }
+        self.tool_drag.set(None);
+        self.guide_drag.set(None);
         self.handles_parked.set(None);
         self.pen_drag.set(None);
         { let mut d = self.doc.borrow_mut(); d.crop = None; d.gradient_line = None; d.shape_draft = None; if d.tool != Tool::Gradient { if let Some(id) = d.document.active { d.document.renderer.set_preview(id, None); d.document.renderer.end_mask_preview(id); } } }
@@ -804,6 +835,7 @@ impl Canvas {
             return true;
         }
         if self.draft.borrow().is_none() && matches!(key, gdk::Key::Delete | gdk::Key::BackSpace | gdk::Key::KP_Delete) && !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+            if self.is_dragging() { return true; }
             // Delete clears the selection when there is one; otherwise the targeted mask, or the layer, goes.
             let result = {
                 let mut d = self.doc.borrow_mut();
@@ -856,6 +888,7 @@ impl Canvas {
     fn update_board_drag(&self, view: (f64, f64)) {
         let Some((id, last)) = self.board_drag.get() else { return };
         let mut d = self.doc.borrow_mut();
+        if !d.document.has_layer(id) { self.board_drag.set(None); d.document.abort_edit(); return; }
         let size = d.size();
         let point = d.viewport.document_point(view, size);
         let (dx, dy) = ((point.0 - last.0).round(), (point.1 - last.1).round());
@@ -933,6 +966,7 @@ impl Canvas {
     fn update_transform(&self, view: (f64, f64), state: gdk::ModifierType) {
         let mut d = self.doc.borrow_mut();
         let Some((drag, originals)) = self.transform_drag.borrow().clone() else { return };
+        if originals.iter().any(|(id, _)| !d.document.has_layer(*id)) { *self.transform_drag.borrow_mut() = None; self.pixel_moving.set(false); return; }
         let size = d.size();
         let point = d.viewport.document_point(view, size);
         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
@@ -983,6 +1017,7 @@ impl Canvas {
     fn finish_transform(&self) {
         let Some((drag, originals)) = self.transform_drag.borrow_mut().take() else { return };
         let mut d = self.doc.borrow_mut();
+        if originals.iter().any(|(id, _)| !d.document.has_layer(*id)) { self.pixel_moving.set(false); d.snap_guides = (None, None); return; }
         d.snap_guides = (None, None);
         if self.pixel_moving.replace(false) {
             let result = d.document.finish_pixel_move();
@@ -1319,7 +1354,7 @@ impl Canvas {
 
     /// Layer > Edit Shape Points: the active Path shape's points come back onto the Pen.
     pub fn shape_edit(&self) {
-        let loaded = { let mut d = self.doc.borrow_mut(); let path = d.document.active.and_then(|id| d.document.shape_path(id)); match path { Some(p) => { d.pen = p; d.pen_done = true; d.tool = Tool::Pen; true } None => false } };
+        let loaded = { let mut d = self.doc.borrow_mut(); let path = d.document.active.and_then(|id| d.document.shape_path(id)); match path { Some(p) => { d.pen = p; d.pen_done = true; true } None => false } };
         if loaded { self.set_tool(Tool::Pen); self.notify("Drag the points and handles, then Apply Path to Shape."); } else { self.notify("The active layer is not a shape made from a path."); }
         self.area.queue_draw();
     }
@@ -1522,14 +1557,16 @@ impl Canvas {
             };
             // Shift-click paints a straight line from where the last stroke ended.
             let start = if shift { d.last_brush_point.unwrap_or(point) } else { point };
+            if d.document.mask_target() && matches!(d.tool, Tool::Heal | Tool::Clone) { drop(d); self.notify("Heal, Clone and the Pattern Stamp work on the layer's pixels; target the layer rather than its mask."); return }
             let mask = d.document.mask_target() && matches!(d.tool, Tool::Brush | Tool::Eraser | Tool::Blur);
-            let white = d.mask_paint_white && d.tool == Tool::Brush;
+            // On a mask every tool paints the chosen tone (the Eraser included), as the reference does.
+            let white = d.mask_paint_white;
             let warp = match (d.tool, d.blur_mode) { (Tool::Blur, 0) => Some(crate::warp::WarpMode::Liquify), (Tool::Blur, 2) => Some(crate::warp::WarpMode::Smudge), _ => None };
             // On a mask the Smear tool always blurs: Liquify and Smudge move pixels, which a mask has none of.
             let mut result = if mask && d.tool == Tool::Blur { d.document.begin_mask_blur(start, &settings) }
                 else if let Some(mode) = warp { d.document.begin_warp(start, &settings, mode) }
                 else if mask { d.document.begin_mask_stroke(start, &settings, white) } else { d.document.begin_stroke(start, &settings, kind) };
-            if result.is_ok() && start != point { result = d.document.continue_stroke(point); }
+            if result.is_ok() && start != point { result = d.document.continue_stroke(point); if result.is_err() { d.document.cancel_stroke(); } }
             if result.is_ok() { d.last_brush_point = Some(point); }
             result
         };
@@ -1669,6 +1706,8 @@ impl Canvas {
                 drop(d); self.rail.sync_palette(fg, bg); self.options.sync_gradient(); if mask { self.options.sync_mask_paint(&self.doc); } return true;
             }
             'U' if d.tool == Tool::Shape => { d.shape_ellipse = !d.shape_ellipse; let e = d.shape_ellipse; drop(d); self.options.sync_shape_kind(e); return true; }
+            'M' if d.tool == Tool::Marquee => { d.marquee_ellipse = !d.marquee_ellipse; drop(d); self.options.update(Tool::Marquee); return true; }
+            'L' if d.tool == Tool::Lasso => { d.lasso_polygonal = !d.lasso_polygonal; drop(d); self.options.update(Tool::Lasso); return true; }
             _ => {}
         }
         if !d.tool.is_brush() { return false; }

@@ -29,6 +29,7 @@ struct Reader<'a> { data: &'a [u8], pos: usize }
 
 impl<'a> Reader<'a> {
     fn need(&self, n: usize) -> Result<()> { if self.pos + n > self.data.len() { bail!("the file ends early"); } Ok(()) }
+    fn rest(&self) -> &'a [u8] { &self.data[self.pos.min(self.data.len())..] }
     fn u8(&mut self) -> Result<u8> { self.need(1)?; let v = self.data[self.pos]; self.pos += 1; Ok(v) }
     fn u16(&mut self) -> Result<u16> { self.need(2)?; let v = u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]); self.pos += 2; Ok(v) }
     fn i16(&mut self) -> Result<i16> { Ok(self.u16()? as i16) }
@@ -107,6 +108,34 @@ fn pack_bits(row: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// zlib data inflated to at least `expected` bytes (and no more than a few times that, against a bomb).
+fn inflate(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::with_capacity(expected);
+    let mut decoder = flate2::read::ZlibDecoder::new(data).take(expected as u64 + 64);
+    decoder.read_to_end(&mut out).context("inflating a zipped channel")?;
+    if out.len() < expected { bail!("a zipped channel holds {} of {expected} bytes", out.len()); }
+    Ok(out)
+}
+
+/// Undoes Photoshop's row prediction: each sample is a delta from the one before it in its row. 32-bit
+/// rows are also stored byte-plane by byte-plane and are put back in sample order.
+fn unpredict(raw: &mut [u8], rows: usize, cols: usize, bytes: usize) {
+    let stride = cols * bytes;
+    for y in 0..rows {
+        let row = &mut raw[y * stride..(y + 1) * stride];
+        match bytes {
+            1 => { for x in 1..cols { row[x] = row[x].wrapping_add(row[x - 1]); } }
+            2 => { for x in 1..cols { let prev = u16::from_be_bytes([row[(x - 1) * 2], row[(x - 1) * 2 + 1]]); let cur = u16::from_be_bytes([row[x * 2], row[x * 2 + 1]]).wrapping_add(prev); row[x * 2..x * 2 + 2].copy_from_slice(&cur.to_be_bytes()); } }
+            _ => {
+                for x in 1..stride { row[x] = row[x].wrapping_add(row[x - 1]); }
+                let planes = row.to_vec();
+                for x in 0..cols { for b in 0..4 { row[x * 4 + b] = planes[b * cols + x]; } }
+            }
+        }
+    }
+}
+
 /// Reads one channel's image data (`compression` already consumed) of `rows` x `cols` samples of `depth` bits,
 /// returning 8-bit samples.
 fn read_channel(r: &mut Reader, rows: usize, cols: usize, depth: u16, compression: u16) -> Result<Vec<u8>> {
@@ -122,7 +151,14 @@ fn read_channel(r: &mut Reader, rows: usize, cols: usize, depth: u16, compressio
                 unpack_bits(packed, &mut raw[y * cols * bytes..(y + 1) * cols * bytes])?;
             }
         }
-        other => bail!("compression {other} (zip) is not supported yet"),
+        2 | 3 => {
+            // ZIP (zlib), with per-row prediction for 3: what Photoshop writes for 16- and 32-bit layers.
+            let expected = rows * cols * bytes;
+            let inflated = inflate(r.rest(), expected)?;
+            raw.copy_from_slice(&inflated[..expected]);
+            if compression == 3 { unpredict(&mut raw, rows, cols, bytes); }
+        }
+        other => bail!("compression {other} is not supported"),
     }
     Ok(match depth {
         8 => raw,
@@ -179,7 +215,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
     r.skip(color_mode_len)?;
     // Image resources: only the resolution matters here.
     let resources_len = r.u32()? as usize;
-    let resources_end = r.pos + resources_len;
+    let resources_end = (r.pos + resources_len).min(data.len());
     let mut resolution = 72.0;
     while r.pos + 12 <= resources_end {
         if r.bytes(4)? != b"8BIM" { break; }
@@ -198,7 +234,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
     r.pos = resources_end;
     // Layer and mask information.
     let layer_mask_len = r.u32()? as usize;
-    let layer_mask_end = r.pos + layer_mask_len;
+    let layer_mask_end = (r.pos + layer_mask_len).min(data.len());
     let mut raw_layers: Vec<RawLayer> = Vec::new();
     if layer_mask_len > 0 {
         let layer_info_len = r.u32()? as usize;
@@ -225,7 +261,7 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 let flags = r.u8()?;
                 r.skip(1)?;
                 let extra_len = r.u32()? as usize;
-                let extra_end = r.pos + extra_len;
+                let extra_end = (r.pos + extra_len).min(data.len());
                 let mask_len = r.u32()? as usize;
                 let mut mask = None;
                 if mask_len >= 20 {
@@ -333,18 +369,21 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
         // Bottom-up records; a folder's divider comes first, its own record last.
         let mut depth = 0usize;
         let mut order: Vec<Layer> = Vec::new();
-        let mut base_by_parent: HashMap<Option<Uuid>, Option<Uuid>> = HashMap::new();
+        // One clipping base per open folder: the nearest unclipped pixel layer below, in that folder.
+        let mut bases: Vec<Option<Uuid>> = vec![None];
         let mut pending_parent: Vec<Vec<Uuid>> = vec![Vec::new()];
         for raw in raw_layers {
             match raw.section {
-                3 => { depth += 1; if depth > 64 { bail!("folders nest too deeply"); } pending_parent.push(Vec::new()); continue; }
+                3 => { depth += 1; if depth > 64 { bail!("folders nest too deeply"); } pending_parent.push(Vec::new()); bases.push(None); continue; }
                 1 | 2 => {
                     if depth == 0 { warnings.push(format!("folder \"{}\" closes nothing and was skipped", raw.name)); continue; }
                     depth -= 1;
                     let children = pending_parent.pop().unwrap_or_default();
+                    bases.pop();
                     let id = Uuid::new_v4();
                     let mut folder = record(id, &raw.name, (0.0, 0.0, width as f64, height as f64), None, raw.hidden, 255, BlendMode::Normal);
                     folder.is_group = Some(true);
+                    if raw.opacity != 255 || raw.blend != BlendMode::Normal { warnings.push(format!("folder \"{}\" had its own opacity or blend mode; folders here are plain, so it opens at full opacity, Normal", raw.name)); }
                     if let Some(m) = raw.mask { if let Some(mask) = build_mask(&raw, m, (0, 0, height, width), &mut warnings)? { masks.insert(id, mask); folder.mask_file = Some(format!("{}.mask.png", upper(id))); if m.5 & 2 != 0 { folder.mask_enabled = Some(false); } } }
                     for child in children { if let Some(l) = order.iter_mut().find(|l| l.id == child) { l.parent_id = Some(id); } }
                     if let Some(p) = pending_parent.last_mut() { p.push(id); }
@@ -391,19 +430,17 @@ pub fn read(path: &Path) -> Result<(Project, Vec<String>)> {
                 if let Some(mask) = build_mask(&raw, m, over, &mut warnings)? { masks.insert(id, mask); layer.mask_file = Some(format!("{}.mask.png", upper(id))); if m.5 & 2 != 0 { layer.mask_enabled = Some(false); } }
             }
             // Clipping: to the nearest unclipped pixel layer below in the same group.
-            let parent_key = pending_parent.len() - 1;
             if raw.clipping {
-                let base = base_by_parent.get(&Some(Uuid::from_u128(parent_key as u128))).copied().flatten();
-                match base { Some(b) => layer.mask_source_id = Some(b), None => warnings.push(format!("layer \"{}\" is clipped to nothing that was opened", raw.name)) }
+                match bases.last().copied().flatten() { Some(b) => layer.mask_source_id = Some(b), None => warnings.push(format!("layer \"{}\" is clipped to nothing that was opened", raw.name)) }
             } else if !is_adjustment {
-                base_by_parent.insert(Some(Uuid::from_u128(parent_key as u128)), Some(id));
+                if let Some(slot) = bases.last_mut() { *slot = Some(id); }
             }
             if let Some(p) = pending_parent.last_mut() { p.push(id); }
             order.push(layer);
         }
         layers = order;
     }
-    let manifest = Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: layers.last().map(|l| l.id), layers };
+    let manifest = Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: layers.last().map(|l| l.id), layers, guides: None };
     // Run the file's rules over what was built, so a PSD can never make an invalid project.
     let manifest = Manifest::parse(&serde_json::to_vec(&manifest)?)?;
     Ok((Project { path: std::path::PathBuf::new(), manifest, images, masks }, warnings))
@@ -488,6 +525,7 @@ pub fn write(document: &mut crate::document::Document, path: &Path) -> Result<Ve
         if depth > 64 { return Ok(()); }
         for layer in children.get(&parent).cloned().unwrap_or_default() {
             if layer.is_group() {
+                if layer.is_artboard() { warnings.push(format!("artboard \"{}\" was written as a plain folder; its frame, clipping and background are not carried (Photoshop artboards are not written yet)", layer.name)); }
                 recs.push(Rec::Divider);
                 emit(Some(layer.id), children, document, recs, warnings, depth + 1)?;
                 let mask = rasterize_mask(document, &layer)?;

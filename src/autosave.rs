@@ -86,6 +86,8 @@ pub fn recoverable() -> Vec<Recoverable> {
     let mut out: Vec<Recoverable> = entries.filter_map(|e| {
         let path = e.ok()?.path();
         if path.extension().is_none_or(|x| x != "comp") || !path.join("manifest.json").exists() { return None; }
+        // One this build cannot open (a newer format, a damaged file) would sit on the start page for good.
+        if std::fs::read(path.join("manifest.json")).ok().and_then(|b| crate::format::Manifest::parse(&b).ok()).is_none() { return None; }
         let stem = path.file_stem()?.to_string_lossy().to_string();
         let id = Uuid::parse_str(&stem).ok()?;
         let title = std::fs::read_to_string(title_path(id)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Untitled".into());

@@ -5,7 +5,9 @@
 pub struct History<S> {
     past: Vec<Entry<S>>,
     future: Vec<Entry<S>>,
-    pending: Option<(String, S)>,
+    /// One snapshot per open edit, outermost first: a nested edit that is abandoned goes back to its own
+    /// start without touching the outer one's work.
+    pending: Vec<(String, S)>,
     depth: usize,
     revision: u64,
     saved: u64,
@@ -29,7 +31,7 @@ const MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500)
 
 impl<S: Clone + PartialEq> History<S> {
     pub fn new(entry_limit: usize, byte_limit: usize) -> Self {
-        History { past: Vec::new(), future: Vec::new(), pending: None, depth: 0, revision: 0, saved: 0, next: 1, entry_limit, byte_limit }
+        History { past: Vec::new(), future: Vec::new(), pending: Vec::new(), depth: 0, revision: 0, saved: 0, next: 1, entry_limit, byte_limit }
     }
 
     pub fn can_undo(&self) -> bool { self.depth == 0 && !self.past.is_empty() }
@@ -48,18 +50,21 @@ impl<S: Clone + PartialEq> History<S> {
         (self.past.iter().map(|e| e.name.clone()).collect(), self.future.iter().rev().map(|e| e.name.clone()).collect())
     }
 
-    /// Starts an edit; nested begins fold into the outermost one.
+    /// Starts an edit; nested begins fold into the outermost one (only it makes a step).
     pub fn begin(&mut self, name: &str, state: S) {
-        if self.depth == 0 { self.pending = Some((name.to_string(), state)); }
+        self.pending.push((name.to_string(), state));
         self.depth += 1;
     }
 
-    /// Abandons the edit in progress, returning the state it started from when the outermost edit ends.
+    /// How many edits are open.
+    pub fn depth(&self) -> usize { self.depth }
+
+    /// Abandons the innermost edit in progress, returning the state it started from so the caller can put
+    /// it back; an outer edit stays open with its own work intact.
     pub fn cancel(&mut self) -> Option<S> {
         if self.depth == 0 { return None; }
         self.depth -= 1;
-        if self.depth > 0 { return None; }
-        self.pending.take().map(|(_, before)| before)
+        self.pending.pop().map(|(_, before)| before)
     }
 
     /// Ends an edit. An edit that changed nothing leaves history (and redo) alone. `bytes` measures what a
@@ -71,8 +76,9 @@ impl<S: Clone + PartialEq> History<S> {
     pub fn end_with(&mut self, state: S, merge: bool, bytes: impl Fn(&[&S], &S) -> usize) {
         if self.depth == 0 { return; }
         self.depth -= 1;
+        let popped = self.pending.pop();
         if self.depth > 0 { return; }
-        let Some((name, before)) = self.pending.take() else { return };
+        let Some((name, before)) = popped else { return };
         if before == state { return; }
         let now = std::time::Instant::now();
         if merge && self.future.is_empty() {
@@ -123,5 +129,25 @@ impl<S: Clone + PartialEq> History<S> {
             else if !self.future.is_empty() { self.future.remove(0); }
             else { break; }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_nested_cancel_restores_its_own_start_and_keeps_the_outer_edit() {
+        let mut h: History<i32> = History::new(10, 1 << 20);
+        let bytes = |_: &[&i32], _: &i32| 0usize;
+        h.begin("outer", 0);
+        h.begin("inner", 5);
+        assert_eq!(h.depth(), 2);
+        assert_eq!(h.cancel(), Some(5), "the inner edit hands back its own start");
+        assert_eq!(h.depth(), 1);
+        assert!(h.is_editing());
+        h.end(7, bytes);
+        assert_eq!(h.depth(), 0);
+        assert_eq!(h.undo_name(), Some("outer"));
+        assert_eq!(h.undo(), Some(0), "one step, from the outer edit's start");
     }
 }

@@ -285,7 +285,7 @@ fn free_transform_refuses_an_oversized_merge_and_grows_a_mask_white() {
     d.begin_free_transform().unwrap();
     let float = d.floating.unwrap().0;
     let mut ft = d.renderer.layer(float).transform;
-    ft.size = compositor::format::Size(40_000.0, 40_000.0);
+    ft.size = compositor::format::Size(30_000.0, 30_000.0);
     d.set_transform(float, ft, "Scale");
     assert!(d.commit_free_transform().is_err(), "too large to land");
     assert!(d.floating.is_none() && d.renderer.layers().len() == 2, "everything back as before Ctrl+T");
@@ -1115,5 +1115,152 @@ fn round_eight_fixes() {
     assert_eq!(rgb_at(&mut g, 3, 10), [0, 0, 0, 255]);
     assert_eq!(rgb_at(&mut g, 4, 10), [0, 255, 0, 255]);
     match saved_home { Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) }, None => unsafe { std::env::remove_var("XDG_DATA_HOME") } }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The whole-project audit: edits that fail are abandoned rather than left open, geometry moves boards
+/// and guides, adjustments treat soft pixels right, HiDPI compositing matches plain, painting refuses
+/// what it should, and files keep their guides and resolution.
+#[test]
+fn whole_project_audit_fixes() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use compositor::filters::{Adjustment, Kind, Levels, Range, Settings};
+    // 1. A refused Generative Expand leaves no edit open: undo keeps working, the next edit is a step.
+    let mut d = Document::blank(20, 20, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    assert!(d.expand_canvas_for_fill(30_000, 30_000, 4).is_err());
+    assert!(!d.busy_editing(), "the failed expand did not leave an edit open");
+    assert!(d.can_undo());
+    d.add_shape_layer(false, (0.0, 0.0, 5.0, 5.0), [0.0, 1.0, 0.0], 0.0).unwrap();
+    assert_eq!(d.undo_name(), Some("Rectangle"), "the next edit is recorded");
+    // A nested edit that fails goes back to its own start and leaves the outer one's work.
+    d.begin_edit("Outer");
+    d.add_shape_layer(false, (0.0, 0.0, 5.0, 5.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let count = d.renderer.layers().len();
+    let failed: Result<(), anyhow::Error> = d.edited("Inner", |dd| { dd.add_shape_layer(false, (0.0, 0.0, 5.0, 5.0), [0.5; 3], 0.0)?; anyhow::bail!("no") });
+    assert!(failed.is_err());
+    assert_eq!(d.renderer.layers().len(), count, "the inner layer is gone, the outer one stays");
+    assert!(d.busy_editing(), "the outer edit is still open");
+    d.end_edit();
+    assert_eq!(d.undo_name(), Some("Outer"));
+    // 2. A layer cannot be sized past the canvas limit, so Fill cannot ask for a gigantic mask.
+    let big = compositor::format::Transform { origin: compositor::format::Point(0.0, 0.0), size: compositor::format::Size(300_000.0, 300_000.0), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
+    assert!(!big.is_valid());
+    assert!(compositor::raster::a8_filled(30_000, 30_000, 0).is_err(), "a 900-megapixel mask is refused before it is allocated");
+
+    // 3. Undo waits for a pixel drag to end.
+    let mut m = Document::blank(20, 20, 72.0).unwrap();
+    m.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    m.select_box(2.0, 2.0, 5.0, 5.0, false, Mode::Replace, false).unwrap();
+    assert!(m.begin_pixel_move(false).unwrap());
+    assert!(m.busy_editing());
+    assert!(!m.undo(), "no undo while pixels are being dragged");
+    m.finish_pixel_move().unwrap();
+    assert!(!m.busy_editing());
+
+    // 4 and 5. Canvas Size, Image Size and Flip Canvas carry artboard frames and guides; a board drawn
+    // around a layer past the top left edge lands on its layer.
+    let mut a = Document::blank(100, 100, 72.0).unwrap();
+    let board = a.add_artboard("B", (10.0, 10.0, 20.0, 20.0), Some([1.0; 3])).unwrap();
+    a.guides_v.push(50.0);
+    a.canvas_size(120, 120, 8, None, None, "Canvas Size").unwrap();
+    assert_eq!(a.renderer.layer(board).artboard.as_ref().map(|b| b.rect()), Some((30.0, 30.0, 20.0, 20.0)), "the frame moved with the anchor");
+    assert_eq!(a.guides_v, vec![70.0]);
+    a.image_size(240, 240, 72.0, compositor::format::Sampling::High).unwrap();
+    assert_eq!(a.renderer.layer(board).artboard.as_ref().map(|b| b.rect()), Some((60.0, 60.0, 40.0, 40.0)), "the frame scaled");
+    assert_eq!(a.guides_v, vec![140.0]);
+    a.flip_canvas(true).unwrap();
+    assert_eq!(a.renderer.layer(board).artboard.as_ref().map(|b| b.rect()), Some((140.0, 60.0, 40.0, 40.0)), "the frame mirrored");
+    assert_eq!(a.guides_v, vec![100.0]);
+    let mut n = Document::blank(50, 50, 72.0).unwrap();
+    let off = n.add_shape_layer(false, (-20.0, -10.0, 30.0, 30.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    n.selected = [off].into_iter().collect();
+    n.select_layer(Some(off));
+    let wrap = n.artboard_from_layers("Wrap").unwrap();
+    let frame = n.renderer.layer(wrap).artboard.as_ref().map(|b| b.rect()).unwrap();
+    let bounds = n.renderer.layer(off).transform.bounds();
+    assert_eq!((frame.0, frame.1), (bounds.0, bounds.1), "the board sits on its layer after the canvas grew: {frame:?} vs {bounds:?}");
+
+    // 6. Levels on a half-transparent pixel adjusts its color once, not twice.
+    let mut l = Document::blank(4, 4, 72.0).unwrap();
+    let sheet = compositor::raster::new_argb(4, 4).unwrap();
+    { let cr = cairo::Context::new(&sheet).unwrap(); cr.set_source_rgba(0.5, 0.5, 0.5, 0.5); cr.paint().unwrap(); }
+    let soft = l.add_image_surface(sheet, "Soft", (0.0, 0.0), (4.0, 4.0)).unwrap();
+    let _ = soft;
+    let adj = l.add_adjustment("Levels").unwrap();
+    let mut levels = Levels::default();
+    levels.ranges[0] = Range { white: 128.0, ..Range::default() };
+    assert!(l.set_adjustment(adj, &Adjustment::Levels(levels), true));
+    let px = rgb_at(&mut l, 2, 2);
+    assert_eq!(px[3], 128);
+    assert!((px[0] as i32 - 128).abs() <= 2, "straight gray 128 at white point 128 is white: premultiplied 128, got {px:?}");
+    // High Pass leaves a uniform color neutral beside transparency.
+    let mut h = Document::blank(30, 20, 72.0).unwrap();
+    h.add_shape_layer(false, (0.0, 0.0, 15.0, 20.0), [0.5, 0.5, 0.5], 0.0).unwrap();
+    let mut s = Settings::default();
+    s.high_pass = 4.0;
+    h.apply_filter(Kind::HighPass, &s).unwrap();
+    let edge = rgb_at(&mut h, 13, 10);
+    assert!((edge[0] as i32 - 127).abs() <= 6, "no bright rim at a cutout edge: {edge:?}");
+
+    // 7. A clipping stack and an adjustment composite the same on a 2x surface as on a plain one.
+    let mut c = Document::blank(20, 20, 72.0).unwrap();
+    let base = c.add_shape_layer(false, (5.0, 5.0, 10.0, 10.0), [1.0, 0.0, 0.0], 0.0).unwrap();
+    let over = c.add_shape_layer(false, (0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    c.toggle_clipping(over);
+    let inv = c.add_adjustment("Levels").unwrap();
+    let mut flip = Levels::default();
+    flip.ranges[0] = Range { output_black: 255.0, output_white: 0.0, ..Range::default() };
+    assert!(c.set_adjustment(inv, &Adjustment::Levels(flip), true));
+    let plain = rgb_at(&mut c, 10, 10);
+    let outside = rgb_at(&mut c, 2, 2);
+    assert_eq!(outside[3], 0, "clipped away outside the base");
+    assert_eq!(plain, [255, 255, 0, 255], "blue clipped to the base, then inverted");
+    let hi = compositor::raster::new_argb(40, 40).unwrap();
+    hi.set_device_scale(2.0, 2.0);
+    { let cr = cairo::Context::new(&hi).unwrap(); cr.translate(2.0, 3.0); cr.rectangle(0.0, 0.0, 20.0, 20.0); cr.clip(); c.renderer.draw(&cr).unwrap(); }
+    let (at, away) = compositor::raster::with_bytes(&hi, |b, stride| { let p = |x: usize, y: usize| { let i = y * stride + x * 4; [b[i + 2], b[i + 1], b[i], b[i + 3]] }; (p(24, 26), p(8, 10)) }).unwrap();
+    assert_eq!(at, plain, "the same pixel at 2x, panned");
+    assert_eq!(away[3], 0);
+    let _ = base;
+
+    // 8. Painting: a hidden layer refuses, a stretched layer is rasterized square first, and a wild
+    // coordinate cannot start an endless walk.
+    let mut p = Document::blank(40, 40, 72.0).unwrap();
+    let hidden = p.add_shape_layer(false, (0.0, 0.0, 40.0, 40.0), [1.0; 3], 0.0).unwrap();
+    p.set_visible(hidden, false);
+    let mut brush = compositor::brush::BrushSettings::default();
+    brush.diameter = 6.0;
+    assert!(p.begin_stroke((10.0, 10.0), &brush, compositor::document::StrokeKind::Paint).is_err(), "no painting on a hidden layer");
+    p.set_visible(hidden, true);
+    let sheet = compositor::raster::new_argb(10, 10).unwrap();
+    { let cr = cairo::Context::new(&sheet).unwrap(); cr.set_source_rgb(0.0, 1.0, 0.0); cr.paint().unwrap(); }
+    let stretched = p.add_image_surface(sheet, "Wide", (0.0, 0.0), (40.0, 10.0)).unwrap();
+    p.select_layer(Some(stretched));
+    p.replay_stroke(&[(10.0, 5.0), (1e300, 5.0), (12.0, 5.0)], &brush, compositor::document::StrokeKind::Paint).unwrap();
+    let t = p.renderer.layer(stretched).transform;
+    let (iw, ih) = p.renderer.image_size(stretched).unwrap();
+    assert!((t.size.0 / iw as f64 - t.size.1 / ih as f64).abs() < 1e-9, "the layer's pixels are square after painting: {t:?} over {iw}x{ih}");
+    assert!(!p.busy_editing(), "the stroke closed");
+
+    // 9. Guides and the file's resolution survive a save and load.
+    let dir = std::env::temp_dir().join(format!("compy-audit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut g = Document::blank(10, 10, 300.0).unwrap();
+    g.guides_v = vec![3.0];
+    g.guides_h = vec![4.0, 5.0];
+    let manifest = g.manifest();
+    let back = compositor::format::Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_eq!(back.guides.as_ref().map(|x| (x.vertical.clone(), x.horizontal.clone())), Some((vec![3.0], vec![4.0, 5.0])));
+    let png = dir.join("scan.png");
+    g.export_png(&png).unwrap();
+    let opened = Document::open_image(&png).unwrap();
+    assert!((opened.renderer.resolution() - 300.0).abs() < 1.0, "the PNG's pHYs came back as {}", opened.renderer.resolution());
+    // A Pen shape makes the file version 8, which the Mac refuses honestly; plain files stay 7.
+    assert_eq!(manifest.version, 7);
+    let mut v = Document::blank(10, 10, 72.0).unwrap();
+    let path = compositor::path::Path { anchors: [(1.0, 1.0), (8.0, 1.0), (8.0, 8.0)].iter().map(|&p| compositor::path::Anchor::corner(p)).collect(), closed: true };
+    v.add_path_shape_layer(&path, [1.0, 0.0, 0.0]).unwrap();
+    assert_eq!(v.manifest().version, 8);
     let _ = std::fs::remove_dir_all(&dir);
 }

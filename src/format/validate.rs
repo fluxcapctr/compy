@@ -12,7 +12,10 @@ pub fn manifest(m: &Manifest) -> Result<(), ProjectError> {
     if let Some(r) = m.resolution {
         if !r.is_finite() || !(1.0..=9600.0).contains(&r) { return Err(ProjectError::Invalid); }
     }
-    if !(1..=MAX_SIDE).contains(&m.width) || !(1..=MAX_SIDE).contains(&m.height) || m.layers.len() > MAX_LAYERS {
+    if let Some(g) = &m.guides {
+        if g.vertical.len() + g.horizontal.len() > 1000 || g.vertical.iter().chain(&g.horizontal).any(|v| !v.is_finite() || v.abs() > 1_000_000.0) { return Err(ProjectError::Invalid); }
+    }
+    if !(1..=MAX_SIDE).contains(&m.width) || !(1..=MAX_SIDE).contains(&m.height) || m.width * m.height > 100_000_000 || m.layers.len() > MAX_LAYERS {
         return Err(ProjectError::TooLarge);
     }
     for layer in &m.layers {

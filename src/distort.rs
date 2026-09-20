@@ -109,8 +109,8 @@ pub fn warp(image: &ImageSurface, transform: &Transform, c: &Corners, is_mask: b
         let mut acc = [0.0; 4];
         for (dy, wy) in [(0, 1.0 - fy), (1, fy)] {
             for (dx, wx) in [(0, 1.0 - fx), (1, fx)] {
-                let (sx, sy) = (x0 as i64 + dx, y0 as i64 + dy);
-                if sx < 0 || sy < 0 || sx >= sw as i64 || sy >= sh as i64 { continue; }
+                // The edge pixel repeats past the edge, so the outermost half pixel keeps its strength.
+                let (sx, sy) = ((x0 as i64 + dx).clamp(0, sw as i64 - 1), (y0 as i64 + dy).clamp(0, sh as i64 - 1));
                 let i = (sy as usize * sw + sx as usize) * channels;
                 let w = wx * wy;
                 for k in 0..channels { acc[k] += source[i + k] as f64 * w; }

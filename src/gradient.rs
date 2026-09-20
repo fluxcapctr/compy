@@ -137,7 +137,9 @@ fn lerp_stops(stops: &[(f64, [f64; 3])], t: f64) -> [f64; 3] {
 /// `diamond` grows a square from it, both reaching 1 at the end's distance.
 pub fn shape_t(shape: Shape, start: (f64, f64), end: (f64, f64), p: (f64, f64)) -> f64 {
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
-    let len = dx.hypot(dy).max(1e-6);
+    let len = dx.hypot(dy);
+    // No length: the start color everywhere, whatever the shape.
+    if len < 1e-9 { return 0.0; }
     let (px, py) = (p.0 - start.0, p.1 - start.1);
     match shape {
         Shape::Angle => {

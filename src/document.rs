@@ -34,7 +34,7 @@ pub struct Document {
     pixel_move: Option<PixelMove>,
     /// The background removal model's mask for the image it was made from (by surface pointer), so a slider
     /// only redoes the refining.
-    matte_cache: Option<(usize, Vec<f32>)>,
+    matte_cache: Option<(ImageSurface, Vec<f32>)>,
     /// Vertical guides (x) and horizontal guides (y) in document pixels, and whether they show. Not saved.
     pub guides_v: Vec<f64>,
     pub guides_h: Vec<f64>,
@@ -112,9 +112,10 @@ impl Document {
         });
         let document_id = project.manifest.document_id;
         let path = if project.path.as_os_str().is_empty() { None } else { Some(project.path.clone()) };
+        let (guides_v, guides_h) = project.manifest.guides.as_ref().map(|g| (g.vertical.clone(), g.horizontal.clone())).unwrap_or_default();
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v, guides_h, show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -127,6 +128,8 @@ impl Document {
         self.active = state.active;
         self.selected.retain(|id| self.renderer.layer_index(*id).is_some());
         if let Some(a) = self.active { self.selected.insert(a); }
+        // Painting the mask only makes sense while the active layer has one.
+        if self.active.and_then(|a| self.renderer.mask(a)).is_none() { self.mask_target = false; }
     }
 
     // MARK: Selecting layers
@@ -171,6 +174,15 @@ impl Document {
     }
 
     pub fn begin_edit(&mut self, name: &str) { let state = self.state(); self.history.begin(name, state); }
+    /// Runs `f` as one edit named `name`: ended when it succeeds, abandoned (the document put back) when it
+    /// fails, so an early `?` can never leave an edit open.
+    pub fn edited<T>(&mut self, name: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.begin_edit(name);
+        match f(self) { Ok(v) => { self.end_edit(); Ok(v) } Err(e) => { self.abort_edit(); Err(e) } }
+    }
+    /// Abandons every edit opened since the history was `depth` deep (a guard around code that may fail
+    /// partway through its own begin/end pairs).
+    fn unwind_edits_to(&mut self, depth: usize) { while self.history.depth() > depth { self.abort_edit(); } }
     /// Abandons the edit in progress and puts the document back as it was when the edit began.
     pub fn abort_edit(&mut self) {
         if let Some(before) = self.history.cancel() { self.apply(&before); }
@@ -211,8 +223,8 @@ impl Document {
         if steps < 0 { for _ in 0..(-steps) { if !self.undo() { break; } } } else { for _ in 0..steps { if !self.redo() { break; } } }
     }
 
-    pub fn undo(&mut self) -> bool { match self.history.undo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
-    pub fn redo(&mut self) -> bool { match self.history.redo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
+    pub fn undo(&mut self) -> bool { if self.preview_busy() { return false; } match self.history.undo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
+    pub fn redo(&mut self) -> bool { if self.preview_busy() { return false; } match self.history.redo() { Some(state) => { self.edit_serial += 1; self.apply(&state); true } None => false } }
 
     /// Sets the selection as one undo step; nothing happens when it is unchanged.
     pub fn set_selection(&mut self, selection: Option<Selection>, name: &str) {
@@ -503,11 +515,10 @@ impl Document {
     /// a layer mask that hides the background (what the layer already masks stays hidden: `subjectMask`).
     pub fn remove_background(&mut self, settings: &crate::matte::MatteSettings, commit: bool) -> Result<()> {
         let Some((id, image)) = self.active_image() else { bail!("Select an image layer first.") };
-        let key = image.to_raw_none() as usize;
-        if self.matte_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+        if self.matte_cache.as_ref().is_none_or(|(k, _)| k.to_raw_none() != image.to_raw_none()) {
             let mask = crate::matte::subject_mask(&image)?;
             if mask.iter().all(|v| *v < 0.05) { bail!("No foreground subject was detected in this layer. Try an image with a more distinct subject."); }
-            self.matte_cache = Some((key, mask));
+            self.matte_cache = Some((image.clone(), mask));
         }
         let raw = self.matte_cache.as_ref().unwrap().1.clone();
         let (w, h) = (image.width() as usize, image.height() as usize);
@@ -646,13 +657,15 @@ impl Document {
         let (ow, oh) = (self.width(), self.height());
         if width < ow || height < oh { bail!("Generative Expand only grows the canvas; use Canvas Size to shrink it."); }
         if width == ow && height == oh { bail!("The canvas is already that size."); }
-        self.begin_edit("Generative Expand");
-        self.canvas_size(width, height, anchor, None, None, "Generative Expand")?;
-        let dx = (((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor();
-        let dy = (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor();
-        let inside = Selection::from_shape(width, height, false, |cr| { cr.rectangle(dx, dy, ow as f64, oh as f64); cr.fill()?; Ok(()) })?;
-        self.selection = Some(inside.inverted()?);
-        self.end_edit();
+        if width as i64 * height as i64 > 100_000_000 { bail!("A canvas can hold up to 100 megapixels."); }
+        self.edited("Generative Expand", |d| {
+            d.canvas_size(width, height, anchor, None, None, "Generative Expand")?;
+            let dx = (((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor();
+            let dy = (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor();
+            let inside = Selection::from_shape(width, height, false, |cr| { cr.rectangle(dx, dy, ow as f64, oh as f64); cr.fill()?; Ok(()) })?;
+            d.selection = Some(inside.inverted()?);
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -662,6 +675,25 @@ impl Document {
     /// document: what Copy puts on the clipboard.
     pub fn copy_layer_pixels(&mut self) -> Result<Option<(Vec<u8>, (i32, i32, i32, i32))>> {
         match self.selected_pixels()? { Some((out, rect)) => Ok(Some((crate::png_io::png_bytes(&out)?, rect))), None => Ok(None) }
+    }
+
+    /// `copy_layer_pixels` with the picture scaled so neither side passes `max_side` (what an image model
+    /// takes); the rectangle stays in document pixels, where the result lands.
+    pub fn copy_layer_pixels_scaled(&mut self, max_side: usize) -> Result<Option<(Vec<u8>, (i32, i32, i32, i32))>> {
+        let Some((out, rect)) = self.selected_pixels()? else { return Ok(None) };
+        let (w, h) = (out.width() as f64, out.height() as f64);
+        let scale = (max_side as f64 / w.max(h)).min(1.0);
+        if scale >= 1.0 { return Ok(Some((crate::png_io::png_bytes(&out)?, rect))); }
+        let (sw, sh) = (((w * scale).round() as i32).max(1), ((h * scale).round() as i32).max(1));
+        let small = new_argb(sw, sh)?;
+        {
+            let cr = Context::new(&small)?;
+            cr.scale(sw as f64 / w, sh as f64 / h);
+            cr.set_source_surface(&out, 0.0, 0.0)?;
+            cr.source().set_filter(cairo::Filter::Good);
+            cr.paint()?;
+        }
+        Ok(Some((crate::png_io::png_bytes(&small)?, rect)))
     }
 
     /// The active layer's pixels inside the selection (or all of them), placed on the document, as a surface
@@ -702,12 +734,12 @@ impl Document {
         record.transform.size = crate::format::Size(w as f64, h as f64);
         record.image_file = Some(format!("{}.png", crate::format::upper(record.id)));
         let id = record.id;
-        self.begin_edit(if cut { "Layer Via Cut" } else { "Layer Via Copy" });
-        if cut && self.selection.is_some() { self.clear_selection(false)?; }
-        self.renderer.insert_layer(index, record, Some(surface), None);
-        self.select_layer(Some(id));
-        self.end_edit();
-        Ok(id)
+        self.edited(if cut { "Layer Via Cut" } else { "Layer Via Copy" }, |d| {
+            if cut && d.selection.is_some() { d.clear_selection(false)?; }
+            d.renderer.insert_layer(index, record, Some(surface), None);
+            d.select_layer(Some(id));
+            Ok(id)
+        })
     }
 
     // MARK: Free Transform
@@ -1147,11 +1179,12 @@ impl Document {
     pub fn crop(&mut self, rect: (f64, f64, f64, f64)) -> Result<()> {
         let (x, y, w, h) = (rect.0.round(), rect.1.round(), rect.2.round(), rect.3.round());
         if !(1.0..=30_000.0).contains(&w) || !(1.0..=30_000.0).contains(&h) || x.abs() > 1_000_000.0 || y.abs() > 1_000_000.0 { bail!("Crop sizes run from 1 to 30,000 pixels per side."); }
-        self.begin_edit("Crop");
-        self.canvas_size(w as i32, h as i32, 4, None, Some((-x, -y)), "Crop")?;
-        self.selection = None;
-        self.end_edit();
-        Ok(())
+        if w * h > 100_000_000.0 { bail!("A canvas can hold up to 100 megapixels."); }
+        self.edited("Crop", |d| {
+            d.canvas_size(w as i32, h as i32, 4, None, Some((-x, -y)), "Crop")?;
+            d.selection = None;
+            Ok(())
+        })
     }
 
     /// Image > Rotate Canvas: every layer turned by `degrees` (clockwise positive) about the canvas
@@ -1187,6 +1220,15 @@ impl Document {
             out
         };
         self.begin_edit("Rotate Canvas");
+        let depth = self.history.depth();
+        let result = self.rotate_canvas_body(angle, rad, (cx, cy), (ncx, ncy), (nw, nh), &turn);
+        if result.is_err() { self.unwind_edits_to(depth - 1); return result; }
+        self.end_edit();
+        Ok(())
+    }
+
+    fn rotate_canvas_body(&mut self, angle: f64, rad: f64, (cx, cy): (f64, f64), (ncx, ncy): (f64, f64), (nw, nh): (f64, f64), turn: &dyn Fn(Transform) -> Transform) -> Result<()> {
+        let (sn, cs) = rad.sin_cos();
         for layer in self.renderer.layers().to_vec() {
             self.renderer.set_layer_transform(layer.id, turn(layer.transform));
             if let Some(p) = layer.mask_placement { self.renderer.set_mask_placement(layer.id, Some(turn(p))); }
@@ -1204,9 +1246,12 @@ impl Document {
         if let Some(sel) = selection {
             self.selection = Some(Selection::from_shape(nw as i32, nh as i32, sel.antialiased, |cr| { cr.translate(ncx, ncy); cr.rotate(rad); cr.translate(-cx, -cy); cr.set_source_surface(&sel.mask, 0.0, 0.0)?; cr.paint()?; Ok(()) })?);
         }
-        self.guides_v.clear();
-        self.guides_h.clear();
-        self.end_edit();
+        // Guides turn with a quarter or half turn (vertical ones become horizontal); any other angle has no
+        // upright line to keep.
+        let (gv, gh) = (std::mem::take(&mut self.guides_v), std::mem::take(&mut self.guides_h));
+        if (angle - 90.0).abs() < 1e-9 { self.guides_h = gv.iter().map(|x| ncy + (x - cx)).collect(); self.guides_v = gh.iter().map(|y| ncx - (y - cy)).collect(); }
+        else if (angle - 270.0).abs() < 1e-9 { self.guides_h = gv.iter().map(|x| ncy - (x - cx)).collect(); self.guides_v = gh.iter().map(|y| ncx + (y - cy)).collect(); }
+        else if (angle - 180.0).abs() < 1e-9 { self.guides_v = gv.iter().map(|x| ncx - (x - cx)).collect(); self.guides_h = gh.iter().map(|y| ncy - (y - cy)).collect(); }
         Ok(())
     }
 
@@ -1234,6 +1279,7 @@ impl Document {
 
     /// The flattened document as lossless WebP bytes.
     pub fn webp_bytes(&mut self) -> Result<Vec<u8>> {
+        if self.width() > 16_383 || self.height() > 16_383 { bail!("WebP holds up to 16,383 pixels per side; this canvas is {} x {}. Export PNG, or use Export Sizes.", self.width(), self.height()); }
         let image = self.renderer.render_flat()?;
         let (rgba, w, h) = crate::png_io::straight_rgba(&image)?;
         let mut out = Vec::new();
@@ -1264,6 +1310,7 @@ impl Document {
     pub fn export_avif(&mut self, path: &std::path::Path, quality: f64) -> Result<()> {
         let encoder = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("avifenc")).find(|p| p.exists()));
         let Some(encoder) = encoder else { bail!("AVIF needs libavif's encoder: run `omarchy pkg add libavif`, then try again.") };
+        let path = &std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         let temp = path.with_extension(format!("avif-source-{}.png", std::process::id()));
         if let Err(e) = self.export_png(&temp) { let _ = std::fs::remove_file(&temp); return Err(e); }
         let q = quality.clamp(0.0, 100.0).round() as i64;
@@ -1442,7 +1489,10 @@ impl Document {
 
     /// Whether an edit is in progress that a tool call should not run across: a stroke or warp mid-drag,
     /// a Layer Style window previewing, or an open history edit (Free Transform).
-    pub fn busy_editing(&self) -> bool { self.stroke.is_some() || self.warp.is_some() || self.effects_preview.is_some() || self.history.is_editing() }
+    pub fn busy_editing(&self) -> bool { self.stroke.is_some() || self.warp.is_some() || self.effects_preview.is_some() || self.pixel_move.is_some() || self.history.is_editing() }
+    /// A live preview holds the document: a stroke, a warp, a pixel drag or the Layer Style window. Menu
+    /// commands wait for it (they would snapshot the preview into their undo step).
+    pub fn preview_busy(&self) -> bool { self.stroke.is_some() || self.warp.is_some() || self.effects_preview.is_some() || self.pixel_move.is_some() }
 
     /// Marching ants from a Pen path (Make Selection, Ctrl+Return); an open path closes itself.
     pub fn select_path(&mut self, path: &crate::path::Path, mode: Mode) -> Result<()> {
@@ -1581,21 +1631,24 @@ impl Document {
     pub fn flip_canvas(&mut self, horizontally: bool) -> Result<()> {
         let (w, h) = (self.width(), self.height());
         let axis = if horizontally { w as f64 / 2.0 } else { h as f64 / 2.0 };
-        self.begin_edit(if horizontally { "Flip Canvas Horizontal" } else { "Flip Canvas Vertical" });
-        for layer in self.renderer.layers().to_vec() {
-            self.renderer.set_layer_transform(layer.id, layer.transform.mirrored(horizontally, axis));
-            if let Some(p) = layer.mask_placement { self.renderer.set_mask_placement(layer.id, Some(p.mirrored(horizontally, axis))); }
-        }
-        if let Some(selection) = self.selection.clone() {
-            self.selection = Some(Selection::from_shape(w, h, selection.antialiased, |cr| {
-                if horizontally { cr.translate(w as f64, 0.0); cr.scale(-1.0, 1.0); } else { cr.translate(0.0, h as f64); cr.scale(1.0, -1.0); }
-                cr.set_source_surface(&selection.mask, 0.0, 0.0)?;
-                cr.paint()?;
-                Ok(())
-            })?);
-        }
-        self.end_edit();
-        Ok(())
+        self.edited(if horizontally { "Flip Canvas Horizontal" } else { "Flip Canvas Vertical" }, |d| {
+            for layer in d.renderer.layers().to_vec() {
+                d.renderer.set_layer_transform(layer.id, layer.transform.mirrored(horizontally, axis));
+                if let Some(p) = layer.mask_placement { d.renderer.set_mask_placement(layer.id, Some(p.mirrored(horizontally, axis))); }
+            }
+            // Artboard frames and guides mirror too.
+            d.map_artboards(|(x, y, bw, bh)| if horizontally { (w as f64 - x - bw, y, bw, bh) } else { (x, h as f64 - y - bh, bw, bh) });
+            if horizontally { for x in &mut d.guides_v { *x = w as f64 - *x; } } else { for y in &mut d.guides_h { *y = h as f64 - *y; } }
+            if let Some(selection) = d.selection.clone() {
+                d.selection = Some(Selection::from_shape(w, h, selection.antialiased, |cr| {
+                    if horizontally { cr.translate(w as f64, 0.0); cr.scale(-1.0, 1.0); } else { cr.translate(0.0, h as f64); cr.scale(1.0, -1.0); }
+                    cr.set_source_surface(&selection.mask, 0.0, 0.0)?;
+                    cr.paint()?;
+                    Ok(())
+                })?);
+            }
+            Ok(())
+        })
     }
 
     /// The active layer's histogram inside the selection, for the Levels dialog.
@@ -1706,24 +1759,68 @@ impl Document {
         Ok(crate::brush::Sample { pixels, width: wu, height: hu, tiled: false })
     }
 
+    /// A type or shape layer, or a layer scaled unevenly (its pixels wider than tall on the canvas, or the
+    /// other way), turned into plain pixels at the canvas's own scale, as one step: what painting needs.
+    /// Layers that are already plain and evenly scaled are left alone.
+    pub fn rasterize_for_painting(&mut self, id: Uuid) -> Result<()> {
+        let layer = self.renderer.layer(id).clone();
+        let Some((iw, ih)) = self.renderer.image_size(id) else { return Ok(()) };
+        let t = layer.transform;
+        let (sx, sy) = (t.size.0 / iw as f64, t.size.1 / ih as f64);
+        let uneven = (sx - sy).abs() > 0.01 * sx.max(sy);
+        let vector = layer.text.is_some() || layer.shape.is_some();
+        if !uneven && !vector { return Ok(()); }
+        if !uneven && t.rotation == 0.0 && !t.flip_x && !t.flip_y {
+            // Only the record stands in the way: the pixels are already what shows.
+            self.edited("Rasterize Layer", |d| { let image = d.renderer.image(id).cloned().ok_or_else(|| anyhow::anyhow!("no pixels"))?; d.renderer.set_image(id, image); Ok(()) })?;
+            return Ok(());
+        }
+        self.edited("Rasterize Layer", |d| {
+            let (bx0, by0, bx1, by1) = t.bounds();
+            let (left, top) = (bx0.floor(), by0.floor());
+            let (w, h) = ((bx1.ceil() - left).max(1.0) as i32, (by1.ceil() - top).max(1.0) as i32);
+            if w as i64 * h as i64 > 100_000_000 { bail!("This layer is too large to rasterize (100 megapixels)."); }
+            let surface = new_argb(w, h)?;
+            { let cr = Context::new(&surface)?; cr.translate(-left, -top); d.renderer.draw_layer_plain(id, &cr)?; }
+            if layer.mask_placement.is_none() && d.renderer.mask(id).is_some_and(|m| m.width() > 1 || m.height() > 1) {
+                let a8 = crate::raster::a8_filled(w, h, 0)?;
+                { let cr = Context::new(&a8)?; cr.translate(-left, -top); d.renderer.draw_mask_plain(id, &cr)?; }
+                d.renderer.set_mask(id, Some(a8));
+            }
+            d.renderer.set_image(id, surface);
+            d.renderer.set_layer_transform(id, Transform { origin: crate::format::Point(left, top), size: crate::format::Size(w as f64, h as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: t.sampling });
+            Ok(())
+        })
+    }
+
     /// A whole stroke laid down at once from known points (no provisional tails), as warps and scripts
     /// do; it must match the same points painted live.
     pub fn replay_stroke(&mut self, points: &[(f64, f64)], settings: &crate::brush::BrushSettings, kind: StrokeKind) -> Result<()> {
         let Some((first, rest)) = points.split_first() else { return Ok(()) };
         self.begin_stroke(*first, settings, kind)?;
-        let id = self.stroke_layer.or(self.active).ok_or_else(|| anyhow::anyhow!("no layer for the stroke"))?;
-        if let Some(stroke) = self.stroke.as_mut() { stroke.replay(rest)?; if let Some(rect) = stroke.changed { self.renderer.preview_changed(id, rect)?; } }
+        let result = (|| -> Result<()> {
+            let id = self.stroke_layer.or(self.active).ok_or_else(|| anyhow::anyhow!("no layer for the stroke"))?;
+            if let Some(stroke) = self.stroke.as_mut() { stroke.replay(rest)?; if let Some(rect) = stroke.changed { self.renderer.preview_changed(id, rect)?; } }
+            Ok(())
+        })();
+        // A stroke left open would hold the document (no painting, no tools, no autosave).
+        if let Err(e) = result { self.cancel_stroke(); return Err(e); }
         self.finish_stroke()
     }
 
     /// Starts a stroke on the active layer at `point` (document pixels). Nothing starts on a folder, an
     /// adjustment layer, or an explicitly empty selection.
     pub fn begin_stroke(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, kind: StrokeKind) -> Result<()> {
-        if self.stroke.is_some() { bail!("a stroke is already in progress"); }
+        if self.stroke_active() { bail!("a stroke is already in progress"); }
         let Some(id) = self.active else { bail!("Select a layer first.") };
         let layer = self.renderer.layer(id).clone();
         if layer.is_group() || layer.adjustment.is_some() { bail!("Select an image layer first."); }
+        if !crate::format::visible_layers(self.renderer.layers()).contains(&id) { bail!("This layer is hidden; show it to paint on it."); }
         if self.selection.as_ref().is_some_and(|s| s.is_empty()) { bail!("Nothing is selected."); }
+        // Type and shape layers, and layers scaled unevenly, become plain pixels first: paint on a type
+        // layer would vanish at its next edit, and a round brush on a stretched layer would paint ovals.
+        self.rasterize_for_painting(id)?;
+        let layer = self.renderer.layer(id).clone();
         let kind = match kind {
             StrokeKind::Paint => crate::brush::Kind::Paint,
             StrokeKind::Erase => crate::brush::Kind::Erase,
@@ -1796,6 +1893,7 @@ impl Document {
             } else { self.renderer.end_mask_preview(id); }
             return result;
         }
+        let depth = self.history.depth();
         let result = (|| -> Result<()> {
             stroke.flush()?;
             stroke.heal()?;
@@ -1848,6 +1946,7 @@ impl Document {
             Ok(())
         })();
         self.renderer.set_preview(id, None);
+        if result.is_err() { self.unwind_edits_to(depth); }
         result
     }
 }
@@ -2433,9 +2532,10 @@ impl Document {
     pub fn begin_mask_blur(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings) -> Result<()> { self.begin_mask_stroke_kind(point, settings, true, true) }
 
     fn begin_mask_stroke_kind(&mut self, point: (f64, f64), settings: &crate::brush::BrushSettings, white: bool, blur: bool) -> Result<()> {
-        if self.stroke.is_some() { bail!("a stroke is already in progress"); }
+        if self.stroke_active() { bail!("a stroke is already in progress"); }
         let Some(id) = self.active else { bail!("Select a layer first.") };
         let layer = self.renderer.layer(id).clone();
+        if !crate::format::visible_layers(self.renderer.layers()).contains(&id) { bail!("This layer is hidden; show it to paint its mask."); }
         let Some(mask) = self.renderer.mask(id).cloned() else { bail!("This layer has no mask.") };
         if !layer.mask_enabled() { bail!("Enable the mask to paint it."); }
         if self.selection.as_ref().is_some_and(|s| s.is_empty()) { bail!("Nothing is selected."); }
@@ -2504,7 +2604,7 @@ impl Document {
             transform: Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() },
             image_file: None, parent_id: None, is_group: None, opacity: None, blend_mode: None, mask_file: None, mask_enabled: None, mask_source_id: None, adjustment: None, mask_placement: None, mask_linked: None, shape: None, text: None, effects: None, artboard: None,
         };
-        let manifest = crate::format::Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: Some(id), layers: vec![layer] };
+        let manifest = crate::format::Manifest { format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(), resolution: Some(resolution), document_id: Uuid::new_v4(), width: width as i64, height: height as i64, active_layer_id: Some(id), layers: vec![layer], guides: None };
         let json = serde_json::to_vec(&manifest)?;
         let manifest = crate::format::Manifest::parse(&json)?;
         Document::new(Project { path: std::path::PathBuf::new(), manifest, images: Default::default(), masks: Default::default() })
@@ -2525,9 +2625,10 @@ impl Document {
 
     pub fn manifest(&self) -> crate::format::Manifest {
         crate::format::Manifest {
-            format: crate::format::FORMAT.into(), version: crate::format::SAVE_VERSION, color_space: "sRGB".into(),
+            format: crate::format::FORMAT.into(), version: crate::format::version_for(self.renderer.layers()), color_space: "sRGB".into(),
             resolution: Some(self.renderer.resolution()), document_id: self.document_id, width: self.width() as i64, height: self.height() as i64,
             active_layer_id: self.active, layers: self.renderer.layers().to_vec(),
+            guides: if self.guides_v.is_empty() && self.guides_h.is_empty() { None } else { Some(crate::format::Guides { vertical: self.guides_v.clone(), horizontal: self.guides_h.clone() }) },
         }
     }
 
@@ -2615,16 +2716,16 @@ impl Document {
         None
     }
 
-    /// Grows the canvas so `rect` fits on it, keeping every layer where it is.
-    fn make_room_for(&mut self, rect: (f64, f64, f64, f64)) -> Result<()> {
+    /// Grows the canvas so `rect` fits on it, keeping every layer where it is. Returns how far everything
+    /// moved (a rect past the top or left edge pushes the picture right or down), for a frame that is not
+    /// yet on the canvas.
+    fn make_room_for(&mut self, rect: (f64, f64, f64, f64)) -> Result<(f64, f64)> {
         let (w, h) = (self.width() as f64, self.height() as f64);
         let (x0, y0) = (rect.0.floor().min(0.0), rect.1.floor().min(0.0));
         let (x1, y1) = ((rect.0 + rect.2).ceil().max(w), (rect.1 + rect.3).ceil().max(h));
-        if x0 == 0.0 && y0 == 0.0 && x1 == w && y1 == h { return Ok(()); }
+        if x0 == 0.0 && y0 == 0.0 && x1 == w && y1 == h { return Ok((0.0, 0.0)); }
         self.canvas_size((x1 - x0) as i32, (y1 - y0) as i32, 0, None, Some((-x0, -y0)), "Grow Canvas")?;
-        // Frames of the other boards move with everything else.
-        if x0 != 0.0 || y0 != 0.0 { for (id, _, r) in self.artboards() { self.renderer.set_artboard(id, Some(crate::format::Artboard { x: r.0 - x0, y: r.1 - y0, width: r.2, height: r.3, background: self.renderer.layer(id).artboard.as_ref().and_then(|b| b.background) })); } }
-        Ok(())
+        Ok((-x0, -y0))
     }
 
     /// Where a new board goes when no place is given: to the right of the rightmost one, or the canvas.
@@ -2642,7 +2743,7 @@ impl Document {
         let board = crate::format::Artboard { x: frame.0.round(), y: frame.1.round(), width: frame.2.round(), height: frame.3.round(), background };
         if !board.is_valid() { bail!("An artboard runs from 1 to 30,000 pixels on a side."); }
         self.begin_edit("New Artboard");
-        if let Err(e) = self.make_room_for(board.rect()) { self.abort_edit(); return Err(e); }
+        let board = match self.make_room_for(board.rect()) { Ok((sx, sy)) => crate::format::Artboard { x: board.x + sx, y: board.y + sy, ..board }, Err(e) => { self.abort_edit(); return Err(e); } };
         let layers = self.renderer.layers();
         // Boards sit at the top level, above everything, under the name given (numbered only on a clash).
         let taken = self.renderer.layers().iter().any(|l| l.name == name);
@@ -2707,7 +2808,7 @@ impl Document {
         let boards = self.artboards();
         let mut b = (0.0f64, 0.0f64, self.width() as f64, self.height() as f64);
         for (_, _, (x, y, w, h)) in &boards { b.0 = b.0.min(*x); b.1 = b.1.min(*y); b.2 = b.2.max(x + w); b.3 = b.3.max(y + h); }
-        self.make_room_for((b.0, b.1, b.2 - b.0, b.3 - b.1))
+        self.make_room_for((b.0, b.1, b.2 - b.0, b.3 - b.1)).map(|_| ())
     }
 
     /// Export Sizes as artboards: `source` (a remade copy of this document at one size) becomes a board
@@ -2889,8 +2990,12 @@ impl Document {
         // The whole blocks: each dragged layer with everything inside it, in stacking order.
         let mut moving: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         for id in ids { if self.has_layer(*id) { moving.insert(*id); moving.extend(self.descendants(*id)); } }
+        let ids: Vec<Uuid> = ids.iter().copied().filter(|id| self.has_layer(*id)).collect();
+        let ids = ids.as_slice();
         let roots: Vec<Uuid> = layers.iter().filter(|l| ids.contains(&l.id)).map(|l| l.id).collect();
         if roots.is_empty() { return Ok(()); }
+        let target = match place { Place::Above(a) | Place::Below(a) | Place::Into(a) => a };
+        if !self.has_layer(target) { bail!("That layer is gone."); }
         let (anchor, parent, after) = match place {
             Place::Above(a) => (a, self.renderer.layer(a).parent_id, true),
             Place::Below(a) => (a, self.renderer.layer(a).parent_id, false),
@@ -2911,6 +3016,9 @@ impl Document {
         let mut next = kept;
         for (i, l) in block.into_iter().enumerate() { next.insert(insert_at + i, l); }
         if next.iter().map(|l| l.id).collect::<Vec<_>>() == layers.iter().map(|l| l.id).collect::<Vec<_>>() && next.iter().zip(&layers).all(|(a, b)| a.parent_id == b.parent_id) { return Ok(()); }
+        // A clipped layer whose base ends up in another folder is released: a clip only reads a sibling.
+        let parents: std::collections::HashMap<Uuid, Option<Uuid>> = next.iter().map(|l| (l.id, l.parent_id)).collect();
+        for l in &mut next { if let Some(base) = l.mask_source_id { if parents.get(&base) != Some(&l.parent_id) { l.mask_source_id = None; } } }
         crate::format::validate::hierarchy(&next).map_err(|_| anyhow::anyhow!("That arrangement is not allowed."))?;
         self.begin_edit("Reorder Layers");
         self.renderer.replace_layers(next);
@@ -3092,7 +3200,10 @@ impl Document {
     /// Opens an image file as a new document of its size, the image as the only layer.
     pub fn open_image(path: &std::path::Path) -> Result<Document> {
         let (surface, w, h) = Self::decode_image(path)?;
-        let mut document = Document::blank(w as i32, h as i32, 72.0)?;
+        // The file's own resolution (a scan at 300 ppi stays 300 ppi); 72 when it says nothing.
+        let head = std::fs::File::open(path).ok().and_then(|mut f| { use std::io::Read; let mut buf = vec![0u8; 65_536]; let n = f.read(&mut buf).ok()?; buf.truncate(n); Some(buf) }).unwrap_or_default();
+        let resolution = crate::png_io::file_resolution(&head).unwrap_or(72.0);
+        let mut document = Document::blank(w as i32, h as i32, resolution)?;
         let id = document.active.ok_or_else(|| anyhow::anyhow!("blank document has a layer"))?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Image".into());
         document.renderer.set_layer_name(id, name);
@@ -3104,18 +3215,22 @@ impl Document {
     /// Image bytes (PNG, JPEG and the rest) rather than a file: what a drop from another app carries.
     pub fn decode_image_bytes(bytes: &[u8]) -> Result<(ImageSurface, usize, usize)> {
         use image::ImageDecoder;
-        let decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
+        let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
         let (dw, dh) = decoder.dimensions();
         if dw == 0 || dh == 0 || dw > 30_000 || dh > 30_000 || dw as u64 * dh as u64 > 100_000_000 { bail!("This image is {dw} x {dh}; sides run to 30,000 pixels and the whole to 100 megapixels."); }
-        let decoded = image::DynamicImage::from_decoder(decoder)?;
+        // The same EXIF turn a file opened from disk gets.
+        let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut decoded = image::DynamicImage::from_decoder(decoder)?;
+        decoded.apply_orientation(orientation);
         let rgba = decoded.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        if w == 0 || h == 0 || w > 30_000 || h > 30_000 || w * h > 100_000_000 { bail!("This image is larger than the 30,000-pixel side or 100-megapixel limit."); }
         Ok((crate::png_io::from_straight_rgba(rgba.as_raw(), w, h)?, w, h))
     }
 
     pub fn open_image_bytes(bytes: &[u8]) -> Result<Document> {
         let (surface, w, h) = Self::decode_image_bytes(bytes)?;
-        let mut document = Document::blank(w as i32, h as i32, 72.0)?;
+        let mut document = Document::blank(w as i32, h as i32, crate::png_io::file_resolution(bytes).unwrap_or(72.0))?;
         let id = document.active.ok_or_else(|| anyhow::anyhow!("blank document has a layer"))?;
         document.renderer.set_image(id, surface);
         document.history.mark_saved();
@@ -3181,13 +3296,20 @@ impl Document {
         let (ow, oh) = (self.width(), self.height());
         let (dx, dy) = offset.unwrap_or_else(|| ((((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor(), (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor()));
         if width == ow && height == oh && dx == 0.0 && dy == 0.0 { return Ok(()); }
-        self.begin_edit(name);
+        self.edited(name, |d| d.canvas_size_body(width, height, fill, (dx, dy), (ow, oh)))
+    }
+
+    fn canvas_size_body(&mut self, width: i32, height: i32, fill: Option<[f64; 3]>, (dx, dy): (f64, f64), (ow, oh): (i32, i32)) -> Result<()> {
         for layer in self.renderer.layers().to_vec() {
             let mut t = layer.transform;
             t.origin = crate::format::Point(t.origin.0 + dx, t.origin.1 + dy);
             self.renderer.set_layer_transform(layer.id, t);
             if let Some(mut p) = layer.mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(layer.id, Some(p)); }
         }
+        // Artboard frames and guides move with the pixels.
+        self.map_artboards(|(x, y, w, h)| (x + dx, y + dy, w, h));
+        for x in &mut self.guides_v { *x += dx; }
+        for y in &mut self.guides_h { *y += dy; }
         self.renderer.set_size(width, height);
         if let (Some(color), true) = (fill, width > ow || height > oh) {
             let extension = new_argb(width, height)?;
@@ -3208,8 +3330,16 @@ impl Document {
             let moved = Selection::from_shape(width, height, selection.antialiased, |cr| { cr.set_source_surface(&selection.mask, dx, dy)?; cr.paint()?; Ok(()) })?;
             self.selection = Some(moved);
         }
-        self.end_edit();
         Ok(())
+    }
+
+    /// Every artboard's frame put through `f` (a canvas that moved, scaled or flipped under it).
+    fn map_artboards(&mut self, f: impl Fn((f64, f64, f64, f64)) -> (f64, f64, f64, f64)) {
+        for (id, _, r) in self.artboards() {
+            let (x, y, w, h) = f(r);
+            let background = self.renderer.layer(id).artboard.as_ref().and_then(|b| b.background);
+            self.renderer.set_artboard(id, Some(crate::format::Artboard { x: x.round(), y: y.round(), width: w.round().max(1.0), height: h.round().max(1.0), background }));
+        }
     }
 
     /// Crops the canvas to the selection's bounds.
@@ -3253,7 +3383,16 @@ impl Document {
                         cr.scale(sx, sy);
                         self.renderer.draw_layer_plain(layer.id, &cr)?;
                     }
-                    self.renderer.set_image(layer.id, surface);
+                    // Type and shape layers stay editable: their records come along, scaled.
+                    if let Some(mut style) = layer.text.clone() {
+                        for (key, k) in [("size", sy), ("tracking", sy), ("width", sx)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
+                        self.renderer.set_text_image(layer.id, surface, style);
+                    } else if let Some(mut style) = layer.shape.clone() {
+                        for (key, k) in [("baseWidth", sx), ("baseHeight", sy)] { if let Some(v) = style.get(key).and_then(serde_json::Value::as_f64) { style[key] = serde_json::json!(v * k); } }
+                        self.renderer.set_shape_image(layer.id, surface, style);
+                    } else {
+                        self.renderer.set_image(layer.id, surface);
+                    }
                 }
                 if let Some(mask) = self.renderer.mask(layer.id).cloned() {
                     if let Some(p) = layer.mask_placement {
@@ -3273,6 +3412,9 @@ impl Document {
                 }
                 self.renderer.set_layer_transform(layer.id, placed);
             }
+            self.map_artboards(|(x, y, w, h)| (x * sx, y * sy, w * sx, h * sy));
+            for x in &mut self.guides_v { *x *= sx; }
+            for y in &mut self.guides_h { *y *= sy; }
             self.renderer.set_size(width, height);
             if let Some(selection) = self.selection.clone() {
                 self.selection = Some(Selection::from_shape(width, height, selection.antialiased, |cr| { cr.scale(sx, sy); cr.set_source_surface(&selection.mask, 0.0, 0.0)?; cr.paint()?; Ok(()) })?);
@@ -3294,7 +3436,7 @@ impl Document {
         let band = match position {
             0 => { let inner = current.resized(-w)?; current.combined(&inner, Mode::Subtract)? }
             2 => { let outer = current.resized(w)?; outer.combined(&current, Mode::Subtract)? }
-            _ => { let half = (w / 2).max(1); let outer = current.resized(half)?; let inner = current.resized(-(w - half))?; outer.combined(&inner, Mode::Subtract)? }
+            _ => { let outside = (w + 1) / 2; let outer = current.resized(outside)?; let inner = current.resized(-(w - outside))?; outer.combined(&inner, Mode::Subtract)? }
         };
         let opacity = opacity.clamp(0.0, 1.0);
         if let Some((id, mask, grid)) = self.active_mask() {
@@ -3613,7 +3755,9 @@ fn a8_from_gray(gray: &ImageSurface) -> Result<ImageSurface> {
     let (wu, hu) = (w as usize, h as usize);
     let stride = cairo::Format::A8.stride_for_width(w as u32)? as usize;
     let mut data = vec![0u8; stride * hu];
-    with_bytes(gray, |d, s| { for y in 0..hu { for x in 0..wu { data[y * stride + x] = d[y * s + x * 4]; } } })?;
+    // Luminance, so a filter that colors the gray (Photo Filter, a colorized Hue/Saturation) leaves a
+    // sensible mask rather than one channel of it.
+    with_bytes(gray, |d, s| { for y in 0..hu { for x in 0..wu { let o = y * s + x * 4; data[y * stride + x] = (0.114 * d[o] as f64 + 0.587 * d[o + 1] as f64 + 0.299 * d[o + 2] as f64).round().clamp(0.0, 255.0) as u8; } } })?;
     crate::raster::a8_from_data(w, h, data, stride as i32)
 }
 
@@ -3695,6 +3839,9 @@ fn path_shape_image(local: &crate::path::Path, base: (f64, f64), w: i32, h: i32,
 /// A layer or board name as a file name: letters, digits, spaces, dashes and underscores.
 pub fn clean_file_name(name: &str) -> String {
     let clean: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+    // Well under the 255 bytes a file name may have, with room for a suffix and an extension.
+    let mut clean = clean.trim().to_string();
+    while clean.len() > 120 { clean.pop(); }
     let clean = clean.trim().to_string();
     if clean.is_empty() { "untitled".to_string() } else { clean }
 }
@@ -3705,7 +3852,8 @@ pub fn unique_file(folder: &std::path::Path, stem: &str, ext: &str, used: &mut s
     let mut n = 1;
     loop {
         let name = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
-        if used.insert(name.to_lowercase()) { return folder.join(name); }
+        // Taken in this batch, or already on disk from an earlier one.
+        if !folder.join(&name).exists() && used.insert(name.to_lowercase()) { return folder.join(name); }
         n += 1;
     }
 }

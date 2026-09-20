@@ -110,6 +110,8 @@ pub const GRID_TIP_LIMIT: f64 = 3000.0;
 
 /// The tip for `settings` at `grid_diameter`: a sampled preset, or the round tip, either one squashed by
 /// the roundness and turned by the angle when they are not the defaults.
+thread_local! { static VARIANTS: std::cell::RefCell<Option<(String, Vec<(usize, std::rc::Rc<Vec<u8>>)>)>> = const { std::cell::RefCell::new(None) }; }
+
 pub fn shaped_tip(grid_diameter: f64, settings: &BrushSettings) -> (usize, Vec<u8>) {
     if !settings.shaped() { return tip(grid_diameter, settings.hardness); }
     let (bw, bh, base) = match &settings.preset {
@@ -189,6 +191,8 @@ pub struct Stroke {
     /// The transform placing the whole grid on the document.
     pub transform: Transform,
     canvas: (f64, f64),
+    /// The canvas as a box in grid pixels: a dab is clipped to it.
+    canvas_grid: (usize, usize, usize, usize),
     /// The live pixels the canvas draws: the grid, premultiplied BGRA.
     pub preview: ImageSurface,
     selection: Option<Selection>,
@@ -242,6 +246,12 @@ impl Stroke {
         let (cx, cy) = to_document.transform_point(width as f64 / 2.0, height as f64 / 2.0);
         expanded.origin = crate::format::Point(cx - expanded.size.0 / 2.0, cy - expanded.size.1 / 2.0);
         let preview = preview_grid(x0 as i32, y0 as i32, width as i32, height as i32, expanded)?;
+        let canvas_grid = {
+            let c = [(0.0, 0.0), (canvas.0, 0.0), (0.0, canvas.1), (canvas.0, canvas.1)].map(|(x, y)| from_document.transform_point(x, y));
+            let (cx0, cy0) = (c.iter().map(|p| p.0).fold(f64::MAX, f64::min).floor().max(0.0) as usize, c.iter().map(|p| p.1).fold(f64::MAX, f64::min).floor().max(0.0) as usize);
+            let (cx1, cy1) = ((c.iter().map(|p| p.0).fold(f64::MIN, f64::max).ceil().max(0.0) as usize).min(width), (c.iter().map(|p| p.1).fold(f64::MIN, f64::max).ceil().max(0.0) as usize).min(height));
+            (cx0, cy0, cx1, cy1)
+        };
         let scale = (to_document.xx() * to_document.xx() + to_document.yx() * to_document.yx()).sqrt();
         let grid_diameter = (settings.diameter / scale).max(1.0);
         // The reference keeps grid tips to 3,000 pixels and falls back to a stamp; here the stroke is refused.
@@ -253,29 +263,40 @@ impl Stroke {
         // A preset's frames, each turned by the jitter, made once and picked per dab.
         let frames = settings.preset.as_ref().map_or(0, |p| p.frames.len());
         let variants: Vec<(usize, std::rc::Rc<Vec<u8>>)> = if settings.angle_jitter > 0.0 || frames > 0 {
-            let turns = if settings.angle_jitter > 0.0 { 12usize.div_ceil(frames + 1).max(1) } else { 1 };
-            let mut out = Vec::new();
-            for frame in 0..=frames {
-                for i in 0..turns {
-                    let mut turned = settings.clone();
-                    if let (Some(p), true) = (settings.preset.as_ref(), frame > 0) {
-                        let mut alt = (**p).clone();
-                        alt.pixels = p.frames[frame - 1].clone();
-                        turned.preset = Some(std::rc::Rc::new(alt));
+            // The turned copies of a big sampled tip cost real time to make: the last set is kept for the
+            // next stroke with the same tip and settings.
+            let key = format!("{:p}|{}|{}|{}|{}|{}", settings.preset.as_ref().map_or(std::ptr::null(), std::rc::Rc::as_ptr), grid_diameter.to_bits(), settings.angle.to_bits(), settings.roundness.to_bits(), settings.hardness.to_bits(), settings.angle_jitter.to_bits());
+            let cached = VARIANTS.with(|v| v.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, out)| out.clone()));
+            match cached {
+                Some(out) => out,
+                None => {
+                    let turns = if settings.angle_jitter > 0.0 { 12usize.div_ceil(frames + 1).max(1) } else { 1 };
+                    let mut out = Vec::new();
+                    for frame in 0..=frames {
+                        for i in 0..turns {
+                            let mut turned = settings.clone();
+                            if let (Some(p), true) = (settings.preset.as_ref(), frame > 0) {
+                                let mut alt = (**p).clone();
+                                alt.pixels = p.frames[frame - 1].clone();
+                                turned.preset = Some(std::rc::Rc::new(alt));
+                            }
+                            if turns > 1 { turned.angle += (i as f64 / turns as f64 - 0.5) * 360.0 * settings.angle_jitter.clamp(0.0, 1.0); }
+                            let (s, px) = shaped_tip(grid_diameter, &turned);
+                            out.push((s, std::rc::Rc::new(px)));
+                        }
                     }
-                    if turns > 1 { turned.angle += (i as f64 / turns as f64 - 0.5) * 360.0 * settings.angle_jitter.clamp(0.0, 1.0); }
-                    let (s, px) = shaped_tip(grid_diameter, &turned);
-                    out.push((s, std::rc::Rc::new(px)));
+                    VARIANTS.with(|v| *v.borrow_mut() = Some((key, out.clone())));
+                    out
                 }
             }
-            out
         } else { Vec::new() };
+        // Spacing from the hardness alone, as the reference sets it (a turned round tip is still round).
         let spacing = match settings.spacing {
             Some(fraction) => (settings.diameter * fraction.clamp(0.01, 10.0)).max(0.25),
-            None => (settings.diameter * if settings.hardness >= 1.0 && !settings.shaped() { 0.015 } else { 0.025 }).max(0.25),
+            None => (settings.diameter * if settings.hardness >= 1.0 { 0.015 } else { 0.025 }).max(0.25),
         };
         Ok(Stroke {
-            settings: settings.clone(), kind, width, height, source, has_image, to_document, from_document, transform: expanded, canvas, preview,
+            settings: settings.clone(), kind, width, height, source, has_image, to_document, from_document, transform: expanded, canvas, canvas_grid, preview,
             selection, tip_size, tip, variants, dabs: 0, spacing, tiles: HashMap::new(), columns: width.div_ceil(TILE),
             samples: Vec::new(), previous: None, distance_to_next: 0.0, tail_backup: HashMap::new(), changed: None, replaying: false, pending: HashSet::new(),
         })
@@ -284,7 +305,8 @@ impl Stroke {
     /// Adds a pointer sample (document pixels). Dabs follow a smooth curve through the samples; the newest
     /// piece is drawn as a provisional straight tail and replaced when the next sample arrives.
     pub fn append(&mut self, point: (f64, f64)) -> Result<()> {
-        if !point.0.is_finite() || !point.1.is_finite() { return Ok(()); }
+        // As the reference bounds its points: a huge coordinate would walk for ever.
+        if !point.0.is_finite() || !point.1.is_finite() || point.0.abs() > 10_000_000.0 || point.1.abs() > 10_000_000.0 { return Ok(()); }
         if self.samples.last() == Some(&point) { return Ok(()); }
         let mut changed = self.remove_tail();
         self.samples.push(point);
@@ -425,8 +447,8 @@ impl Stroke {
         let (tip_size, tip): (usize, std::rc::Rc<Vec<u8>>) = match pick { Some(i) => (self.variants[i].0, self.variants[i].1.clone()), None => (self.tip_size, self.tip.clone()) };
         let size = tip_size as f64;
         let (bx, by) = ((cx - size / 2.0).round() as i64, (cy - size / 2.0).round() as i64);
-        let (gx0, gy0) = (bx.max(0) as usize, by.max(0) as usize);
-        let (gx1, gy1) = (((bx + size as i64).max(0) as usize).min(self.width), ((by + size as i64).max(0) as usize).min(self.height));
+        let (gx0, gy0) = ((bx.max(0) as usize).max(self.canvas_grid.0), (by.max(0) as usize).max(self.canvas_grid.1));
+        let (gx1, gy1) = (((bx + size as i64).max(0) as usize).min(self.width).min(self.canvas_grid.2), ((by + size as i64).max(0) as usize).min(self.height).min(self.canvas_grid.3));
         if gx1 <= gx0 || gy1 <= gy0 { return; }
         // Round tips accumulate softly (dabs screen over each other); a sampled or shaped tip keeps to the
         // strongest dab under each pixel, so its holes survive along the stroke as a dry medium's do.

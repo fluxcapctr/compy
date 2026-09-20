@@ -14,7 +14,8 @@ fn parse_one(data: &[u8], fallback_name: &str) -> Result<(Preset, usize)> {
     let header = u32_at(data, 0)? as usize;
     let version = u32_at(data, 4)?;
     let (width, height, bytes) = (u32_at(data, 8)? as usize, u32_at(data, 12)? as usize, u32_at(data, 16)? as usize);
-    if !(1..=3).contains(&version) || data.get(20..24) != Some(b"GIMP") { bail!("This is not a GIMP brush file."); }
+    if version == 1 { bail!("This is a version 1 GIMP brush, which has no color or spacing header; save it again from GIMP as version 2 or 3."); }
+    if !(2..=3).contains(&version) || data.get(20..24) != Some(b"GIMP") { bail!("This is not a GIMP brush file."); }
     let spacing = u32_at(data, 24)? as f64;
     if header < 28 || header > data.len() || width == 0 || height == 0 || width > 16_384 || height > 16_384 || width * height > 50_000_000 { bail!("the brush's header is out of range"); }
     if bytes != 1 && bytes != 4 { bail!("{bytes}-byte pixels are not supported"); }
@@ -24,6 +25,8 @@ fn parse_one(data: &[u8], fallback_name: &str) -> Result<(Preset, usize)> {
     let pixels_raw = data.get(header..end).context("the brush's pixels end early")?;
     // A gray tip is the coverage itself (255 paints); an RGBA tip's alpha is its coverage.
     let pixels: Vec<u8> = if bytes == 1 { pixels_raw.to_vec() } else { pixels_raw.chunks_exact(4).map(|p| p[3]).collect() };
+    // A tip wider than the brush ever paints is averaged down, as Photoshop tips are.
+    let (width, height, pixels) = crate::abr::shrink_tip(width, height, pixels);
     Ok((Preset { name, width, height, pixels, spacing: if (1.0..=1000.0).contains(&spacing) { spacing } else { 20.0 }, jitter: crate::abr::default_jitter(width, height), set: fallback_name.to_string(), frames: Vec::new() }, end))
 }
 

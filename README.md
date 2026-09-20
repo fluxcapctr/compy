@@ -199,8 +199,12 @@ new pictures go to Nano Banana 2 (Google) by default; `~/.config/compositor/agen
 image" or "flux" on one job picks it for that job. Asking for a cutout on a transparent background
 switches that job to GPT Image, the one model that returns a real alpha channel; it lands as a layer
 with transparency. No model returns separate layers. A generation lands on the document it was started
-from, even if another tab is current by then, and is cancelled if the conversation is stopped. Every
-tool call is one undo step, all or nothing. One Compy window serves the agent socket; a second window
+from, even if another tab is current by then, and is cancelled if the conversation is stopped (a
+result that has already come back is kept and lands once the document is free). Every
+tool call is one undo step, all or nothing. The file tools (open, save, export and the batch exports)
+only reach paths inside the home folder, outside its hidden folders, and do not replace an existing file
+unless asked to. Layer names and type text from the open file are handed to the model as data, marked as
+such. One Compy window serves the agent socket (in the private runtime directory); a second window
 opened beside it has no assistant. Voice: with
 voxtype dictation running (Omarchy's Page Down), starting to talk opens Compy and the words go into its
 entry; when they stop, the message sends itself; the microphone button toggles the same. The same tools
@@ -273,9 +277,15 @@ options bar, and the lines wrap there (0 is a single line). The Pen's Make Shape
 vector shape layer in the foreground color; Layer > Edit Shape Points puts its points back on the Pen
 and Apply to Shape (or the Pen's button) writes them back, and the shape redraws crisp at any size.
 Compy: layer_style takes blend_if; define_pattern and fill_pattern; text_layer and set_text take width;
+select_layers picks several layers for align, distribute and artboard_from_layers;
 and `brush_stroke` paints along a list of points with any kind (paint, erase, dodge, burn, saturate,
 desaturate, blur, heal, pattern), a diameter, hardness, opacity, color and a textured tip by name (the
 state lists `brush_tips`), so it can lay texture, dodge and burn, or stamp a pattern by hand.
+
+**Painting on type, shape and stretched layers.** A brush stroke on a type or vector shape layer turns
+it into plain pixels first (as a step of its own, "Rasterize Layer"), so the paint stays; a layer scaled
+unevenly is rasterized at the canvas's scale so a round brush paints round. Hidden layers refuse the
+brush. Heal, Clone and the Pattern Stamp work on pixels, not masks.
 
 **Brush files and the patterns inside them.** The `.abr` loader reads Photoshop 7 through the current
 CC format (versions 6, 7 and 10), and tips wider than 2048 pixels are averaged down on load, since the

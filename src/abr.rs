@@ -150,7 +150,7 @@ fn read_plane(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, dept
     let end = end.min(r.data.len());
     let room = end.saturating_sub(r.pos);
     // A raw tip needs its whole size; a packed one at least a row-length table and a byte per row.
-    if (compression == 0 && room < w * h * bytes) || (compression == 1 && room < h * 3) { bail!("a brush's pixels run past its record"); }
+    if (compression == 0 && room < w * h * bytes) || (compression == 1 && room < (h * 3).max(w * h * bytes / 64)) { bail!("a brush's pixels run past its record"); }
     *budget = budget.checked_sub(w * h).ok_or_else(|| anyhow::anyhow!("The file's brushes exceed the 400-megapixel decoding budget."))?;
     let mut raw = vec![0u8; w * h * bytes];
     if compression == 0 {
@@ -194,7 +194,7 @@ fn read_plane(r: &mut Reader, top: i32, left: i32, bottom: i32, right: i32, dept
 /// memory. Larger ones are averaged down by a whole factor.
 const TIP_LIMIT: usize = 2048;
 
-fn shrink_tip(w: usize, h: usize, pixels: Vec<u8>) -> (usize, usize, Vec<u8>) {
+pub fn shrink_tip(w: usize, h: usize, pixels: Vec<u8>) -> (usize, usize, Vec<u8>) {
     let factor = w.max(h).div_ceil(TIP_LIMIT);
     if factor <= 1 { return (w, h, pixels); }
     let (nw, nh) = (w.div_ceil(factor), h.div_ceil(factor));

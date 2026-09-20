@@ -19,6 +19,7 @@ pub fn decode(path: &Path) -> Result<(ImageSurface, usize, usize)> {
     let Some(plane) = planes.interleaved else { bail!("the decoder gave no pixels") };
     let (pw, ph) = (plane.width as usize, plane.height as usize);
     if pw == 0 || ph == 0 { bail!("the decoder gave no pixels"); }
+    if pw > 30_000 || ph > 30_000 || pw * ph > 100_000_000 || plane.data.len() < (ph - 1) * plane.stride + pw * 4 { bail!("This image is {pw} x {ph}; sides run to 30,000 pixels and the whole to 100 megapixels."); }
     let mut rgba = vec![0u8; pw * ph * 4];
     for y in 0..ph { rgba[y * pw * 4..(y + 1) * pw * 4].copy_from_slice(&plane.data[y * plane.stride..y * plane.stride + pw * 4]); }
     Ok((crate::png_io::from_straight_rgba(&rgba, pw, ph)?, pw, ph))

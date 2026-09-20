@@ -160,7 +160,23 @@ fn clamp01(v: f64) -> f64 { v.clamp(0.0, 1.0) }
 
 impl Effects {
     pub fn to_record(&self) -> serde_json::Value { serde_json::to_value(self).unwrap_or(serde_json::Value::Null) }
-    pub fn from_record(value: &serde_json::Value) -> Option<Effects> { serde_json::from_value(value.clone()).ok() }
+    /// From a layer record, every number brought into its range (a hand-edited file or a tool call can
+    /// carry a size that would blur for minutes, or a color past white that breaks premultiplied pixels).
+    pub fn from_record(value: &serde_json::Value) -> Option<Effects> { serde_json::from_value::<Effects>(value.clone()).ok().map(|e| e.clamped()) }
+
+    fn clamped(mut self) -> Effects {
+        fn c(v: f64, lo: f64, hi: f64, or: f64) -> f64 { if v.is_finite() { v.clamp(lo, hi) } else { or } }
+        fn color(rgb: [f64; 3]) -> [f64; 3] { rgb.map(|v| c(v, 0.0, 1.0, 0.0)) }
+        for s in [&mut self.drop_shadow, &mut self.inner_shadow].into_iter().flatten() { s.color = color(s.color); s.opacity = c(s.opacity, 0.0, 1.0, 0.75); s.angle = c(s.angle, -360.0, 360.0, 120.0); s.distance = c(s.distance, 0.0, 1000.0, 5.0); s.size = c(s.size, 0.0, 250.0, 5.0); }
+        for g in [&mut self.outer_glow, &mut self.inner_glow].into_iter().flatten() { g.color = color(g.color); g.opacity = c(g.opacity, 0.0, 1.0, 0.75); g.size = c(g.size, 0.0, 250.0, 5.0); }
+        if let Some(b) = self.bevel.as_mut() { b.depth = c(b.depth, 1.0, 1000.0, 100.0); b.size = c(b.size, 0.0, 250.0, 5.0); b.angle = c(b.angle, -360.0, 360.0, 120.0); b.altitude = c(b.altitude, 0.0, 90.0, 30.0); b.highlight_opacity = c(b.highlight_opacity, 0.0, 1.0, 0.75); b.shadow_opacity = c(b.shadow_opacity, 0.0, 1.0, 0.75); }
+        if let Some(s) = self.stroke.as_mut() { s.size = c(s.size, 0.0, 250.0, 3.0); s.color = color(s.color); s.opacity = c(s.opacity, 0.0, 1.0, 1.0); s.position = s.position.min(2); }
+        if let Some(o) = self.color_overlay.as_mut() { o.color = color(o.color); o.opacity = c(o.opacity, 0.0, 1.0, 1.0); }
+        if let Some(g) = self.gradient_overlay.as_mut() { g.angle = c(g.angle, -360.0, 360.0, 90.0); g.opacity = c(g.opacity, 0.0, 1.0, 1.0); }
+        if let Some(p) = self.pattern_overlay.as_mut() { p.scale = c(p.scale, 0.05, 20.0, 1.0); p.opacity = c(p.opacity, 0.0, 1.0, 1.0); }
+        if let Some(b) = self.blend_if.as_mut() { for v in [&mut b.this_black, &mut b.this_white, &mut b.under_black, &mut b.under_white] { *v = c(*v, 0.0, 255.0, 0.0); } b.feather = c(b.feather, 0.0, 255.0, 0.0); }
+        self
+    }
 
     /// Whether anything draws.
     /// The Blend If ranges in force, if any.
@@ -439,6 +455,17 @@ fn transform_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_record_with_wild_numbers_is_brought_into_range() {
+        let e = Effects::from_record(&serde_json::json!({"dropShadow": {"color": [4.0, -1.0, 0.5], "opacity": 3.0, "angle": 120.0, "distance": 5.0, "size": 20000000.0}, "stroke": {"size": -3.0, "position": 9, "color": [0.0, 0.0, 0.0], "opacity": 1.0}})).unwrap();
+        let s = e.drop_shadow.unwrap();
+        assert_eq!(s.color, [1.0, 0.0, 0.5]);
+        assert_eq!(s.opacity, 1.0);
+        assert_eq!(s.size, 250.0, "a size that would blur for minutes is capped");
+        let st = e.stroke.unwrap();
+        assert_eq!((st.size, st.position), (0.0, 2));
+    }
 
     fn square(w: usize, h: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> Vec<u8> {
         let mut a = vec![0u8; w * h];

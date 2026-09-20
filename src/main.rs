@@ -28,7 +28,8 @@ fn main() {
                 let gimp = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gbr") || e.eq_ignore_ascii_case("gih"));
                 match if gimp { compositor::gbr::load(p) } else { compositor::abr::load(p) } { Ok(tips) => set.extend(tips), Err(e) => eprintln!("skipped {}: {e:#}", p.display()) }
             }
-            std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes to {}", set.len(), Path::new(&args[2]).display()))
+            if set.is_empty() { Err(anyhow::anyhow!("no brushes could be read; nothing was written")) }
+            else { std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes to {}", set.len(), Path::new(&args[2]).display())) }
         }
         Some("patterns") if args.len() >= 4 && args[2].to_str() == Some("import") => {
             // `compositor patterns import <file.abr|file.pat> ...`: every pattern inside, saved for Fill with Pattern.
@@ -42,20 +43,20 @@ fn main() {
                             let mut bgra = pat.rgba.clone();
                             for px in bgra.chunks_exact_mut(4) { px.swap(0, 2); }
                             let surface = match compositor::raster::argb_from_packed(pat.width as i32, pat.height as i32, bgra) { Ok(s) => s, Err(e) => { eprintln!("skipped {}: {e:#}", pat.name); continue; } };
-                            match compositor::patterns::save(&pat.name, &surface) { Ok(out) => { total += 1; eprintln!("{} ({}x{}) -> {}", pat.name, pat.width, pat.height, out.display()); } Err(e) => eprintln!("skipped {}: {e:#}", pat.name) }
+                            match compositor::patterns::save_new(&pat.name, &surface) { Ok(out) => { total += 1; eprintln!("{} ({}x{}) -> {}", pat.name, pat.width, pat.height, out.display()); } Err(e) => eprintln!("skipped {}: {e:#}", pat.name) }
                         }
                     }
                     Err(e) => eprintln!("skipped {}: {e:#}", p.display()),
                 }
             }
             eprintln!("imported {total} patterns");
-            Ok(())
+            if total == 0 { Err(anyhow::anyhow!("no patterns were imported")) } else { Ok(()) }
         }
         Some("brushes") if args.len() == 3 => {
             let set = compositor::brush_set::presets();
             std::fs::write(&args[2], compositor::brush_set::abr_bytes(&set)).map_err(|e| anyhow::anyhow!("{e}")).map(|_| eprintln!("wrote {} brushes", set.len()))
         }
-        Some("info") | Some("render") | Some("psd") | Some("--help") | Some("-h") => Err(anyhow::anyhow!(USAGE)),
+        Some("info") | Some("render") | Some("psd") | Some("tool") | Some("patterns") | Some("brushes") | Some("convert-brushes") | Some("--help") | Some("-h") => Err(anyhow::anyhow!(USAGE)),
         _ => {
             let mut paths = Vec::new();
             let mut script = ui::Script::default();
@@ -102,7 +103,9 @@ fn main() {
                         "motion" => Some(compositor::filters::Kind::MotionBlur), "unsharp" => Some(compositor::filters::Kind::UnsharpMask), "sharpen" => Some(compositor::filters::Kind::SmartSharpen),
                         "brightness" => Some(compositor::filters::Kind::BrightnessContrast), "vibrance" => Some(compositor::filters::Kind::Vibrance), "bw" => Some(compositor::filters::Kind::BlackWhite),
                         "photo" => Some(compositor::filters::Kind::PhotoFilter), "threshold" => Some(compositor::filters::Kind::Threshold), "posterize" => Some(compositor::filters::Kind::Posterize),
-                        "shadows" => Some(compositor::filters::Kind::ShadowsHighlights), "selective" => Some(compositor::filters::Kind::SelectiveColor), "mixer" => Some(compositor::filters::Kind::ChannelMixer), "highpass" => Some(compositor::filters::Kind::HighPass), "radial" => Some(compositor::filters::Kind::RadialBlur), _ => None }),
+                        "shadows" => Some(compositor::filters::Kind::ShadowsHighlights), "selective" => Some(compositor::filters::Kind::SelectiveColor), "mixer" => Some(compositor::filters::Kind::ChannelMixer), "highpass" => Some(compositor::filters::Kind::HighPass), "radial" => Some(compositor::filters::Kind::RadialBlur),
+                        "hsv" => Some(compositor::filters::Kind::HueSaturation), "exposure" => Some(compositor::filters::Kind::Exposure), "fade" => Some(compositor::filters::Kind::Fade),
+                        other => { eprintln!("unknown --filter {other}"); std::process::exit(2); } }),
                     _ => paths.push(PathBuf::from(arg)),
                 }
             }
@@ -148,10 +151,10 @@ fn render_to(input: &Path, output: &Path) -> Result<()> {
     let rendered = render::render(project)?;
     let drawn = start.elapsed();
     for warning in &rendered.warnings { eprintln!("warning: {warning}"); }
+    if output.extension().is_none() { bail!("output has no extension"); }
     png_io::encode(&rendered.image, output, rendered.resolution).with_context(|| format!("writing {}", output.display()))?;
     println!("{} -> {}  {}x{}  load {:.2?}  render {:.2?}  write {:.2?}", input.display(), output.display(),
         rendered.image.width(), rendered.image.height(), loaded, drawn - loaded, start.elapsed() - drawn);
-    if output.extension().is_none() { bail!("output has no extension"); }
     Ok(())
 }
 

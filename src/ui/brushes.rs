@@ -68,7 +68,7 @@ pub fn add_file_in_set(path: &Path, set: Option<&str>, remember: bool) -> anyhow
         if let Some(dir) = list_path().parent() { let _ = std::fs::create_dir_all(dir); }
         let _ = std::fs::write(list_path(), text);
     } else {
-        FILES.with(|f| f.borrow_mut().push(path.to_path_buf()));
+        FILES.with(|f| { let mut f = f.borrow_mut(); if !f.iter().any(|x| x == path) { f.push(path.to_path_buf()); } });
     }
     Ok(count)
 }
@@ -77,6 +77,8 @@ pub fn add_file_in_set(path: &Path, set: Option<&str>, remember: bool) -> anyhow
 fn thumbnail(preset: Option<&Rc<Preset>>, hardness: f64, size: i32) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::builder().content_width(size).content_height(size).build();
     let preset = preset.cloned();
+    // The tip scaled down once, the first time it is drawn: a big tip is not re-copied on every frame.
+    let small: Rc<std::cell::RefCell<Option<(f64, f64, cairo::ImageSurface)>>> = Rc::new(std::cell::RefCell::new(None));
     area.set_draw_func(move |area, cr, w, h| {
         let color = area.color();
         let (w, h) = (w as f64, h as f64);
@@ -84,16 +86,21 @@ fn thumbnail(preset: Option<&Rc<Preset>>, hardness: f64, size: i32) -> gtk::Draw
         let box_side = w.min(h) - inset * 2.0;
         match &preset {
             Some(p) => {
-                let scale = box_side / p.width.max(p.height) as f64;
-                let (pw, ph) = (p.width as f64 * scale, p.height as f64 * scale);
-                let stride = cairo::Format::A8.stride_for_width(p.width as u32).unwrap_or(p.width as i32) as usize;
-                let mut data = vec![0u8; stride * p.height];
-                for y in 0..p.height { data[y * stride..y * stride + p.width].copy_from_slice(&p.pixels[y * p.width..(y + 1) * p.width]); }
-                if let Ok(mask) = crate::raster::a8_from_data(p.width as i32, p.height as i32, data, stride as i32) {
+                if small.borrow().is_none() {
+                    let scale = box_side / p.width.max(p.height) as f64;
+                    let (pw, ph) = ((p.width as f64 * scale).ceil().max(1.0), (p.height as f64 * scale).ceil().max(1.0));
+                    let stride = cairo::Format::A8.stride_for_width(p.width as u32).unwrap_or(p.width as i32) as usize;
+                    let mut data = vec![0u8; stride * p.height];
+                    for y in 0..p.height { data[y * stride..y * stride + p.width].copy_from_slice(&p.pixels[y * p.width..(y + 1) * p.width]); }
+                    if let (Ok(mask), Ok(out)) = (crate::raster::a8_from_data(p.width as i32, p.height as i32, data, stride as i32), cairo::ImageSurface::create(cairo::Format::A8, pw as i32, ph as i32)) {
+                        if let Ok(ocr) = cairo::Context::new(&out) { ocr.scale(scale, scale); ocr.set_source_rgba(0.0, 0.0, 0.0, 1.0); let _ = ocr.mask_surface(&mask, 0.0, 0.0); }
+                        *small.borrow_mut() = Some((pw, ph, out));
+                    }
+                }
+                if let Some((pw, ph, mask)) = small.borrow().as_ref() {
                     cr.translate((w - pw) / 2.0, (h - ph) / 2.0);
-                    cr.scale(scale, scale);
                     cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
-                    let _ = cr.mask_surface(&mask, 0.0, 0.0);
+                    let _ = cr.mask_surface(mask, 0.0, 0.0);
                 }
             }
             None => {
@@ -192,7 +199,7 @@ impl BrushPicker {
             button.set_child(Some(&thumbnail(preset.as_ref(), hardness, 44)));
             let this = self.clone();
             button.connect_clicked(move |b| {
-                { let mut d = this.doc.borrow_mut(); d.brush.preset = preset.clone(); match &preset { None => { d.brush.hardness = hardness; d.brush.angle_jitter = 0.0; } Some(p) => { d.brush.spacing = Some(p.spacing / 100.0); d.brush.angle_jitter = p.jitter; } } }
+                { let mut d = this.doc.borrow_mut(); d.brush.preset = preset.clone(); match &preset { None => { d.brush.hardness = hardness; d.brush.angle_jitter = 0.0; d.brush.spacing = None; } Some(p) => { d.brush.spacing = Some(p.spacing / 100.0); d.brush.angle_jitter = p.jitter; } } }
                 this.sync();
                 (this.changed)();
                 if let Some(popover) = b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() { popover.popdown(); }

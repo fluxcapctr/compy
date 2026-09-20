@@ -150,12 +150,22 @@ impl Region {
     }
 
     /// A transparent surface covering this region, and a context on it that maps user space exactly as `cr` does.
+    /// The surface holds as many pixels as the target does for the region (a HiDPI frame is scaled) and
+    /// carries the same device scale, so painting it back at the region's origin lands pixel for pixel.
     fn offscreen(&self, cr: &Context) -> Result<(ImageSurface, Context)> {
-        let surface = new_argb(self.width, self.height)?;
+        let (sx, sy) = target_scale(cr);
+        let surface = new_argb((self.width as f64 * sx).round().max(1.0) as i32, (self.height as f64 * sy).round().max(1.0) as i32)?;
+        surface.set_device_scale(sx, sy);
         let inner = Context::new(&surface)?;
         inner.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -self.x as f64, -self.y as f64)));
         Ok((surface, inner))
     }
+}
+
+/// The device scale of the surface a context draws on (2 on a HiDPI frame, 1 for a plain surface).
+pub(crate) fn target_scale(cr: &Context) -> (f64, f64) {
+    let (sx, sy) = cr.target().device_scale();
+    (if sx.is_finite() && sx > 0.0 { sx } else { 1.0 }, if sy.is_finite() && sy > 0.0 { sy } else { 1.0 })
 }
 
 impl Renderer {
@@ -475,8 +485,10 @@ impl Renderer {
             let cr = Context::new(&surface)?;
             cr.translate(-x0 as f64, -y0 as f64);
             let had_preview = self.previews.remove(&id);
+            let had_placement = self.preview_transforms.remove(&id);
             let result = self.paint_own(id, &cr, Operator::Over);
             if let Some(p) = had_preview { self.previews.insert(id, p); }
+            if let Some(t) = had_placement { self.preview_transforms.insert(id, t); }
             result?;
         }
         let (wu, hu) = (w as usize, h as usize);
@@ -659,7 +671,6 @@ impl Renderer {
         if adjusts && !readable {
             let Some(region) = Region::of(cr)? else { return Ok(()) };
             let (surface, inner) = region.offscreen(cr)?;
-            inner.rectangle(region.x as f64, region.y as f64, region.width as f64, region.height as f64);
             self.draw_artboard_backgrounds(&inner)?;
             for id in visible {
                 let folders = self.folder_masks(id);
@@ -684,7 +695,7 @@ impl Renderer {
     /// Every visible artboard's frame filled with its background, before any layer; a board without one
     /// (transparent) is left clear.
     pub(crate) fn draw_artboard_backgrounds(&mut self, cr: &Context) -> Result<()> {
-        let boards: Vec<(f64, f64, f64, f64, [f64; 3])> = entries_ordered(&self.layers, true).into_iter().filter(|e| e.visible && e.layer.is_artboard()).filter_map(|e| e.layer.artboard.as_ref().and_then(|b| b.background.map(|c| (b.x, b.y, b.width, b.height, c)))).collect();
+        let boards: Vec<(f64, f64, f64, f64, [f64; 3])> = entries_ordered(&self.layers, false).into_iter().filter(|e| e.visible && e.layer.is_artboard()).filter_map(|e| e.layer.artboard.as_ref().and_then(|b| b.background.map(|c| (b.x, b.y, b.width, b.height, c)))).collect();
         for (x, y, w, h, c) in boards {
             cr.save()?;
             cr.set_source_rgb(c[0], c[1], c[2]);
@@ -778,12 +789,18 @@ impl Renderer {
         let Ok(target) = ImageSurface::try_from(cr.target()) else { return Ok(()) };
         let Some(region) = Region::of(cr)? else { return Ok(()) };
         cr.target().flush();
-        let (w, h) = (region.width as usize, region.height as usize);
+        // The region in the target's own pixels: its coordinates are logical, the surface may be scaled
+        // (a HiDPI frame) and offset (a group).
+        let (tsx, tsy) = target.device_scale();
+        let (tox, toy) = target.device_offset();
+        let (px, py) = ((region.x as f64 * tsx + tox).round() as i32, (region.y as f64 * tsy + toy).round() as i32);
+        let (pw, ph) = ((region.width as f64 * tsx).round().max(1.0) as i32, (region.height as f64 * tsy).round().max(1.0) as i32);
+        let (w, h) = (pw as usize, ph as usize);
         let (tw, th) = (target.width() as i32, target.height() as i32);
-        if region.x < 0 || region.y < 0 || region.x + region.width > tw || region.y + region.height > th { return Ok(()); }
+        if px < 0 || py < 0 || px + pw > tw || py + ph > th { return Ok(()); }
         let mut original = vec![0u8; w * h * 4];
         with_bytes(&target, |data, stride| {
-            for r in 0..h { original[r * w * 4..(r + 1) * w * 4].copy_from_slice(&data[(region.y as usize + r) * stride + region.x as usize * 4..(region.y as usize + r) * stride + (region.x as usize + w) * 4]); }
+            for r in 0..h { original[r * w * 4..(r + 1) * w * 4].copy_from_slice(&data[(py as usize + r) * stride + px as usize * 4..(py as usize + r) * stride + (px as usize + w) * 4]); }
         })?;
         let mut adjusted = original.clone();
         // Where this region sits on the document, so Grain's pattern stays put.
@@ -814,8 +831,11 @@ impl Renderer {
             for (a, o) in adjusted.iter_mut().zip(&original) { *a = (*a as f64 * opacity + *o as f64 * (1.0 - opacity)).round() as u8; }
         }
         let result = crate::raster::argb_from_packed(w as i32, h as i32, adjusted)?;
-        // Coverage: the folders' masks times the layer's own, as an A8 over the region.
-        let coverage = crate::raster::a8_filled(region.width, region.height, 255)?;
+        result.set_device_scale(tsx, tsy);
+        // Coverage: the folders' masks times the layer's own, as an A8 over the region (in the target's
+        // pixels, placed by logical coordinates like everything else).
+        let coverage = crate::raster::a8_filled(pw, ph, 255)?;
+        coverage.set_device_scale(tsx, tsy);
         {
             let ccr = Context::new(&coverage)?;
             ccr.set_matrix(Matrix::multiply(&cr.matrix(), &Matrix::new(1.0, 0.0, 0.0, 1.0, -region.x as f64, -region.y as f64)));
@@ -1197,10 +1217,11 @@ enum MaskSource {
     Placed(ImageSurface),
 }
 
-/// Device pixels per user unit along the context's x axis.
+/// Surface pixels per user unit along the context's x axis: the matrix's scale times the surface's own
+/// device scale (a HiDPI frame holds twice the pixels its coordinates say).
 pub(crate) fn device_scale(cr: &Context) -> f64 {
     let m = cr.matrix();
-    (m.xx() * m.xx() + m.yx() * m.yx()).sqrt()
+    (m.xx() * m.xx() + m.yx() * m.yx()).sqrt() * target_scale(cr).0
 }
 
 /// Moves the context to a layer's center, rotated and flipped as its transform says; the layer's unrotated

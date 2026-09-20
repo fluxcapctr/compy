@@ -196,6 +196,7 @@ impl Inner {
         self.count.set_label(&total.to_string());
         // Rows come and go here without that meaning a click: the selection signal is ignored meanwhile.
         self.syncing.set(true);
+        let scroll = self.list.parent().and_downcast::<gtk::ScrolledWindow>().map(|s| s.vadjustment().value());
         while let Some(child) = self.list.first_child() { self.list.remove(&child); }
         self.details.borrow_mut().clear();
         let mut ids = Vec::with_capacity(infos.len());
@@ -428,6 +429,10 @@ impl Inner {
             Some(index) => { if let Some(row) = self.list.row_at_index(index as i32) { self.list.select_row(Some(&row)); } }
             None => {}
         }
+        if let (Some(value), Some(scroller)) = (scroll, self.list.parent().and_downcast::<gtk::ScrolledWindow>()) {
+            // After the rows have their sizes, the same place as before.
+            gtk::glib::idle_add_local_once(move || scroller.vadjustment().set_value(value));
+        }
         self.syncing.set(false);
         self.sync_controls();
     }
@@ -450,6 +455,7 @@ impl Inner {
                 Some(gtk::gdk::ContentProvider::for_value(&LAYER_DRAG.to_value()))
             });
         }
+        source.connect_drag_end(|_, _, _| { DRAG.with(|s| { let _ = s.borrow_mut().take(); }); });
         row.add_controller(source);
         let target = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE | gtk::gdk::DragAction::COPY);
         {

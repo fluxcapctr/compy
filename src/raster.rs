@@ -32,7 +32,16 @@ impl Drop for Borrow {
 }
 
 /// A transparent premultiplied ARGB32 surface.
+/// The most pixels one working surface may hold (a 100-megapixel document at a 2x display).
+const SURFACE_BUDGET: i64 = 400_000_000;
+
+fn check_size(width: i32, height: i32) -> Result<()> {
+    if width < 0 || height < 0 || width > 32_767 || height > 32_767 || width as i64 * height as i64 > SURFACE_BUDGET { anyhow::bail!("{width} x {height} is too big a surface to make"); }
+    Ok(())
+}
+
 pub fn new_argb(width: i32, height: i32) -> Result<ImageSurface> {
+    check_size(width, height)?;
     Ok(ImageSurface::create(Format::ARgb32, width, height)?)
 }
 
@@ -43,6 +52,7 @@ pub fn a8_from_data(width: i32, height: i32, data: Vec<u8>, stride: i32) -> Resu
 
 /// An A8 surface filled with one value.
 pub fn a8_filled(width: i32, height: i32, value: u8) -> Result<ImageSurface> {
+    check_size(width, height)?;
     let stride = Format::A8.stride_for_width(width as u32)?;
     a8_from_data(width, height, vec![value; stride as usize * height as usize], stride)
 }
