@@ -1,6 +1,6 @@
 [package]
 name = "compositor"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Compy, a layer-based image editor for Linux with an AI assistant, built around the original Compositor C pixel core."
 license = "MIT"

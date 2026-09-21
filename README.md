@@ -75,9 +75,9 @@ That builds `compy-git`, installs it with pacman, and puts Compy in the app laun
 from a terminal. Update later by running the same `makepkg -si` again.
 
 **Any Linux**, from a release: download the tarball from the Releases page, unpack it, and run
-`./install.sh` inside. It puts the binary in `~/.local/bin`, the icon and desktop entry under
-`~/.local/share`, and touches nothing in `/usr`. Needs GTK 4.14 or newer, Cairo, Pango and libheif
-installed by the distribution (`libgtk-4-1 libheif1` on Debian and Ubuntu 24.04 or newer).
+`./install.sh` inside. It puts the binary in `~/.local/bin`, the image libraries it was built with in
+`~/.local/lib/compy`, the icon and desktop entry under `~/.local/share`, and touches nothing in
+`/usr`. Needs GTK 4.14 or newer from the distribution (Ubuntu 24.04, Fedora 40, Debian 13 or newer).
 
 **From source**: a Rust toolchain plus the development packages (`gtk4 cairo pango libheif` on Arch;
 `libgtk-4-dev libcairo2-dev libpango1.0-dev libheif-dev` on Debian and Ubuntu), then

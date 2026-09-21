@@ -10,6 +10,8 @@ if [ -f Cargo.toml ]; then
   install -Dm755 target/release/compositor "$HOME/.local/bin/compositor"
 elif [ -f compositor ]; then
   install -Dm755 compositor "$HOME/.local/bin/compositor"
+  # A release tarball brings the image libraries it was built with.
+  if [ -d lib ]; then mkdir -p "$HOME/.local/lib/compy"; install -m644 lib/* "$HOME/.local/lib/compy/"; fi
 else
   echo "no Cargo.toml and no compositor binary here" >&2; exit 1
 fi

@@ -28,7 +28,8 @@ jobs:
           sudo ldconfig
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
-        run: cargo build --release
+        # The binary looks for the bundled libraries beside itself (~/.local/lib/compy after install.sh).
+        run: RUSTFLAGS="-C link-args=-Wl,-rpath,\$ORIGIN/../lib/compy" cargo build --release
       - name: Test
         run: cargo test --release --lib
       - name: Package
@@ -36,8 +37,11 @@ jobs:
           set -e
           v="${GITHUB_REF_NAME#v}"
           dir="compy-${v}-linux-x86_64"
-          mkdir -p "$dir/assets"
+          mkdir -p "$dir/assets" "$dir/lib"
           cp target/release/compositor "$dir/"
+          # libheif and its codecs travel with the binary: distributions ship older ones.
+          for l in $(ldd target/release/compositor | awk '/=> \// {print $3}' | grep -E 'libheif|libde265|libx265|libaom|libdav1d|libsharpyuv|libjpeg|libopenjp|libnuma'); do cp -L "$l" "$dir/lib/"; done
+          ls -la "$dir/lib"
           cp install.sh LICENSE README.md "$dir/"
           cp assets/compy-logo.png assets/compy-mark.png assets/compy-design.md "$dir/assets/"
           tar czf "$dir.tar.gz" "$dir"
