@@ -274,6 +274,27 @@ impl App {
             JOBS.with(|jobs| { if let Some(j) = jobs.borrow_mut().remove(&job) { j.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); } });
             return Ok(json!("cancelled"));
         }
+        if tool == "_ui" {
+            // Scripted demos and checks only (COMPOSITOR_SCRIPT=1 on that instance): a window action by
+            // name, a tool by name, or every dialog closed. Never for the model.
+            if std::env::var_os("COMPOSITOR_SCRIPT").is_none() { bail!("unknown tool _ui"); }
+            if let Some(name) = text(args, "activate") {
+                let (action, param) = match name.split_once("::") { Some((a, p)) => (a.to_string(), Some(p.to_string())) , None => (name.clone(), None) };
+                let variant = param.map(|p| p.to_variant());
+                gtk::prelude::ActionGroupExt::activate_action(&self.window, &action, variant.as_ref());
+                return Ok(json!("activated"));
+            }
+            if flag(args, "close").unwrap_or(false) {
+                if let Some(app) = self.window.application() { for w in app.windows() { if w != *self.window.upcast_ref::<gtk::Window>() { w.close(); } } }
+                return Ok(json!("closed"));
+            }
+            if let Some(name) = text(args, "tool") {
+                let Some(t) = super::Tool::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(&name)) else { bail!("no tool {name}") };
+                self.with_current(|p| p.canvas.set_tool(t));
+                return Ok(json!("tool set"));
+            }
+            bail!("_ui takes activate, close or tool");
+        }
         match tool {
             "open" => {
                 let path = agent_path(&text(args, "path").unwrap_or_default())?;

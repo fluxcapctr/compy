@@ -3,9 +3,11 @@
 A layer-based image editor for Linux, in the shape of Photoshop, with an AI assistant built in. Native
 GTK4, written in Rust, built for Omarchy and at home on any Linux desktop.
 
-![Compy at work: a photo warmed up, a card and type added by the assistant, then exported as artboards](assets/demo.gif)
+![A tour of Compy: a selection and Curves, adjustment layers, a card with a layer style, type, a vignette, the History window, Export Sizes, and the document as three artboards](assets/tour.gif)
 
-*Compy doing the design work from one sentence, at double speed. [Full-speed video](https://github.com/fluxcapctr/compy/releases/download/v0.1.0/compy-demo.mp4).*
+*Forty seconds around the editor: Curves on a selection, adjustment layers, Layer Style, type, a gradient
+vignette, History, Export Sizes, and the picture exported as Instagram, Story and X artboards.
+[Video](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-tour.mp4).*
 
 Compy started as a Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a macOS
 editor whose C pixel core (`csrc/`) is compiled here unchanged. Everything around it is new: the
@@ -32,7 +34,10 @@ compositing engine, the tools, the file formats and the assistant.
   a set of editor tools: it selects, paints, adjusts, styles, sets type, exports, and, with a fal.ai key,
   generates and edits pictures (Generative Fill and Expand, Nano Banana, GPT Image, upscaling,
   relighting). It talks about the picture, not the tools, and every tool call is an undoable step you
-  watch happen. Dictation works through voxtype.
+  watch happen. Dictation works through voxtype. Below, one sentence in and the layout out, at double
+  speed ([full-speed video](https://github.com/fluxcapctr/compy/releases/download/v0.1.0/compy-demo.mp4)).
+
+  ![The assistant warming a photo up and building a card with type from one request](assets/demo.gif)
 - **Generative Fill and Expand.** Select an area, or ask for more canvas, and describe what belongs
   there. Below, one sentence to the assistant: the canvas grows and the cut-off headdress and rifle are
   completed on their own layer, with the waiting cut out of the clip.
