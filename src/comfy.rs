@@ -34,6 +34,12 @@ pub struct Config {
     /// `models/text_encoders/…`
     #[serde(default = "default_clip")]
     pub clip: String,
+    /// Where the text encoder runs. It is 8.9GB beside a 6.9GB DiT, which will not sit in 16GB
+    /// together: ComfyUI then swaps one out for the other every run, and that churn faults the
+    /// driver. On the CPU it costs about twenty seconds a picture and leaves 5GB of VRAM free.
+    /// "default" puts it back on the card, for a machine with room for both.
+    #[serde(default = "default_clip_device")]
+    pub clip_device: String,
     /// `models/vae/…`
     #[serde(default = "default_vae")]
     pub vae: String,
@@ -58,6 +64,7 @@ pub struct Config {
 fn default_host() -> String { "http://127.0.0.1:8188".into() }
 fn default_unet() -> String { "qwen_image_2.1_int8_convrot.safetensors".into() }
 fn default_clip() -> String { "qwen3vl_8b_int8_convrot.safetensors".into() }
+fn default_clip_device() -> String { "cpu".into() }
 fn default_vae() -> String { "qwen_image_2.1_vae_bf16.safetensors".into() }
 // ComfyUI's own Qwen-Image-2.1 templates sample at 25 steps with the guidance off; the model is
 // trained for it and a higher cfg burns the image.
@@ -70,7 +77,7 @@ fn default_scheduler() -> String { "simple".into() }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { host: default_host(), unet: default_unet(), clip: default_clip(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), inpaint_cfg: default_inpaint_cfg(), edit_denoise: default_edit_denoise(), sampler: default_sampler(), scheduler: default_scheduler() }
+        Self { host: default_host(), unet: default_unet(), clip: default_clip(), clip_device: default_clip_device(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), inpaint_cfg: default_inpaint_cfg(), edit_denoise: default_edit_denoise(), sampler: default_sampler(), scheduler: default_scheduler() }
     }
 }
 
@@ -199,7 +206,7 @@ impl Comfy {
     fn loaders(&self) -> serde_json::Map<String, Value> {
         let mut m = serde_json::Map::new();
         m.insert("1".into(), json!({"class_type": "UNETLoader", "inputs": {"unet_name": self.config.unet, "weight_dtype": "default"}}));
-        m.insert("2".into(), json!({"class_type": "CLIPLoader", "inputs": {"clip_name": self.config.clip, "type": "qwen_image"}}));
+        m.insert("2".into(), json!({"class_type": "CLIPLoader", "inputs": {"clip_name": self.config.clip, "type": "qwen_image", "device": self.config.clip_device}}));
         m.insert("3".into(), json!({"class_type": "VAELoader", "inputs": {"vae_name": self.config.vae}}));
         m
     }
@@ -391,6 +398,8 @@ mod tests {
     fn text_to_image_graph_is_wired() {
         let g = comfy().text_to_image("a cat", "", 1024, 1024, false, 7);
         assert_eq!(g["2"]["inputs"]["type"], "qwen_image");
+        // Off the card by default: the two models do not fit on it together.
+        assert_eq!(g["2"]["inputs"]["device"], "cpu");
         assert_eq!(g["5"]["class_type"], "EmptyLatentImage");
         assert_eq!(g["7"]["inputs"]["latent_image"][0], "5");
         assert_eq!(g["7"]["inputs"]["seed"], 7);
