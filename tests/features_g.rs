@@ -1397,3 +1397,38 @@ fn layer_styles_scale_with_their_layers() {
     assert!((s.size / 40.0 - k).abs() < 0.02, "the shadow followed the card's scale {k}: {s:?}");
     assert!(k < 1.0, "the card shrank: {k}");
 }
+
+#[test]
+fn artboards_from_sizes_carry_scaled_styles() {
+    use compositor::effects::{Effects, Shadow};
+    use compositor::export_sizes::{Fit, SizePreset, add_as_artboards};
+    let mut d = Document::blank(1648, 2944, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 1648.0, 2944.0), [0.2, 0.4, 0.8], 0.0).unwrap();
+    let card = d.add_shape_layer(false, (110.0, 2280.0, 1430.0, 520.0), [1.0, 1.0, 1.0], 44.0).unwrap();
+    let mut fx = Effects::default();
+    fx.drop_shadow = Some(Shadow { enabled: true, color: [0.0; 3], opacity: 0.55, angle: 120.0, distance: 26.0, size: 44.0 });
+    d.set_effects(card, Some(&fx)).unwrap();
+    let (made, failed) = add_as_artboards(&mut d, &[SizePreset { name: "Instagram post".into(), width: 1080, height: 1080 }], Fit::Reframe, [1.0; 3]);
+    assert!(failed.is_empty() && made.len() == 1);
+    let copy = d.renderer.layers().iter().find(|l| l.name.ends_with("copy") && l.effects.is_some()).expect("the card's copy keeps its style");
+    let s = Effects::from_record(copy.effects.as_ref().unwrap()).unwrap().drop_shadow.unwrap();
+    let k = copy.transform.size.0 / 1430.0;
+    assert!((s.size / 44.0 - k).abs() < 0.03, "shadow size follows the card: k {k}, size {}", s.size);
+}
+
+/// A vignette (dark edges, clear middle) spans the canvas, so Reframe keeps it as picture rather than
+/// shrinking it into a box.
+#[test]
+fn reframe_keeps_a_vignette_as_picture() {
+    use compositor::export_sizes::{Fit, SizePreset, remake};
+    use compositor::gradient::{Gradient, Shape, Stop, AlphaStop};
+    let mut d = Document::blank(200, 100, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.2, 0.4, 0.8], 0.0).unwrap();
+    let vignette = d.add_blank_layer();
+    let g = Gradient { stops: vec![Stop { position: 0.0, color: [0.0; 3] }, Stop { position: 1.0, color: [0.0; 3] }], alphas: vec![AlphaStop { position: 0.0, alpha: 0.0 }, AlphaStop { position: 0.6, alpha: 0.0 }, AlphaStop { position: 1.0, alpha: 0.8 }] };
+    d.gradient_fill((100.0, 50.0), (200.0, 100.0), Shape::Radial, &g, 1.0, true).unwrap();
+    let story = SizePreset { name: "Story".into(), width: 90, height: 160 };
+    let reframed = remake(&d, &story, Fit::Reframe, [1.0; 3]).unwrap();
+    let t = reframed.renderer.layer(vignette).transform;
+    assert!(t.size.0 >= 90.0 && t.size.1 >= 160.0, "the vignette still covers the frame: {t:?}");
+}

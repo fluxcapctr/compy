@@ -111,12 +111,16 @@ pub fn remake(document: &Document, preset: &SizePreset, fit: Fit, background: [f
 /// (through its mask) cover less than half the canvas; with the box around those pixels.
 fn element_layers(document: &mut Document) -> Result<Vec<(uuid::Uuid, (f64, f64, f64, f64))>> {
     let candidates: Vec<(uuid::Uuid, bool)> = crate::format::visible_layers(document.renderer.layers()).into_iter().map(|id| (id, document.renderer.layer(id).text.is_some())).filter(|(id, _)| document.renderer.layer(*id).adjustment.is_none()).collect();
+    let area = document.width() as f64 * document.height() as f64;
     let mut out = Vec::new();
     for (id, is_text) in candidates {
         let Some((fraction, bounds)) = document.layer_coverage(id)? else { continue };
         // Type is always an element; anything else is the picture once it covers half the canvas (a
-        // background rectangle counts as the picture, a small shape as an element).
-        if is_text || fraction < 0.5 { out.push((id, bounds)); }
+        // background rectangle counts as the picture, a small shape as an element). So is anything whose
+        // visible pixels reach across most of the canvas however sparse they are: a vignette, a frame, a
+        // border, a scatter of dust.
+        let span = ((bounds.2 - bounds.0).min(document.width() as f64) * (bounds.3 - bounds.1).min(document.height() as f64)) / area;
+        if is_text || (fraction < 0.5 && span < 0.6) { out.push((id, bounds)); }
     }
     Ok(out)
 }
