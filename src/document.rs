@@ -3466,6 +3466,11 @@ impl Document {
                 }
                 self.renderer.set_layer_transform(layer.id, placed);
             }
+            // Layer styles scale with their layers (Photoshop's "Scale Styles"), by the mean factor.
+            let f = (sx * sy).sqrt();
+            for layer in self.renderer.layers().to_vec() {
+                if let Some(e) = layer.effects.as_ref().and_then(crate::effects::Effects::from_record) { self.renderer.set_effects(layer.id, Some(e.scaled(f).to_record())); }
+            }
             self.map_artboards(|(x, y, w, h)| (x * sx, y * sy, w * sx, h * sy));
             for x in &mut self.guides_v { *x *= sx; }
             for y in &mut self.guides_h { *y *= sy; }

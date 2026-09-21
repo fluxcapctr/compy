@@ -1369,3 +1369,31 @@ fn round_nine_fixes() {
     assert!(!e.busy_editing(), "exactly the outer edit remained to close");
     assert_eq!(e.undo_name(), Some("Outer"));
 }
+
+/// Layer styles keep their proportion when a layer is scaled: Image Size scales them with the document,
+/// Export Sizes with the element it reframes.
+#[test]
+fn layer_styles_scale_with_their_layers() {
+    use compositor::effects::{Effects, Shadow};
+    use compositor::export_sizes::{Fit, SizePreset, remake};
+    let mut d = Document::blank(200, 100, 72.0).unwrap();
+    d.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.2, 0.4, 0.8], 0.0).unwrap();
+    let card = d.add_shape_layer(false, (150.0, 10.0, 40.0, 20.0), [1.0, 1.0, 1.0], 0.0).unwrap();
+    let mut fx = Effects::default();
+    fx.drop_shadow = Some(Shadow { enabled: true, color: [0.0; 3], opacity: 0.6, angle: 120.0, distance: 20.0, size: 40.0 });
+    d.set_effects(card, Some(&fx)).unwrap();
+    let shadow = |doc: &Document, id| Effects::from_record(doc.renderer.layer(id).effects.as_ref().unwrap()).unwrap().drop_shadow.unwrap();
+    // Image Size to half: the shadow halves.
+    let mut half = Document::new(compositor::format::Project { path: std::path::PathBuf::new(), manifest: d.manifest(), images: d.renderer.images().clone(), masks: d.renderer.masks().clone() }).unwrap();
+    half.image_size(100, 50, 72.0, compositor::format::Sampling::High).unwrap();
+    let s = shadow(&half, card);
+    assert!((s.distance - 10.0).abs() < 1e-9 && (s.size - 20.0).abs() < 1e-9, "halved: {s:?}");
+    // Reframe to a tall size: the card is an element scaled to the short side, and so is its shadow.
+    let story = SizePreset { name: "Story".into(), width: 90, height: 160 };
+    let reframed = remake(&d, &story, Fit::Reframe, [1.0; 3]).unwrap();
+    let t = reframed.renderer.layer(card).transform;
+    let k = t.size.0 / 40.0;
+    let s = shadow(&reframed, card);
+    assert!((s.size / 40.0 - k).abs() < 0.02, "the shadow followed the card's scale {k}: {s:?}");
+    assert!(k < 1.0, "the card shrank: {k}");
+}

@@ -398,7 +398,8 @@ the type and shape commands last; Select > Modify has Feather, Expand and Contra
 Blur, Sharpen, Noise and Other. Where the README names a command by its old place (Filter > Unsharp Mask,
 say), look in the group it belongs to.
 
-**Export Sizes.** File > Export Sizes writes the document at several sizes at once into a folder:
+**Export Sizes.** Layer styles scale with their layers here and in Image Size, so a card's shadow stays in
+proportion on every size. File > Export Sizes writes the document at several sizes at once into a folder:
 tick presets (Instagram post and portrait, Story or Reel, Facebook, X, LinkedIn, YouTube thumbnail,
 Pinterest, the IAB banner sizes, HD, 4K, Letter, A4 and Tabloid at 300 ppi) or a custom size, pick how
 the picture meets each frame (Reframe: the picture fills the frame and type, logos and other small

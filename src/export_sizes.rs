@@ -100,6 +100,8 @@ pub fn remake(document: &Document, preset: &SizePreset, fit: Fit, background: [f
             moved.size = size;
             moved.origin = crate::format::Point((center.0 - size.0 / 2.0).round(), (center.1 - size.1 / 2.0).round());
             copy.set_transform(id, moved, "Reframe");
+            // The element's style follows it: the copy was scaled by `scale`, the element ends up at `k`.
+            if let Some(e) = copy.renderer.layer(id).effects.as_ref().and_then(crate::effects::Effects::from_record) { copy.renderer.set_effects(id, Some(e.scaled(k / scale).to_record())); }
         }
     }
     Ok(copy)

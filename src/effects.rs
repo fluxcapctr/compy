@@ -164,6 +164,18 @@ impl Effects {
     /// carry a size that would blur for minutes, or a color past white that breaks premultiplied pixels).
     pub fn from_record(value: &serde_json::Value) -> Option<Effects> { serde_json::from_value::<Effects>(value.clone()).ok().map(|e| e.clamped()) }
 
+    /// The same look at another size: every distance and size in pixels multiplied by `f` (a layer scaled
+    /// with the document, or reframed for an export size, keeps its shadow in proportion).
+    pub fn scaled(&self, f: f64) -> Effects {
+        let mut e = self.clone();
+        for s in [&mut e.drop_shadow, &mut e.inner_shadow].into_iter().flatten() { s.distance *= f; s.size *= f; }
+        for g in [&mut e.outer_glow, &mut e.inner_glow].into_iter().flatten() { g.size *= f; }
+        if let Some(b) = e.bevel.as_mut() { b.size *= f; }
+        if let Some(st) = e.stroke.as_mut() { st.size *= f; }
+        if let Some(p) = e.pattern_overlay.as_mut() { p.scale *= f; }
+        e.clamped()
+    }
+
     fn clamped(mut self) -> Effects {
         fn c(v: f64, lo: f64, hi: f64, or: f64) -> f64 { if v.is_finite() { v.clamp(lo, hi) } else { or } }
         fn color(rgb: [f64; 3]) -> [f64; 3] { rgb.map(|v| c(v, 0.0, 1.0, 0.0)) }
