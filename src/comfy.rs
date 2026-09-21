@@ -46,6 +46,9 @@ pub struct Config {
     /// Guidance above 1 samples twice a step, so a fill costs about double a generation.
     #[serde(default = "default_inpaint_cfg")]
     pub inpaint_cfg: f64,
+    /// How far an edit may move from the source: 1.0 would discard it entirely.
+    #[serde(default = "default_edit_denoise")]
+    pub edit_denoise: f64,
     #[serde(default = "default_sampler")]
     pub sampler: String,
     #[serde(default = "default_scheduler")]
@@ -61,12 +64,13 @@ fn default_vae() -> String { "qwen_image_2.1_vae_bf16.safetensors".into() }
 fn default_steps() -> u32 { 25 }
 fn default_cfg() -> f64 { 1.0 }
 fn default_inpaint_cfg() -> f64 { 4.0 }
+fn default_edit_denoise() -> f64 { 0.7 }
 fn default_sampler() -> String { "euler".into() }
 fn default_scheduler() -> String { "simple".into() }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { host: default_host(), unet: default_unet(), clip: default_clip(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), inpaint_cfg: default_inpaint_cfg(), sampler: default_sampler(), scheduler: default_scheduler() }
+        Self { host: default_host(), unet: default_unet(), clip: default_clip(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), inpaint_cfg: default_inpaint_cfg(), edit_denoise: default_edit_denoise(), sampler: default_sampler(), scheduler: default_scheduler() }
     }
 }
 
@@ -228,18 +232,21 @@ impl Comfy {
         Value::Object(m)
     }
 
-    /// An edit of `source_name` (already uploaded): the reference image goes to the text encoder,
-    /// which also hands back the latent sized to match, so the edit does not shift.
+    /// An edit of `source_name` (already uploaded). Qwen-Image-2.1 can take the source as a vision
+    /// reference, but the tower plus the DiT faults the driver on a 16GB card, so this re-noises the
+    /// source latent instead: the picture stays, the prompt moves it, and no reference is needed.
+    /// `denoise` is how far it is allowed to move.
     pub fn edit(&self, prompt: &str, negative: &str, source_name: &str, seed: u64) -> Value {
         let mut m = self.loaders();
         m.insert("6".into(), json!({"class_type": "LoadImage", "inputs": {"image": source_name}}));
         m.insert("4".into(), json!({"class_type": "TextEncodeQwenImage21", "inputs": {
             "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative, "vae": ["3", 0], "resolution": 1024,
-            // The reference slots are an autogrow input, so they arrive as a map, not as flat keys.
-            "images": {"image_1": ["6", 0]},
         }}));
-        // The encoder's third output is an empty latent on the reference's size.
-        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["4", 2]), seed, self.config.cfg);
+        m.insert("12".into(), json!({"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["3", 0]}}));
+        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["12", 0]), seed, self.config.inpaint_cfg);
+        // Editing keeps the source by denoising only part way; generation and filling start from noise.
+        m.get_mut("7").and_then(|k| k.get_mut("inputs")).and_then(|i| i.as_object_mut())
+            .map(|i| i.insert("denoise".into(), json!(self.config.edit_denoise)));
         Value::Object(m)
     }
 
@@ -384,10 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn edit_takes_its_latent_from_the_encoder() {
+    fn edit_renoises_the_source() {
         let g = comfy().edit("make it night", "", "in.png", 3);
-        assert_eq!(g["4"]["inputs"]["images"]["image_1"][0], "6");
-        assert_eq!(g["7"]["inputs"]["latent_image"], json!(["4", 2]));
+        // No vision reference: that combination faults the driver at 16GB.
+        assert!(g["4"]["inputs"].get("images").is_none());
+        assert_eq!(g["7"]["inputs"]["latent_image"], json!(["12", 0]));
+        assert_eq!(g["7"]["inputs"]["denoise"], 0.7);
     }
 
     #[test]
