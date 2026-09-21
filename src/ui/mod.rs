@@ -11,6 +11,7 @@ mod recent;
 mod effects;
 mod filter_dialog;
 mod genfill;
+mod generate;
 mod icons;
 mod layers;
 pub mod theme;
@@ -442,7 +443,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 120] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 121] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -451,6 +452,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("clear-guides", &[], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v.clear(); d.document.guides_h.clear(); } p.canvas.area.queue_draw(); })),
         ("copy", &["<Control>c"], |s| s.copy_layer()),
         ("paste", &["<Control>v"], |s| s.paste()),
+        ("generate-image", &["<Control><Shift>n"], |s| s.open_generate()),
         ("generative-fill", &["<Control><Shift>g"], |s| s.open_genfill(false)),
         ("generative-expand", &[], |s| s.generative_expand()),
         ("toggle-rulers", &["<Control>r"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.rulers = !d.rulers; } p.canvas.area.queue_draw(); })),
@@ -742,7 +744,7 @@ fn menu() -> gio::Menu {
     ]);
     let fill = sections(&[
         &[("Foreground Color", "win.fill-foreground"), ("Background Color", "win.fill-background"), ("Pattern…", "win.fill-pattern")],
-        &[("Generative Fill…", "win.generative-fill"), ("Content-Aware Fill", "win.content-aware-fill")],
+        &[("Generate Image…", "win.generate-image"), ("Generative Fill…", "win.generative-fill"), ("Content-Aware Fill", "win.content-aware-fill")],
     ]);
     let fills = gio::Menu::new();
     fills.append_submenu(Some("Fill"), &fill);
@@ -995,6 +997,7 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Edit", "Delete", "Clear the selection, or delete the mask or layer"),
     ("Edit", "Arrows, Shift+Arrows", "Nudge the layer or selection by 1 or 10 px"),
     ("Edit", "Ctrl+Arrows", "Move the selected pixels"),
+    ("Edit", "Ctrl+Shift+N", "Generate Image"),
     ("Edit", "Ctrl+Shift+G", "Generative Fill"),
     ("Edit", "Ctrl+T", "Free Transform the selection (Return commits, Escape cancels); without one, the Move handles"),
     ("Select", "Ctrl+A, Ctrl+D, Ctrl+Shift+D", "All, Deselect, Reselect"),
@@ -1301,6 +1304,17 @@ impl App {
             opened = true;
         });
         if !opened && self.notebook.current_page().is_some() { self.alert("Select a pixel layer first", "Layer effects go on image, shape and type layers, not folders or adjustments."); }
+    }
+
+    /// The Generate Image panel: a prompt and a model, the result as a new layer. Needs only an open
+    /// document, so unlike Generative Fill there is nothing to select first.
+    fn open_generate(self: &Rc<Self>) {
+        self.with_current(|p| {
+            let doc = p.canvas.doc().clone();
+            let (panel, area) = (p.panel.clone(), p.canvas.area.clone());
+            let finished: Rc<dyn Fn()> = Rc::new(move || { panel.rebuild(); area.queue_draw(); });
+            generate::Generate::open(self.window.upcast_ref(), doc, finished);
+        });
     }
 
     fn open_genfill(self: &Rc<Self>, expand: bool) {

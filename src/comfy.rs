@@ -312,6 +312,7 @@ impl Comfy {
                     let size = body.get("image_size");
                     let width = size.and_then(|s| s.get("width")).and_then(Value::as_u64).unwrap_or(1024) as usize;
                     let height = size.and_then(|s| s.get("height")).and_then(Value::as_u64).unwrap_or(1024) as usize;
+                    let (width, height) = fit_pixels(width, height);
                     self.text_to_image(prompt, negative, width, height, transparent, seed)
                 }
             };
@@ -342,6 +343,19 @@ impl Backend for Comfy {
         }
         Ok(out)
     }
+}
+
+/// What a 16GB card will carry at 25 steps: 1024x1024 already reserves about 15GB, so a request for
+/// a whole large canvas is scaled down to roughly this, keeping its shape. The caller places the
+/// result into the rectangle it asked for either way.
+pub const MAX_PIXELS: f64 = 1_100_000.0;
+
+/// `width` x `height` shrunk to fit `MAX_PIXELS`, in proportion; left alone when it already fits.
+pub fn fit_pixels(width: usize, height: usize) -> (usize, usize) {
+    let (w, h) = (width.max(1) as f64, height.max(1) as f64);
+    if w * h <= MAX_PIXELS { return (width, height); }
+    let scale = (MAX_PIXELS / (w * h)).sqrt();
+    ((w * scale).round() as usize, (h * scale).round() as usize)
 }
 
 fn round16(n: usize) -> usize { ((n + 8) / 16).max(1) * 16 }
@@ -419,8 +433,17 @@ mod tests {
     }
 
     #[test]
+    fn a_large_canvas_is_scaled_to_what_the_card_carries() {
+        assert_eq!(fit_pixels(1024, 1024), (1024, 1024));
+        let (w, h) = fit_pixels(2100, 1500);
+        assert!((w * h) as f64 <= MAX_PIXELS, "{w}x{h} still too big");
+        assert!(((w as f64 / h as f64) - (2100.0 / 1500.0)).abs() < 0.01, "shape changed");
+    }
+
+    #[test]
     fn urlencode_escapes_what_it_must() {
         assert_eq!(urlencode("a b/c.png"), "a%20b%2Fc.png");
         assert_eq!(urlencode("plain-name_1.png"), "plain-name_1.png");
     }
 }
+

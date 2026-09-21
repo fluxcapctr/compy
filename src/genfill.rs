@@ -37,6 +37,18 @@ pub fn default_models() -> Vec<Model> {
     ]
 }
 
+/// The models Generate Image offers: this machine first, then the fal families, so the free one is
+/// the obvious pick and the billed ones are still a click away.
+pub fn generate_models() -> Vec<Model> {
+    let m = |id: &str, name: &str, price: Option<f64>| Model { id: id.into(), name: name.into(), extra: Default::default(), price_per_megapixel: price };
+    vec![
+        m(&format!("{LOCAL_PREFIX}qwen-image-2.1"), "Qwen-Image 2.1 (this machine, free)", None),
+        m("fal-ai/nano-banana-2", "Nano Banana 2 (fal)", Some(0.05)),
+        m("openai/gpt-image-2.5/flare/text-to-image", "GPT Image (fal)", Some(0.05)),
+        m("fal-ai/flux/dev", "FLUX.1 [dev] (fal)", Some(0.025)),
+    ]
+}
+
 /// The estimated charge for `count` images of `width` x `height` pixels: fal bills each image by its
 /// megapixels rounded up.
 pub fn estimate(model: &Model, width: usize, height: usize, count: u32) -> Option<f64> {
