@@ -744,8 +744,9 @@ fn menu() -> gio::Menu {
     ]);
     let fill = sections(&[
         &[("Foreground Color", "win.fill-foreground"), ("Background Color", "win.fill-background"), ("Pattern…", "win.fill-pattern")],
-        &[("Generate Image…", "win.generate-image"), ("Generative Fill…", "win.generative-fill"), ("Content-Aware Fill", "win.content-aware-fill")],
+        &[("Generative Fill…", "win.generative-fill"), ("Content-Aware Fill", "win.content-aware-fill")],
     ]);
+    edit.append_section(None, &sections(&[&[("Generate Image…", "win.generate-image")]]));
     let fills = gio::Menu::new();
     fills.append_submenu(Some("Fill"), &fill);
     fills.append(Some("Stroke…"), Some("win.stroke-selection"));
