@@ -41,6 +41,11 @@ pub struct Config {
     pub steps: u32,
     #[serde(default = "default_cfg")]
     pub cfg: f64,
+    /// Filling is asked for in words, so it needs real guidance; generation does not. At 1.0 the model
+    /// ignores the prompt and continues the surroundings instead, which is rarely what was wanted.
+    /// Guidance above 1 samples twice a step, so a fill costs about double a generation.
+    #[serde(default = "default_inpaint_cfg")]
+    pub inpaint_cfg: f64,
     #[serde(default = "default_sampler")]
     pub sampler: String,
     #[serde(default = "default_scheduler")]
@@ -51,14 +56,17 @@ fn default_host() -> String { "http://127.0.0.1:8188".into() }
 fn default_unet() -> String { "qwen_image_2.1_int8_convrot.safetensors".into() }
 fn default_clip() -> String { "qwen3vl_8b_int8_convrot.safetensors".into() }
 fn default_vae() -> String { "qwen_image_2.1_vae_bf16.safetensors".into() }
-fn default_steps() -> u32 { 20 }
-fn default_cfg() -> f64 { 2.5 }
+// ComfyUI's own Qwen-Image-2.1 templates sample at 25 steps with the guidance off; the model is
+// trained for it and a higher cfg burns the image.
+fn default_steps() -> u32 { 25 }
+fn default_cfg() -> f64 { 1.0 }
+fn default_inpaint_cfg() -> f64 { 4.0 }
 fn default_sampler() -> String { "euler".into() }
 fn default_scheduler() -> String { "simple".into() }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { host: default_host(), unet: default_unet(), clip: default_clip(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), sampler: default_sampler(), scheduler: default_scheduler() }
+        Self { host: default_host(), unet: default_unet(), clip: default_clip(), vae: default_vae(), steps: default_steps(), cfg: default_cfg(), inpaint_cfg: default_inpaint_cfg(), sampler: default_sampler(), scheduler: default_scheduler() }
     }
 }
 
@@ -194,29 +202,29 @@ impl Comfy {
 
     /// Sampler, decode and save, as nodes "7", "8" and "9", reading conditioning from `positive` and
     /// `negative` and pixels from `latent`.
-    fn tail(&self, m: &mut serde_json::Map<String, Value>, positive: Value, negative: Value, latent: Value, seed: u64) {
+    fn tail(&self, m: &mut serde_json::Map<String, Value>, positive: Value, negative: Value, latent: Value, seed: u64, cfg: f64) {
         m.insert("7".into(), json!({"class_type": "KSampler", "inputs": {
             "model": ["1", 0], "positive": positive, "negative": negative, "latent_image": latent,
-            "seed": seed, "steps": self.config.steps, "cfg": self.config.cfg,
+            "seed": seed, "steps": self.config.steps, "cfg": cfg,
             "sampler_name": self.config.sampler, "scheduler": self.config.scheduler, "denoise": 1.0,
         }}));
         m.insert("8".into(), json!({"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}}));
         m.insert("9".into(), json!({"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "compositor"}}));
     }
 
-    /// Text to image at `width` x `height`. `layers` above zero asks the RGBA VAE for a real alpha
-    /// channel, which is what Compy's `transparent` means.
+    /// Text to image at `width` x `height`. The 2.1 VAE carries an alpha channel, and transparency is
+    /// asked for in words rather than by a node, which is what ComfyUI's own background-removal
+    /// workflow does; `transparent` therefore only adds that to the prompt.
     pub fn text_to_image(&self, prompt: &str, negative: &str, width: usize, height: usize, transparent: bool, seed: u64) -> Value {
         let mut m = self.loaders();
+        let prompt = if transparent { format!("{prompt}, on a fully transparent background") } else { prompt.to_string() };
         m.insert("4".into(), json!({"class_type": "TextEncodeQwenImage21", "inputs": {
             "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative, "vae": ["3", 0], "resolution": 1024,
         }}));
         // Sizes are latent-aligned; the caller's request is honoured to the nearest multiple of 16.
         let (w, h) = (round16(width), round16(height));
-        m.insert("5".into(), json!({"class_type": "EmptyQwenImageLayeredLatentImage", "inputs": {
-            "width": w, "height": h, "layers": if transparent { 3 } else { 0 }, "batch_size": 1,
-        }}));
-        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["5", 0]), seed);
+        m.insert("5".into(), json!({"class_type": "EmptyLatentImage", "inputs": {"width": w, "height": h, "batch_size": 1}}));
+        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["5", 0]), seed, self.config.cfg);
         Value::Object(m)
     }
 
@@ -227,10 +235,11 @@ impl Comfy {
         m.insert("6".into(), json!({"class_type": "LoadImage", "inputs": {"image": source_name}}));
         m.insert("4".into(), json!({"class_type": "TextEncodeQwenImage21", "inputs": {
             "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative, "vae": ["3", 0], "resolution": 1024,
-            "image_1": ["6", 0],
+            // The reference slots are an autogrow input, so they arrive as a map, not as flat keys.
+            "images": {"image_1": ["6", 0]},
         }}));
         // The encoder's third output is an empty latent on the reference's size.
-        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["4", 2]), seed);
+        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["4", 2]), seed, self.config.cfg);
         Value::Object(m)
     }
 
@@ -243,14 +252,18 @@ impl Comfy {
         // White marks what to paint, and LoadImage's alpha-derived mask is inverted from that, so the
         // mask comes from the red channel of a greyscale PNG instead.
         m.insert("11".into(), json!({"class_type": "ImageToMask", "inputs": {"image": ["10", 0], "channel": "red"}}));
+        // No reference image here: the masked latent already carries the surroundings, and running
+        // the vision tower as well pushes a 16GB card past its VRAM mid-sample.
         m.insert("4".into(), json!({"class_type": "TextEncodeQwenImage21", "inputs": {
             "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative, "vae": ["3", 0], "resolution": 1024,
-            "image_1": ["6", 0],
         }}));
-        m.insert("12".into(), json!({"class_type": "VAEEncodeForInpaint", "inputs": {
-            "pixels": ["6", 0], "vae": ["3", 0], "mask": ["11", 0], "grow_mask_by": 6,
-        }}));
-        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["12", 0]), seed);
+        // VAEEncodeForInpaint erases the masked latent, which only suits a model trained to inpaint;
+        // Qwen-Image-2.1 is not one and returns a blur. Keeping the latent and masking only the noise
+        // lets it repaint the area with the surroundings still under it.
+        m.insert("12".into(), json!({"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["3", 0]}}));
+        m.insert("13".into(), json!({"class_type": "GrowMask", "inputs": {"mask": ["11", 0], "expand": 8, "tapered_corners": true}}));
+        m.insert("14".into(), json!({"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["12", 0], "mask": ["13", 0]}}));
+        self.tail(&mut m, json!(["4", 0]), json!(["4", 1]), json!(["14", 0]), seed, self.config.inpaint_cfg);
         Value::Object(m)
     }
 }
@@ -357,22 +370,23 @@ mod tests {
     fn text_to_image_graph_is_wired() {
         let g = comfy().text_to_image("a cat", "", 1024, 1024, false, 7);
         assert_eq!(g["2"]["inputs"]["type"], "qwen_image");
-        assert_eq!(g["5"]["inputs"]["layers"], 0);
+        assert_eq!(g["5"]["class_type"], "EmptyLatentImage");
         assert_eq!(g["7"]["inputs"]["latent_image"][0], "5");
         assert_eq!(g["7"]["inputs"]["seed"], 7);
         assert_eq!(g["9"]["class_type"], "SaveImage");
     }
 
     #[test]
-    fn transparent_asks_the_rgba_vae_for_layers() {
+    fn transparent_asks_for_it_in_the_prompt() {
         let g = comfy().text_to_image("a logo", "", 512, 512, true, 1);
-        assert_eq!(g["5"]["inputs"]["layers"], 3);
+        assert!(g["4"]["inputs"]["prompt"].as_str().unwrap().contains("transparent background"));
+        assert_eq!(g["5"]["class_type"], "EmptyLatentImage");
     }
 
     #[test]
     fn edit_takes_its_latent_from_the_encoder() {
         let g = comfy().edit("make it night", "", "in.png", 3);
-        assert_eq!(g["4"]["inputs"]["image_1"][0], "6");
+        assert_eq!(g["4"]["inputs"]["images"]["image_1"][0], "6");
         assert_eq!(g["7"]["inputs"]["latent_image"], json!(["4", 2]));
     }
 
@@ -380,8 +394,12 @@ mod tests {
     fn inpaint_masks_from_the_red_channel() {
         let g = comfy().inpaint("a tree", "", "in.png", "mask.png", 5);
         assert_eq!(g["11"]["inputs"]["channel"], "red");
-        assert_eq!(g["12"]["class_type"], "VAEEncodeForInpaint");
-        assert_eq!(g["7"]["inputs"]["latent_image"], json!(["12", 0]));
+        assert!(g["4"]["inputs"].get("images").is_none(), "inpaint must not run the vision tower");
+        assert_eq!(g["12"]["class_type"], "VAEEncode");
+        assert_eq!(g["14"]["class_type"], "SetLatentNoiseMask");
+        assert_eq!(g["7"]["inputs"]["latent_image"], json!(["14", 0]));
+        // Filling follows the prompt only with guidance on.
+        assert_eq!(g["7"]["inputs"]["cfg"], 4.0);
     }
 
     #[test]
