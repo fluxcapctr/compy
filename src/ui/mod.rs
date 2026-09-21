@@ -442,7 +442,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         glib::timeout_add_local(Duration::from_secs(crate::autosave::INTERVAL_SECONDS), move || { state.autosave_all(); glib::ControlFlow::Continue });
     }
 
-    let actions: [(&str, &[&str], fn(&Rc<App>)); 119] = [
+    let actions: [(&str, &[&str], fn(&Rc<App>)); 120] = [
         ("toggle-preview", &["<Control>f"], |s| s.toggle_preview()),
         ("toggle-guides", &["<Control>semicolon"], |s| s.with_current(|p| { { let mut d = p.canvas.doc().borrow_mut(); d.document.show_guides = !d.document.show_guides; } p.canvas.area.queue_draw(); })),
         ("new-guide", &[], |s| s.new_guide()),
@@ -546,6 +546,7 @@ fn build_window(app: &gtk::Application) -> Rc<App> {
         ("edit-text", &[], |s| s.with_current(|p| { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { if p.canvas.doc().borrow().document.text_style(id).is_some() { p.canvas.edit_text(id); } } })),
         ("shortcuts", &["F1", "<Control><Alt><Shift>k"], |s| s.show_shortcuts()),
         ("assistant", &["<Control>k"], |s| s.open_assistant()),
+        ("ai-setup", &[], |s| { let a = s.assistant.borrow().clone(); match a { Some(a) => { a.reveal(); a.refresh_setup(); } None => s.open_assistant() } }),
         ("delete-layer", &[], |s| s.edit(|d| { d.delete_layer(); Ok(()) })),
         ("layer-up", &["<Control>bracketright"], |s| s.edit(|d| { d.move_layer(true); Ok(()) })),
         ("layer-down", &["<Control>bracketleft"], |s| s.edit(|d| { d.move_layer(false); Ok(()) })),
@@ -859,7 +860,7 @@ fn menu() -> gio::Menu {
     ]);
     menu.append_submenu(Some("View"), &view);
 
-    let help = sections(&[&[("Compy, the assistant (Ctrl+K)", "win.assistant"), ("Keyboard Shortcuts (F1)", "win.shortcuts")]]);
+    let help = sections(&[&[("Compy, the assistant (Ctrl+K)", "win.assistant"), ("Set Up AI Tools…", "win.ai-setup"), ("Keyboard Shortcuts (F1)", "win.shortcuts")]]);
     menu.append_submenu(Some("Help"), &help);
     menu
 }

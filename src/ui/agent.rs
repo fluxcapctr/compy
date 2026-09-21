@@ -809,6 +809,11 @@ impl App {
 /// list, folds away to its header, and pops out into a window of its own.
 pub struct Assistant {
     content: gtk::Box,
+    /// The setup strip: what the AI tools still need, with the buttons that fix it. Hidden once nothing does.
+    setup: gtk::Box,
+    setup_text: gtk::Label,
+    setup_claude: gtk::Button,
+    setup_fal: gtk::Button,
     body: gtk::Box,
     fold: gtk::Button,
     transcript: gtk::TextView,
@@ -894,6 +899,18 @@ impl Assistant {
         header.append(&popout);
         content.append(&header);
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(4).margin_bottom(8).margin_start(8).margin_end(8).build();
+        // Setup, in the panel itself: a line saying what is missing and a button for each thing.
+        let setup = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).css_classes(["assistant-setup"]).build();
+        let setup_text = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["caption"]).build();
+        let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+        let setup_claude = gtk::Button::builder().label("Sign in to Claude Code").css_classes(["suggested-action"]).build();
+        let setup_fal = gtk::Button::builder().label("Add fal.ai key…").build();
+        buttons.append(&setup_claude);
+        buttons.append(&setup_fal);
+        setup.append(&setup_text);
+        setup.append(&buttons);
+        setup.set_visible(false);
+        body.append(&setup);
         let transcript = gtk::TextView::builder().editable(false).cursor_visible(false).wrap_mode(gtk::WrapMode::WordChar).left_margin(6).right_margin(6).top_margin(6).bottom_margin(6).build();
         transcript.add_css_class("assistant-transcript");
         let scroller = gtk::ScrolledWindow::builder().child(&transcript).min_content_height(180).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
@@ -905,7 +922,7 @@ impl Assistant {
         row.append(&send);
         body.append(&row);
         content.append(&body);
-        let this = Rc::new(Assistant { content: content.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), turn: Cell::new(0), activity: RefCell::new(String::new()), replied: Cell::new(false), app });
+        let this = Rc::new(Assistant { content: content.clone(), setup, setup_text, setup_claude: setup_claude.clone(), setup_fal: setup_fal.clone(), body, fold: fold.clone(), transcript, entry: entry.clone(), status, send: send.clone(), popout: popout.clone(), session: RefCell::new(None), busy: Cell::new(false), expanded: Cell::new(true), window: RefCell::new(None), dictating: Cell::new(false), entry_changed: Cell::new(None), voice_state: RefCell::new(String::new()), queue: RefCell::new(Vec::new()), child_pid: Cell::new(None), turn: Cell::new(0), activity: RefCell::new(String::new()), replied: Cell::new(false), app });
         { let t = this.clone(); fresh.connect_clicked(move |_| t.reset()); }
         { let t = this.clone(); entry.connect_activate(move |_| t.submit()); }
         { let t = this.clone(); entry.connect_changed(move |_| t.entry_changed.set(Some(std::time::Instant::now()))); }
@@ -914,15 +931,12 @@ impl Assistant {
         { let t = this.clone(); title.add_controller({ let g = gtk::GestureClick::new(); g.connect_released(move |_, _, _, _| t.toggle()); g }); }
         { let t = this.clone(); popout.connect_clicked(move |_| { if t.window.borrow().is_some() { t.dock(); } else { t.undock(); } }); }
         { mic.connect_clicked(move |_| { let _ = std::process::Command::new("voxtype").args(["record", "toggle"]).spawn(); }); }
-        // The first thing a new user reads: what Compy is and what it runs on, and anything missing.
-        match claude_binary() {
-            None => this.append("system", "Hi, I'm Compy. I edit the open picture with you: tell me what to do in plain words. I run on Claude Code, which was not found on this machine. On Omarchy it comes preinstalled (open a terminal and run `claude` once to sign in); elsewhere install it from claude.com/claude-code, or set COMPOSITOR_CLAUDE to the claude binary."),
-            Some(claude) => {
-                this.append("system", "Hi, I'm Compy. Tell me what to do with the open picture, in plain words: select, paint, adjust, add type, export. I run on the Claude Code already on this machine, with your sign-in and plan. Generative tools use fal.ai and ask for a key once (File > Generative Fill).");
-                let t = this.clone();
-                check_login(claude, move |logged| { if logged == Some(false) { t.append("system", "Claude Code is installed but not signed in yet. Open a terminal, run `claude`, and sign in; then come back here."); } });
-            }
-        }
+        // The first thing a new user reads: what Compy is; the setup strip above the chat says what,
+        // if anything, still needs doing, with a button for each.
+        this.append("system", "Hi, I'm Compy. Tell me what to do with the open picture, in plain words: select, paint, adjust, add type, export. I run on Claude Code with your own sign-in and plan; generative pictures run on fal.ai with a key of yours. Anything not set up yet shows above with a button.");
+        { let t = this.clone(); setup_claude.connect_clicked(move |_| t.setup_claude_clicked()); }
+        { let t = this.clone(); setup_fal.connect_clicked(move |_| { let t2 = t.clone(); super::dialogs::fal_key(t.app.window.upcast_ref(), move || { t2.append("system", "fal.ai key saved. Generative tools are ready."); t2.refresh_setup(); }); }); }
+        this.refresh_setup();
         this.dock();
         this.watch_voice();
         this
@@ -1070,6 +1084,51 @@ impl Assistant {
     /// The window is closing: Claude Code must not keep running without it, nor a paid job with nobody
     /// to receive it.
     pub fn shutdown(&self) { self.stop_turn(); self.busy.set(false); let _ = std::fs::remove_file(agent::socket_path()); }
+
+    /// Looks at Claude Code and the fal key again and shows the setup strip when something is missing.
+    pub fn refresh_setup(self: &Rc<Self>) {
+        let fal = crate::genfill::key().is_some();
+        let fal_line = if fal { String::new() } else { " Generative pictures need a fal.ai key (a few cents a picture, billed to you).".to_string() };
+        self.setup_fal.set_visible(!fal);
+        match claude_binary() {
+            None => {
+                self.setup_text.set_label(&format!("Compy runs on Claude Code, which is not installed on this machine.{fal_line}"));
+                self.setup_claude.set_label("Install Claude Code");
+                self.setup_claude.set_visible(true);
+                self.setup.set_visible(true);
+            }
+            Some(claude) => {
+                // Until the sign-in check answers, only the fal line shows.
+                self.setup_claude.set_visible(false);
+                self.setup_text.set_label(fal_line.trim());
+                self.setup.set_visible(!fal);
+                let t = self.clone();
+                check_login(claude, move |logged| {
+                    if logged == Some(false) {
+                        t.setup_text.set_label(&format!("Claude Code is installed but not signed in yet.{fal_line}"));
+                        t.setup_claude.set_label("Sign in to Claude Code");
+                        t.setup_claude.set_visible(true);
+                        t.setup.set_visible(true);
+                    }
+                });
+            }
+        }
+    }
+
+    /// The setup button for Claude Code: a terminal opens running the sign-in, or the official installer
+    /// followed by the sign-in when it is not installed at all.
+    fn setup_claude_clicked(self: &Rc<Self>) {
+        let command = match claude_binary() {
+            Some(c) => format!("{} ; echo ; echo 'Signed in? Close this window and go back to Compy.' ; read -r", shell_quote(&c.display().to_string())),
+            None => "curl -fsSL https://claude.ai/install.sh | bash && echo && echo 'Claude Code is installed. Sign in now:' && ( ~/.local/bin/claude || claude ) ; echo ; echo 'Done? Close this window and go back to Compy.' ; read -r".to_string(),
+        };
+        match open_terminal(&command) {
+            Ok(()) => self.append("system", "A terminal opened for Claude Code. When it is signed in, come back and press the button again or just ask me something."),
+            Err(e) => self.append("system", &format!("No terminal could be opened ({e}). In one of your own, run: claude")),
+        }
+        let t = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || t.refresh_setup());
+    }
 
     /// Whether a turn is running (the state tool reports it for scripts).
     pub fn is_busy(&self) -> bool { self.busy.get() }
@@ -1245,4 +1304,19 @@ mod path_tests {
         assert_eq!(flag(&json!({"t": "true"}), "t"), Some(true));
         assert_eq!(num(&json!({"w": true}), "w"), None);
     }
+}
+
+fn shell_quote(s: &str) -> String { format!("'{}'", s.replace('\'', "'\\''")) }
+
+/// Runs `command` in a terminal window: xdg-terminal-exec (the desktop's choice), $TERMINAL, then the
+/// common ones.
+fn open_terminal(command: &str) -> anyhow::Result<()> {
+    let mut candidates: Vec<(String, Vec<&str>)> = Vec::new();
+    if let Ok(t) = std::env::var("TERMINAL") { if !t.is_empty() { let flags = if t.contains("xdg-terminal-exec") { vec![] } else { vec!["-e"] }; candidates.push((t, flags)); } }
+    candidates.push(("xdg-terminal-exec".into(), vec![]));
+    for t in ["ghostty", "alacritty", "kitty", "foot", "wezterm", "gnome-terminal", "konsole", "xterm"] { candidates.push((t.into(), vec!["-e"])); }
+    for (term, flags) in candidates {
+        if std::process::Command::new(&term).args(&flags).args(["bash", "-lc", command]).spawn().is_ok() { return Ok(()); }
+    }
+    anyhow::bail!("no terminal found")
 }

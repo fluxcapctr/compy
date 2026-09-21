@@ -13,6 +13,7 @@ elif [ -f compositor ]; then
 else
   echo "no Cargo.toml and no compositor binary here" >&2; exit 1
 fi
+ln -sf compositor "$HOME/.local/bin/compy"
 
 # The Compy logo, scaled to each icon size (ImageMagick); without it the full-size logo serves every size.
 for size in 16 32 48 64 128 256 512; do

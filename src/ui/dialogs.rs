@@ -453,3 +453,21 @@ pub fn new_guide(parent: &gtk::Window, done: impl Fn(bool, f64) + 'static) {
 }
 
 pub fn is_project(path: &Path) -> bool { path.is_dir() && path.join("manifest.json").exists() }
+
+/// The fal.ai key, pasted once: kept in ~/.config/compositor/fal.key (mode 600). `done` runs after a save.
+pub fn fal_key(parent: &gtk::Window, done: impl Fn() + 'static) {
+    let (window, grid, ok) = dialog(parent, "fal.ai key");
+    grid.attach(&gtk::Label::builder().label("Generative Fill, Expand, new pictures, upscaling and relighting run on fal.ai and are billed to your fal account, a few cents a picture.").wrap(true).max_width_chars(48).xalign(0.0).build(), 0, 0, 2, 1);
+    let link = gtk::LinkButton::with_label("https://fal.ai/dashboard/keys", "Make a key at fal.ai/dashboard/keys");
+    link.set_halign(gtk::Align::Start);
+    grid.attach(&link, 0, 1, 2, 1);
+    grid.attach(&gtk::Label::builder().label("Key").xalign(0.0).build(), 0, 2, 1, 1);
+    let entry = gtk::PasswordEntry::builder().show_peek_icon(true).hexpand(true).build();
+    grid.attach(&entry, 1, 2, 1, 1);
+    let note = gtk::Label::builder().css_classes(["dim-label", "caption"]).xalign(0.0).wrap(true).max_width_chars(48).build();
+    if crate::genfill::key().is_some() { note.set_label("A key is already saved; a new one replaces it."); }
+    grid.attach(&note, 0, 3, 2, 1);
+    ok.set_label("Save key");
+    { let (w, entry, note) = (window.clone(), entry.clone(), note.clone()); ok.connect_clicked(move |_| { match crate::genfill::save_key(&entry.text()) { Ok(()) => { done(); w.close(); } Err(e) => note.set_label(&format!("{e:#}")) } }); }
+    window.present();
+}

@@ -53,7 +53,17 @@ is an alias.
 
 ## Install
 
-**Omarchy and Arch**, as a proper package built from this repository (no AUR account involved):
+**One line, any Linux:**
+
+```
+curl -fsSL https://raw.githubusercontent.com/fluxcapctr/compy/main/get.sh | bash
+```
+
+On Omarchy and Arch that builds a proper package and installs it with pacman (sudo asks once).
+Elsewhere it fetches the latest release and installs it under `~/.local`. Then open Compy from the app
+menu, or run `compy`.
+
+**Omarchy and Arch by hand**, the same package the line above builds:
 
 ```
 git clone https://github.com/fluxcapctr/compy.git
@@ -80,12 +90,13 @@ cd compy
 
 The `reference/` submodule (the macOS original, used as the specification) is not needed to build.
 
-**First run.** Open Compy, press Ctrl+K, and the assistant tells you what it needs, if anything. On
-Omarchy that is nothing: Claude Code is preinstalled, and if you have not signed in yet Compy asks you to
-run `claude` once in a terminal. On other distributions install
-[Claude Code](https://claude.com/claude-code) first. Generative tools (fill, expand, new pictures,
-upscaling, relighting) use fal.ai and ask for an API key once, under File > Generative Fill; everything
-else works without one. Optional: `libavif` for AVIF export and `voxtype` for dictation.
+**AI setup, inside the app.** Press Ctrl+K. If anything is missing the assistant shows a strip with a
+button for each thing: "Install Claude Code" or "Sign in to Claude Code" opens a terminal that does
+exactly that (on Omarchy, Claude Code is already installed, so at most it is the sign-in), and "Add
+fal.ai key" takes the key for generative pictures (fill, expand, new pictures, upscaling, relighting;
+a few cents a picture, billed to your fal account). Everything else in Compy works without either.
+Help > Set Up AI Tools brings the strip back any time. Optional: `libavif` for AVIF export and
+`voxtype` for dictation.
 
 Progress follows the phases in the build plan:
 
