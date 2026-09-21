@@ -11,6 +11,7 @@ pub mod blur;
 pub mod brush;
 pub mod brush_set;
 pub mod distort;
+pub mod comfy;
 pub mod document;
 pub mod effects;
 pub mod export_sizes;

@@ -648,9 +648,17 @@ impl App {
                     "redo" => { if dd.redo() { json!("redone") } else { json!("nothing to redo") } }
                     "zoom" => { refresh = false; json!({"zoom": num(args, "percent")}) }
                     "generative_fill" | "generative_expand" => {
-                        let Some(key) = crate::genfill::key() else { bail!("No fal.ai key is set. File > Generative Fill lets the user enter one.") };
                         let models = crate::genfill::models();
-                        let model = models.first().cloned().ok_or_else(|| anyhow::anyhow!("no generation model configured"))?;
+                        // A named model wins; otherwise the first configured one, as before.
+                        let model = match text(args, "model") {
+                            Some(name) if !name.trim().is_empty() => {
+                                let id = crate::genfill::resolve_model(&name, false);
+                                models.iter().find(|m| m.id == id).cloned().unwrap_or_else(|| crate::genfill::Model { id, name, extra: Default::default(), price_per_megapixel: None })
+                            }
+                            _ => models.first().cloned().ok_or_else(|| anyhow::anyhow!("no generation model configured"))?,
+                        };
+                        let key = crate::genfill::key();
+                        if key.is_none() && !crate::genfill::is_local(&model.id) { bail!("No fal.ai key is set. File > Generative Fill lets the user enter one.") }
                         let prompt = text(args, "prompt").unwrap_or_default();
                         if tool == "generative_expand" {
                             let (l, r, t, b) = (num(args, "left").unwrap_or(0.0) as i32, num(args, "right").unwrap_or(0.0) as i32, num(args, "top").unwrap_or(0.0) as i32, num(args, "bottom").unwrap_or(0.0) as i32);
@@ -685,9 +693,10 @@ impl App {
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
-                                let backend = crate::genfill::Fal { key };
                                 let progress = |t: &str| { if let Ok(mut s) = status.lock() { s.0 = t.to_string(); } };
-                                let outcome = backend.generate(&request, &progress, &|| cancelled.load(std::sync::atomic::Ordering::Relaxed)).map_err(|e| format!("{e:#}"));
+                                let outcome = crate::genfill::backend_for(&request.model.id, key)
+                                    .and_then(|backend| backend.generate(&request, &progress, &|| cancelled.load(std::sync::atomic::Ordering::Relaxed)))
+                                    .map_err(|e| format!("{e:#}"));
                                 let value = outcome.map(|images| json!({"window": {"x": window.0, "y": window.1, "width": window.2, "height": window.3}, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": cost}));
                                 if let Ok(mut s) = status.lock() { s.1 = Some(value); }
                             });
@@ -698,7 +707,7 @@ impl App {
                         json!({"job": job, "budget_seconds": agent::JOB_TIMEOUT_SECONDS * count as u64})
                     }
                     "generative_edit" | "generate_image" | "upscale" | "relight" => {
-                        let Some(key) = crate::genfill::key() else { bail!("No fal.ai key is set. File > Generative Fill lets the user enter one.") };
+                        let key = crate::genfill::key();
                         let (w, h) = (dd.width() as f64, dd.height() as f64);
                         // What goes to fal, and where the result lands.
                         let (model, body, place, name, cost): (String, Value, (f64, f64, f64, f64), String, f64) = match tool {
@@ -732,6 +741,9 @@ impl App {
                                 }
                             }
                         };
+                        // Only fal needs a key; upscale and relight are fal-only, so they always do.
+                        if key.is_none() && !crate::genfill::is_local(&model) { bail!("No fal.ai key is set. File > Generative Fill lets the user enter one.") }
+                        let transparent = args.get("transparent").and_then(Value::as_bool).unwrap_or(false);
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
                         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });
@@ -741,10 +753,16 @@ impl App {
                         {
                             let status = status.clone();
                             std::thread::spawn(move || {
-                                let backend = crate::genfill::Fal { key };
                                 let progress = |t: &str| { if let Ok(mut s) = status.lock() { s.0 = t.to_string(); } };
-                                let outcome = backend.run(&model, body, &progress, &|| cancelled.load(std::sync::atomic::Ordering::Relaxed)).map_err(|e| format!("{e:#}"));
-                                let value = outcome.map(|images| json!({"mode": "layer", "place": {"x": place.0, "y": place.1, "width": place.2, "height": place.3}, "name": name, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": cost}));
+                                let stop = || cancelled.load(std::sync::atomic::Ordering::Relaxed);
+                                // The local backend takes the same fal-shaped body and runs it here.
+                                let local = crate::genfill::is_local(&model);
+                                let outcome = if local {
+                                    crate::comfy::Comfy::new().run_agent(&body, transparent, &progress, &stop)
+                                } else {
+                                    crate::genfill::Fal { key: key.unwrap_or_default() }.run(&model, body, &progress, &stop)
+                                }.map_err(|e| format!("{e:#}"));
+                                let value = outcome.map(|images| json!({"mode": "layer", "place": {"x": place.0, "y": place.1, "width": place.2, "height": place.3}, "name": name, "images": images.iter().map(|i| crate::genfill::base64_encode(i)).collect::<Vec<_>>(), "cost_usd": if local { 0.0 } else { cost }}));
                                 if let Ok(mut s) = status.lock() { s.1 = Some(value); }
                             });
                         }

@@ -32,6 +32,8 @@ pub fn default_models() -> Vec<Model> {
         m("fal-ai/flux-lora/inpainting", "FLUX.1 [dev] inpainting", Some(0.035)),
         m("fal-ai/qwen-image-edit/inpaint", "Qwen Image Edit inpaint", Some(0.03)),
         m("fal-ai/inpaint", "Stable Diffusion inpainting", None),
+        // Runs here, so it is free and nothing leaves the machine; offered only when ComfyUI answers.
+        m(&format!("{LOCAL_PREFIX}qwen-image-2.1"), "Qwen-Image 2.1 (this machine)", None),
     ]
 }
 
@@ -64,6 +66,9 @@ pub fn models() -> Vec<Model> {
                 // A list written before prices were known takes them from the defaults, by id.
                 let defaults = default_models();
                 for m in list.iter_mut() { if m.price_per_megapixel.is_none() { m.price_per_megapixel = defaults.iter().find(|d| d.id == m.id).and_then(|d| d.price_per_megapixel); } }
+                // A list written before local models existed still gets them, so an upgrade needs no
+                // edit of the file.
+                for d in defaults.into_iter().filter(|d| is_local(&d.id)) { if !list.iter().any(|m| m.id == d.id) { list.push(d); } }
                 return list;
             }
         }
@@ -122,10 +127,31 @@ pub fn resolve_configured(name: &str, configured: &AgentModels, edit: bool) -> S
     family_id(name.trim(), edit).unwrap_or_else(|| name.trim().to_string())
 }
 
+/// Marks a model that runs on this machine through ComfyUI instead of at fal. The rest of the id is
+/// free text naming the local model, for the status line.
+pub const LOCAL_PREFIX: &str = "local/";
+
+/// True for an id that `backend_for` should answer with ComfyUI.
+pub fn is_local(id: &str) -> bool { id.starts_with(LOCAL_PREFIX) }
+
+/// The backend an id asks for: a local ComfyUI, or fal with `key`. Local ids need no key, which is
+/// why the key is only fetched when one is actually wanted.
+pub fn backend_for(id: &str, key: Option<String>) -> Result<Box<dyn Backend>> {
+    if is_local(id) { return Ok(Box::new(crate::comfy::Comfy::new())); }
+    let key = key.or_else(self::key).context("No fal.ai key is set. File > Generative Fill lets the user enter one.")?;
+    Ok(Box::new(Fal { key }))
+}
+
 /// The fal id for a family name; None for anything that is not one (a full id passes through).
 fn family_id(name: &str, edit: bool) -> Option<String> {
     let n = name.to_ascii_lowercase();
+    // A local id passes through as it stands; otherwise only a bare family name can mean this
+    // machine, so fal ids carrying a version number are never mistaken for one.
+    if n.starts_with(LOCAL_PREFIX) { return Some(name.trim().to_string()); }
     if n.contains('/') { return None; }
+    if n.contains("local") || n.contains("comfy") || n.contains("qwen") {
+        return Some(format!("{LOCAL_PREFIX}qwen-image-2.1"));
+    }
     let id = if n.contains("banana") || n.contains("gemini") || n.contains("google") {
         if edit { "fal-ai/nano-banana-2/edit" } else { "fal-ai/nano-banana-2" }
     } else if n.contains("gpt") || n.contains("openai") {

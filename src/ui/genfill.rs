@@ -123,9 +123,11 @@ impl GenFill {
 
     fn start(self: &Rc<Self>) {
         if self.running.borrow().is_some() { return; }
-        let Some(key) = genfill::key() else { self.status.set_label("No fal.ai key found."); return };
         let list = genfill::models();
         let Some(model) = list.get(self.models.selected() as usize).cloned() else { return };
+        // Only fal needs a key; a local model runs without one.
+        let key = genfill::key();
+        if key.is_none() && !genfill::is_local(&model.id) { self.status.set_label("No fal.ai key found."); return }
         let inputs = { let mut d = self.doc.borrow_mut(); d.document.genfill_inputs(self.composite.is_active()) };
         let (image_png, mask_png, window, _) = match inputs { Ok(i) => i, Err(e) => { self.status.set_label(&format!("{e:#}")); return } };
         self.window_rect.set(Some(window));
@@ -136,10 +138,11 @@ impl GenFill {
         {
             let shared = shared.clone();
             std::thread::spawn(move || {
-                let backend = genfill::Fal { key };
                 let progress = |text: &str| { if let Ok(mut s) = shared.lock() { s.status = text.to_string(); } };
                 let cancelled = || shared.lock().map(|s| s.cancel).unwrap_or(false);
-                let outcome = backend.generate(&request, &progress, &cancelled).map_err(|e| format!("{e:#}"));
+                let outcome = genfill::backend_for(&request.model.id, key)
+                    .and_then(|backend| backend.generate(&request, &progress, &cancelled))
+                    .map_err(|e| format!("{e:#}"));
                 if let Ok(mut s) = shared.lock() { s.done = Some(outcome); }
             });
         }
