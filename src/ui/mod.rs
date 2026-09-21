@@ -250,6 +250,8 @@ pub struct Script {
     pub layers_menu: bool,
     /// Opens the assistant panel; pops it out and back twice (a crash check).
     pub assistant: bool,
+    /// Opens the assistant and sends it this message a few seconds in (demos and checks).
+    pub ask: Option<String>,
     pub assistant_popout: bool,
     /// A Pen path from "x,y x,y ..." (a point with "x,y:hx,hy" pulls a handle); a trailing "close" closes it.
     pub path: Option<String>,
@@ -266,7 +268,7 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
         for path in &paths { state.open_path(path); }
         state.window.present();
         if let Some((w, h)) = script.window { state.window.set_default_size(w, h); }
-        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.export_sizes || script.artboards || script.type_edit || script.layers_menu || script.assistant || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
+        if script.zoom.is_some() || script.wand.is_some() || script.filter.is_some() || script.tool.is_some() || script.adjustment.is_some() || script.layer.is_some() || script.pick_color || script.pick_brush || script.rulers || script.genfill || script.brush_popover || script.preview || script.text.is_some() || script.effects || script.layer_style || script.grid || script.shortcuts || script.export_sizes || script.artboards || script.type_edit || script.layers_menu || script.assistant || script.ask.is_some() || script.assistant_popout || script.path.is_some() || !script.guides.0.is_empty() || !script.guides.1.is_empty() {
             let (state, script) = (state.clone(), script.clone());
             // After the first layout and frame, so the fit has happened and the canvas has its size.
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -299,6 +301,11 @@ pub fn run(paths: Vec<PathBuf>, script: Script) -> glib::ExitCode {
                     }
                     if script.layers_menu { p.panel.background_menu(); }
                     if script.assistant { state.open_assistant(); }
+                    if let Some(text) = script.ask.clone() {
+                        if !script.assistant { state.open_assistant(); }
+                        let state = state.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(5000), move || { let a = state.assistant.borrow().clone(); if let Some(a) = a { a.ask(&text); } });
+                    }
                     if script.assistant_popout { let a = state.assistant.borrow().clone(); if let Some(a) = a { a.undock(); a.dock(); a.undock(); a.dock(); a.toggle(); a.toggle(); } }
                     if script.type_edit { let id = p.canvas.doc().borrow().document.active; if let Some(id) = id { p.canvas.edit_text(id); } }
                     if !script.guides.0.is_empty() || !script.guides.1.is_empty() { let mut d = p.canvas.doc().borrow_mut(); d.document.guides_v = script.guides.0.clone(); d.document.guides_h = script.guides.1.clone(); p.canvas.area.queue_draw(); }

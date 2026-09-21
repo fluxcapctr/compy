@@ -85,6 +85,7 @@ fn main() {
                     "--type-edit" => script.type_edit = true,
                     "--layers-menu" => script.layers_menu = true,
                     "--assistant" => script.assistant = true,
+                    "--ask" => script.ask = text(),
                     "--assistant-popout" => { script.assistant = true; script.assistant_popout = true; }
                     "--path" => script.path = text(),
                     "--layer-style" => script.layer_style = true,

@@ -3,7 +3,9 @@
 A layer-based image editor for Linux, in the shape of Photoshop, with an AI assistant built in. Native
 GTK4, written in Rust, built for Omarchy and at home on any Linux desktop.
 
-![Compy](assets/screenshot.png)
+![Compy at work: a photo warmed up, a card and type added by the assistant, then exported as artboards](assets/demo.gif)
+
+*Compy doing the design work from one sentence, at double speed. [Full-speed video](https://github.com/fluxcapctr/compy/releases/download/v0.1.0/compy-demo.mp4).*
 
 Compy started as a Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a macOS
 editor whose C pixel core (`csrc/`) is compiled here unchanged. Everything around it is new: the

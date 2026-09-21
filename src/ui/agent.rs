@@ -307,7 +307,7 @@ impl App {
                 let result: Result<Value> = (|| {
                 let dd = &mut d.document;
                 Ok(match tool {
-                    "state" => { refresh = false; state_of(&d) }
+                    "state" => { refresh = false; let mut st = state_of(&d); if let Value::Object(m) = &mut st { m.insert("assistant_busy".into(), json!(self.assistant.borrow().as_ref().is_some_and(|a| a.is_busy()))); } st }
                     "snapshot" => { refresh = false; let png = snapshot_png(&mut d, 1024, flag(args, "selection_outline").unwrap_or(true))?; json!({"text": "The canvas now.", "png_base64": crate::genfill::base64_encode(&png)}) }
                     "select_rectangle" => { let (x, y, w, h) = (num(args, "x").unwrap_or(0.0), num(args, "y").unwrap_or(0.0), num(args, "width").unwrap_or(1.0), num(args, "height").unwrap_or(1.0)); dd.select_box(x, y, w, h, flag(args, "ellipse").unwrap_or(false), crate::selection::Mode::Replace, true)?; json!("selected") }
                     "select_all" => { dd.select_all()?; json!("selected") }
@@ -1070,6 +1070,12 @@ impl Assistant {
     /// The window is closing: Claude Code must not keep running without it, nor a paid job with nobody
     /// to receive it.
     pub fn shutdown(&self) { self.stop_turn(); self.busy.set(false); let _ = std::fs::remove_file(agent::socket_path()); }
+
+    /// Whether a turn is running (the state tool reports it for scripts).
+    pub fn is_busy(&self) -> bool { self.busy.get() }
+
+    /// Sends `text` as if typed (the --ask script flag).
+    pub fn ask(self: &Rc<Self>, text: &str) { self.entry.set_text(text); self.submit(); }
 
     fn submit(self: &Rc<Self>) {
         let message = self.entry.text().trim().to_string();
