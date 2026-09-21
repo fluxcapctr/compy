@@ -43,8 +43,8 @@ compositing engine, the tools, the file formats and the assistant.
   mark follow the active theme and change with it live when you run `omarchy theme set`. The assistant is
   the Claude Code that Omarchy already ships: your sign-in, your plan, nothing to configure, and Compy
   says so the first time you open it (and tells you the one command to run if you are not signed in yet).
-  Dictation goes through voxtype, Omarchy's own. Installing is one AUR package. It runs on any other
-  Linux desktop too, with the stock GTK look.
+  Dictation goes through voxtype, Omarchy's own. It installs as a regular Arch package. It runs on any
+  other Linux desktop too, with the stock GTK look.
 - **The small things.** Autosave every two minutes with recovery on the start page, rulers, guides, a
   grid, Photoshop's shortcuts and menu layout, and a right-click brush popover.
 
@@ -53,13 +53,16 @@ is an alias.
 
 ## Install
 
-**Omarchy and Arch**, from the AUR (the package builds from this repository):
+**Omarchy and Arch**, as a proper package built from this repository (no AUR account involved):
 
 ```
-omarchy pkg aur add compy-git
+git clone https://github.com/fluxcapctr/compy.git
+cd compy/packaging/aur
+makepkg -si
 ```
 
-or `yay -S compy-git`. Then launch Compy from the app launcher, or run `compy`.
+That builds `compy-git`, installs it with pacman, and puts Compy in the app launcher; `compy` runs it
+from a terminal. Update later by running the same `makepkg -si` again.
 
 **Any Linux**, from a release: download the tarball from the Releases page, unpack it, and run
 `./install.sh` inside. It puts the binary in `~/.local/bin`, the icon and desktop entry under
