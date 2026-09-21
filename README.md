@@ -41,10 +41,10 @@ compositing engine, the tools, the file formats and the assistant.
 
 - **Made for Omarchy.** Compy fits Omarchy without setup. The whole chrome, the app icon and the header
   mark follow the active theme and change with it live when you run `omarchy theme set`. The assistant is
-  the Claude Code that Omarchy already ships: your sign-in, your plan, nothing to configure, and Compy
-  says so the first time you open it (and tells you the one command to run if you are not signed in yet).
-  Dictation goes through voxtype, Omarchy's own. It installs as a regular Arch package. It runs on any
-  other Linux desktop too, with the stock GTK look.
+  Claude Code, the same agent you use with Omarchy: your sign-in, your plan, nothing extra to configure,
+  and if it is not installed or signed in yet, Compy offers a button that does it. Dictation goes
+  through voxtype, Omarchy's own. It installs as a regular Arch package. It runs on any other Linux
+  desktop too, with the stock GTK look.
 - **The small things.** Autosave every two minutes with recovery on the start page, rulers, guides, a
   grid, Photoshop's shortcuts and menu layout, and a right-click brush popover.
 
@@ -92,7 +92,7 @@ The `reference/` submodule (the macOS original, used as the specification) is no
 
 **AI setup, inside the app.** Press Ctrl+K. If anything is missing the assistant shows a strip with a
 button for each thing: "Install Claude Code" or "Sign in to Claude Code" opens a terminal that does
-exactly that (on Omarchy, Claude Code is already installed, so at most it is the sign-in), and "Add
+exactly that (if you already use Claude Code with Omarchy, at most it is the sign-in), and "Add
 fal.ai key" takes the key for generative pictures (fill, expand, new pictures, upscaling, relighting;
 a few cents a picture, billed to your fal account). Everything else in Compy works without either.
 Help > Set Up AI Tools brings the strip back any time. Optional: `libavif` for AVIF export and
