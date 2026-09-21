@@ -33,6 +33,12 @@ compositing engine, the tools, the file formats and the assistant.
   generates and edits pictures (Generative Fill and Expand, Nano Banana, GPT Image, upscaling,
   relighting). It talks about the picture, not the tools, and every tool call is an undoable step you
   watch happen. Dictation works through voxtype.
+- **Generative Fill and Expand.** Select an area, or ask for more canvas, and describe what belongs
+  there. Below, one sentence to the assistant: the canvas grows and the cut-off headdress and rifle are
+  completed on their own layer, with the waiting cut out of the clip.
+
+  ![Generative Expand: a tightly cropped photo extended up and to the right from one request](assets/generative-expand.gif)
+
 - **Made for Omarchy.** Compy fits Omarchy without setup. The whole chrome, the app icon and the header
   mark follow the active theme and change with it live when you run `omarchy theme set`. The assistant is
   the Claude Code that Omarchy already ships: your sign-in, your plan, nothing to configure, and Compy
