@@ -92,7 +92,11 @@ fn origin_offset(layout: &pango::Layout) -> (f64, f64) {
 /// glyph such as an italic F or a swash E is never cut at the layout's edge.
 fn union_extents(layout: &pango::Layout) -> (i32, i32, i32, i32) {
     let (ink, logical) = layout.pixel_extents();
-    (ink.x().min(logical.x()), ink.y().min(logical.y()), (ink.x() + ink.width()).max(logical.x() + logical.width()), (ink.y() + ink.height()).max(logical.y() + logical.height()))
+    let (mut x0, mut x1) = (ink.x().min(logical.x()), (ink.x() + ink.width()).max(logical.x() + logical.width()));
+    // Paragraph text keeps its whole width, so centered or right-aligned lines stay where they were set
+    // (a short line would otherwise be cropped to its ink and land at the box's left edge).
+    if layout.width() > 0 { x0 = x0.min(0); x1 = x1.max(layout.width() / pango::SCALE); }
+    (x0, ink.y().min(logical.y()), x1, (ink.y() + ink.height()).max(logical.y() + logical.height()))
 }
 
 /// The text rendered on a transparent surface just its size, and where the ink's top-left sits relative to

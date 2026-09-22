@@ -1432,3 +1432,19 @@ fn reframe_keeps_a_vignette_as_picture() {
     let t = reframed.renderer.layer(vignette).transform;
     assert!(t.size.0 >= 90.0 && t.size.1 >= 160.0, "the vignette still covers the frame: {t:?}");
 }
+
+#[test]
+fn centered_paragraph_text_keeps_its_width() {
+    // One short line in a 600-pixel paragraph, centered: the layer spans the paragraph, and the ink sits
+    // in its middle rather than at its left edge.
+    let style = compositor::text::TextStyle { text: "hi".into(), size: 40.0, align: 1, width: Some(600.0), ..Default::default() };
+    let (surface, _, _) = compositor::text::render(&style).unwrap();
+    assert!(surface.width() >= 600, "the layer is the paragraph's width, got {}", surface.width());
+    let mut surface = surface;
+    let stride = surface.stride() as usize;
+    let w = surface.width() as usize;
+    let data = surface.data().unwrap();
+    let inked: Vec<usize> = (0..w).filter(|&x| (0..data.len() / stride).any(|y| data[y * stride + x * 4 + 3] > 0)).collect();
+    let mid = (inked[0] + inked[inked.len() - 1]) / 2;
+    assert!((mid as i64 - 300).abs() < 20, "ink centered, its middle at {mid}");
+}
