@@ -465,6 +465,59 @@ const Wall: React.FC = () => {
 };
 
 // ---------------------------------------------------------------------------------------------------
+// Speaks Photoshop: files, brushes and the keys under your fingers.
+const KEYS = ["V", "M", "B", "T", "Ctrl J", "Ctrl T", "Ctrl M", "Ctrl L", "Ctrl U", "Ctrl E"];
+
+const SpeaksPhotoshop: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps, durationInFrames } = useVideoConfig();
+  const beat = Math.floor(frame / (BEAT * FPS));
+  const out = interpolate(frame, [durationInFrames - 8, durationInFrames], [1, 0], clamp);
+  const cards = [
+    { k: ".PSD", v: "Open and save layered Photoshop files." },
+    { k: ".ABR", v: "Your Photoshop brush packs load as they are." },
+  ];
+  return (
+    <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", opacity: out }}>
+      <div style={{ fontFamily: DISPLAY, fontSize: 120, color: INK, textTransform: "uppercase", lineHeight: 1, marginBottom: 46 }}>
+        <Rise delay={0} out={durationInFrames}>Speaks</Rise> <Rise delay={3} out={durationInFrames}><span style={{ color: PEACH }}>Photoshop.</span></Rise>
+      </div>
+      <div style={{ display: "flex", gap: 30, alignItems: "stretch" }}>
+        {cards.map((c, i) => {
+          const sp = spring({ frame: frame - f(BEAT * (1 + i)), fps, config: { damping: 15, stiffness: 140 } });
+          return (
+            <div key={c.k} style={{ width: 430, padding: "34px 38px", borderRadius: 22, background: "rgba(12,22,38,0.85)",
+              border: "1px solid rgba(255,255,255,0.09)", transform: `translateY(${(1 - sp) * 80}px)`, opacity: sp, boxShadow: "0 30px 80px rgba(0,0,0,0.45)" }}>
+              <div style={{ fontFamily: DISPLAY, fontSize: 84, color: ORANGE, lineHeight: 1 }}>{c.k}</div>
+              <div style={{ marginTop: 14, fontFamily: SERIF, fontStyle: "italic", fontSize: 36, color: MUTED, lineHeight: 1.2 }}>{c.v}</div>
+            </div>
+          );
+        })}
+        {(() => {
+          const sp = spring({ frame: frame - f(BEAT * 3), fps, config: { damping: 15, stiffness: 140 } });
+          return (
+            <div style={{ width: 560, padding: "34px 38px", borderRadius: 22, background: "rgba(12,22,38,0.85)",
+              border: "1px solid rgba(255,255,255,0.09)", transform: `translateY(${(1 - sp) * 80}px)`, opacity: sp, boxShadow: "0 30px 80px rgba(0,0,0,0.45)" }}>
+              <div style={{ fontFamily: DISPLAY, fontSize: 56, color: INK, textTransform: "uppercase", lineHeight: 1 }}>The same shortcuts</div>
+              <div style={{ marginTop: 22, display: "flex", flexWrap: "wrap", gap: 12 }}>
+                {KEYS.map((k, i) => {
+                  const lit = i === beat % KEYS.length;
+                  return (
+                    <div key={k} style={{ fontFamily: GROTESK, fontWeight: 600, fontSize: 28, padding: "10px 16px", borderRadius: 10,
+                      color: lit ? NAVY : INK, background: lit ? PEACH : "rgba(255,255,255,0.06)",
+                      border: "1px solid rgba(255,255,255,0.16)", borderBottomWidth: 4, transform: `translateY(${lit ? 3 : 0}px)` }}>{k}</div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+// ---------------------------------------------------------------------------------------------------
 // Where the AI runs: three cards, one per beat pair.
 const AICards: React.FC = () => {
   const frame = useCurrentFrame();
@@ -609,9 +662,10 @@ const Launch: React.FC = () => {
       <Sequence {...seq(atBar(20), atBar(22))} premountFor={30}><FootageScene s={EXPORT} /></Sequence>
       <Sequence {...seq(atBar(22), 64.01)}><Showcase /></Sequence>
       <Sequence {...seq(64.01, 64.01 + BAR * 3)}><Themes /></Sequence>
-      <Sequence {...seq(64.01 + BAR * 3, 64.01 + BAR * 6)}><Wall /></Sequence>
-      <Sequence {...seq(64.01 + BAR * 6, 64.01 + BAR * 8)}><AICards /></Sequence>
-      <Sequence {...seq(64.01 + BAR * 8, TOTAL)}><Outro /></Sequence>
+      <Sequence {...seq(64.01 + BAR * 3, 64.01 + BAR * 5)}><SpeaksPhotoshop /></Sequence>
+      <Sequence {...seq(64.01 + BAR * 5, 64.01 + BAR * 7)}><Wall /></Sequence>
+      <Sequence {...seq(64.01 + BAR * 7, 64.01 + BAR * 9)}><AICards /></Sequence>
+      <Sequence {...seq(64.01 + BAR * 9, TOTAL)}><Outro /></Sequence>
       {frame < 0 ? null : null}
     </AbsoluteFill>
   );

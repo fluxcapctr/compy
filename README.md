@@ -3,16 +3,9 @@
 A layer-based image editor for Linux, in the shape of Photoshop, with an AI assistant built in. Native
 GTK4, written in Rust, built for Omarchy and at home on any Linux desktop.
 
-![A tour of Compy: Curves on a selection, a Gaussian Blur duplicate on Screen, splatter brush tips, glowing type with the Layer Style window, a vignette, the History window, Export Sizes, and the document as three artboards](assets/editor-tour.gif)
+[![Compy launch video: curves, background removal, type behind the subject, generative fill and expand, the assistant grading a photo, Omarchy themes, PSD and ABR support](assets/launch-teaser.gif)](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-launch.mp4)
 
-*Fifty seconds around the editor: Curves on a selection, a blurred duplicate on Screen for a glow,
-textured brush tips, type with a glow and a stroke from the Layer Style window, a gradient vignette,
-History, Export Sizes, and the picture reframed into Instagram, Story and X artboards.
-[Video](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-tour.mp4).*
-
-**[Watch the launch video](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-launch.mp4)**
-(87 seconds, 1080p, with music): the common tools and their dialogs, type behind the subject, generative fill
-and expand, the assistant grading a photo from one sentence, and every social size exported at once.
+*Click for the full launch video with sound (87 seconds, 1080p).*
 
 Compy started as a Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a macOS
 editor whose C pixel core (`csrc/`) is compiled here unchanged. Everything around it is new: the
