@@ -159,3 +159,17 @@ fn a_result_that_drifted_in_tone_is_matched_to_the_picture() {
     assert_pixel(&flat_px, pw, 100, 75, [128, 128, 128, 255], 3);
     assert_pixel(&flat_px, pw, 100, 100, [40, 30, 40, 255], 4);
 }
+
+#[test]
+fn the_model_sees_what_is_under_the_result_not_type_above_it() {
+    let mut d = Document::blank(120, 60, 72.0).unwrap();
+    d.fill([1.0, 1.0, 1.0]).unwrap();
+    let background = d.active.unwrap();
+    let style = compositor::text::TextStyle { text: "WWWW".into(), size: 40.0, color: [0.0; 3], ..Default::default() };
+    d.add_text_layer(&style, 5.0, 5.0).unwrap();
+    d.active = Some(background);
+    d.select_box(40.0, 20.0, 40.0, 20.0, false, Mode::Replace, false).unwrap();
+    let (image, _, _, _) = d.genfill_inputs(true).unwrap();
+    let (px, _, _) = png_pixels(&image);
+    assert!(px.iter().all(|p| p[0] > 240 && p[1] > 240 && p[2] > 240), "no type in what the model is sent");
+}

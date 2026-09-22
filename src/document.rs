@@ -605,7 +605,7 @@ impl Document {
             cr.translate(-(gx0 as f64), -(gy0 as f64));
             cr.rectangle(gx0 as f64, gy0 as f64, w as f64, h as f64);
             cr.clip();
-            if composite { self.renderer.draw(&cr)?; }
+            if composite { self.draw_under_insertion(&cr, None)?; }
             else if let Some(id) = self.active { if !self.renderer.layer(id).is_group() { self.renderer.draw_layer_plain(id, &cr)?; } }
         }
         Self::fill_transparent(&mut image)?;
@@ -668,7 +668,7 @@ impl Document {
             cr.translate(-(l as f64), -(t as f64));
             cr.rectangle(l as f64, t as f64, ow as f64, oh as f64);
             cr.clip();
-            self.renderer.draw(&cr)?;
+            self.draw_under_insertion(&cr, None)?;
         }
         Ok(Some(crate::genfill::Expand { image_png: crate::png_io::png_bytes(&image)?, canvas: (sc(cw), sc(ch)), place: (sc(l), sc(t), sw, sh) }))
     }
@@ -718,14 +718,9 @@ impl Document {
         // What is under the result now.
         let under = new_argb(w, h)?;
         {
-            let was = hide.map(|id| (id, self.renderer.is_visible(id)));
-            if let Some((id, _)) = was { self.renderer.set_visible(id, false); }
             let cr = Context::new(&under)?;
             cr.translate(-(gx0 as f64), -(gy0 as f64));
-            let drawn = self.renderer.draw(&cr);
-            drop(cr);
-            if let Some((id, v)) = was { self.renderer.set_visible(id, v); }
-            drawn?;
+            self.draw_under_insertion(&cr, hide)?;
         }
         let mut placed = placed;
         let mut under = under;
@@ -847,6 +842,22 @@ impl Document {
             Ok(())
         })?;
         Ok(())
+    }
+
+    /// Draws what a new layer would sit on: every layer below the insertion point, with the layers above
+    /// it (type, adjustments, anything stacked on top) left out. Generative Fill and Expand read this, so
+    /// the model does not bake in type or a grade that will still apply over its result.
+    fn draw_under_insertion(&mut self, cr: &Context, also_hide: Option<Uuid>) -> Result<()> {
+        let (index, _) = self.insertion();
+        let above: Vec<Uuid> = self.renderer.layers().iter().enumerate()
+            .filter(|(i, l)| (*i >= index && !l.is_group()) || Some(l.id) == also_hide)
+            .map(|(_, l)| l.id)
+            .filter(|id| self.renderer.is_visible(*id))
+            .collect();
+        for id in &above { self.renderer.set_visible(*id, false); }
+        let drawn = self.renderer.draw(cr);
+        for id in &above { self.renderer.set_visible(*id, true); }
+        drawn
     }
 
     /// The selection Generative Expand fills: everything outside the old picture at `rect`, reaching a
@@ -3561,6 +3572,16 @@ impl Document {
         for layer in self.renderer.layers().to_vec() {
             let mut t = layer.transform;
             t.origin = crate::format::Point(t.origin.0 + dx, t.origin.1 + dy);
+            // An adjustment covers the whole canvas, as it did before: its box grows with it (its mask,
+            // if any, stays where it was painted).
+            let spans_canvas = layer.transform.origin.0 <= 0.0 && layer.transform.origin.1 <= 0.0 && layer.transform.origin.0 + layer.transform.size.0 >= ow as f64 && layer.transform.origin.1 + layer.transform.size.1 >= oh as f64;
+            if layer.adjustment.is_some() && spans_canvas && layer.transform.rotation == 0.0 {
+                if self.renderer.mask(layer.id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(layer.id, Some(t)); }
+                else if let Some(mut p) = layer.mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(layer.id, Some(p)); }
+                let whole = Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), ..layer.transform };
+                self.renderer.set_layer_transform(layer.id, whole);
+                continue;
+            }
             self.renderer.set_layer_transform(layer.id, t);
             if let Some(mut p) = layer.mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(layer.id, Some(p)); }
         }

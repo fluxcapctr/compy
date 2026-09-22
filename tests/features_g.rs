@@ -1464,3 +1464,15 @@ fn reframe_keeps_an_expanded_photo_and_its_cutout_together() {
     let mut r = remake(&e, &story, Fit::Reframe, [1.0; 3]).unwrap();
     for x in [2, 45, 87] { assert_eq!(rgb_at(&mut r, x, 80), [255, 0, 0, 255], "photo at x {x}"); }
 }
+
+#[test]
+fn adjustment_layers_cover_a_grown_canvas() {
+    // Threshold over a light grey picture; the canvas then grows with a dark extension. The adjustment
+    // still covers everything, so the new dark margin thresholds to black too.
+    let mut d = Document::blank(40, 20, 72.0).unwrap();
+    d.fill([0.8, 0.8, 0.8]).unwrap();
+    d.add_adjustment("Threshold").unwrap();
+    d.canvas_size(80, 20, 4, Some([0.2, 0.2, 0.2]), None, "Canvas Size").unwrap();
+    assert_eq!(rgb_at(&mut d, 40, 10), [255, 255, 255, 255], "the old picture, thresholded");
+    assert_eq!(rgb_at(&mut d, 5, 10), [0, 0, 0, 255], "the new margin is adjusted too");
+}
