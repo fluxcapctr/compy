@@ -1448,3 +1448,19 @@ fn centered_paragraph_text_keeps_its_width() {
     let mid = (inked[0] + inked[inked.len() - 1]) / 2;
     assert!((mid as i64 - 300).abs() < 20, "ink centered, its middle at {mid}");
 }
+
+#[test]
+fn reframe_keeps_an_expanded_photo_and_its_cutout_together() {
+    use compositor::export_sizes::{remake, Fit, SizePreset};
+    // A 200 x 100 canvas grown around a 96-pixel-wide photo (as Generative Expand leaves it): blue margins,
+    // the red photo in the middle. The photo is under half the canvas but it is the picture, not a logo.
+    let mut e = Document::blank(200, 100, 72.0).unwrap();
+    e.add_shape_layer(false, (0.0, 0.0, 200.0, 100.0), [0.0, 0.0, 1.0], 0.0).unwrap();
+    let photo = compositor::raster::new_argb(96, 100).unwrap();
+    { let cr = cairo::Context::new(&photo).unwrap(); cr.set_source_rgb(1.0, 0.0, 0.0); cr.paint().unwrap(); }
+    e.add_image_surface(photo, "Photo", (52.0, 0.0), (96.0, 100.0)).unwrap();
+    // A tall size crops the middle of the picture: all photo, no blue margin pulled in beside it.
+    let story = SizePreset { name: "Story".into(), width: 90, height: 160 };
+    let mut r = remake(&e, &story, Fit::Reframe, [1.0; 3]).unwrap();
+    for x in [2, 45, 87] { assert_eq!(rgb_at(&mut r, x, 80), [255, 0, 0, 255], "photo at x {x}"); }
+}

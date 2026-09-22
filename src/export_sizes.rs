@@ -115,11 +115,17 @@ fn element_layers(document: &mut Document) -> Result<Vec<(uuid::Uuid, (f64, f64,
     let mut out = Vec::new();
     for (id, is_text) in candidates {
         let Some((fraction, bounds)) = document.layer_coverage(id)? else { continue };
-        // Type is always an element; anything else is the picture once it covers half the canvas (a
+        // Type is always an element; a shape is the picture once it covers half the canvas (a
         // background rectangle counts as the picture, a small shape as an element). So is anything whose
         // visible pixels reach across most of the canvas however sparse they are: a vignette, a frame, a
         // border, a scatter of dust.
         let span = ((bounds.2 - bounds.0).min(document.width() as f64) * (bounds.3 - bounds.1).min(document.height() as f64)) / area;
+        // Pixels that belong to the photograph move with it: a masked pixel layer (a cutout of the subject,
+        // a Generative Fill, an expanded margin) and a pixel layer holding a real share of the canvas (the
+        // photo itself after the canvas grew around it). Moving those on their own splits the picture.
+        let layer = document.renderer.layer(id);
+        let pixels = !is_text && layer.shape.is_none();
+        if pixels && (document.renderer.mask(id).is_some() || fraction >= 0.25) { continue; }
         if is_text || (fraction < 0.5 && span < 0.6) { out.push((id, bounds)); }
     }
     Ok(out)
