@@ -10,6 +10,10 @@ textured brush tips, type with a glow and a stroke from the Layer Style window, 
 History, Export Sizes, and the picture reframed into Instagram, Story and X artboards.
 [Video](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-tour.mp4).*
 
+**[Watch the launch video](https://github.com/fluxcapctr/compy/releases/download/v0.1.1/compy-launch.mp4)**
+(84 seconds, 1080p): the common tools, the dialogs, the assistant doing a job in plain words, generative fill,
+and every social size exported at once.
+
 Compy started as a Linux rebuild of [Compositor](https://github.com/robbietilton/Compositor), a macOS
 editor whose C pixel core (`csrc/`) is compiled here unchanged. Everything around it is new: the
 compositing engine, the tools, the file formats and the assistant.

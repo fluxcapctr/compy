@@ -293,7 +293,13 @@ impl App {
                 self.with_current(|p| p.canvas.set_tool(t));
                 return Ok(json!("tool set"));
             }
-            bail!("_ui takes activate, close or tool");
+            if let Some(t) = text(args, "ask") {
+                if self.assistant.borrow().is_none() { self.open_assistant(); }
+                let a = self.assistant.borrow().clone();
+                if let Some(a) = a { a.reveal(); a.ask(&t); }
+                return Ok(json!("asked"));
+            }
+            bail!("_ui takes activate, close, tool or ask");
         }
         match tool {
             "open" => {
