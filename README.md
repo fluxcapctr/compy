@@ -19,18 +19,19 @@ compositing engine, the tools, the file formats and the assistant.
   have to relearn anything.
 - **Files.** Its own `.comp` project, Photoshop `.psd` in and out with editable type and layer styles,
   and the usual image formats. Export one document to every ad and social size at once, reframed, or as
-  artboards to fix by hand.
+  artboards to fix by hand:
+
+  ![Export Sizes: the dialog, the document laid out as Instagram, Story and X artboards, and the three exported files](assets/export-sizes.gif)
 - **Compy, the assistant.** Ctrl+K. Tell it what you want and it does the work on layers you can still
   edit, through Claude Code with your own sign-in. With a fal.ai key it also generates, fills, extends,
-  upscales and relights. One sentence in, the layout out, at double speed
-  ([full-speed video](https://github.com/fluxcapctr/compy/releases/download/v0.1.0/compy-demo.mp4)):
+  upscales and relights. One sentence in, a graded photo out (sped up while it works):
 
-  ![The assistant warming a photo up and building a card with type from one request](assets/demo.gif)
+  ![The assistant given one sentence, grading the photo to golden hour with a sun glow and film grain, shown before and after](assets/assistant.gif)
 
 - **Generative Fill and Expand.** Select an area, or ask for more canvas, and describe what belongs
-  there. Here the canvas grows and the cut-off headdress and rifle are completed on their own layer:
+  there. Here two flamingos are painted into a selection, then the portrait grows into a panorama:
 
-  ![Generative Expand: a tightly cropped photo extended up and to the right from one request](assets/generative-expand.gif)
+  ![Generative Fill adding flamingos to a salt flat, then Generative Expand widening the portrait into a panorama](assets/generative.gif)
 
 - **Made for Omarchy.** The whole chrome follows the active Omarchy theme, live. The assistant is Claude
   Code, the same agent you use with Omarchy; if it is not installed or signed in yet, Compy offers a
