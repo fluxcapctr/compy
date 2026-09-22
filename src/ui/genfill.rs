@@ -130,8 +130,10 @@ impl GenFill {
         if key.is_none() && !genfill::is_local(&model.id) { self.status.set_label("No fal.ai key found."); return }
         let inputs = { let mut d = self.doc.borrow_mut(); d.document.genfill_inputs(self.composite.is_active()) };
         let (image_png, mask_png, window, _) = match inputs { Ok(i) => i, Err(e) => { self.status.set_label(&format!("{e:#}")); return } };
+        // A pending Generative Expand goes to the outpainting model when the fill would go to fal.
+        let expand = if genfill::is_local(&model.id) { None } else { self.doc.borrow_mut().document.expand_inputs(genfill::EXPAND_MAX_SIDE).ok().flatten() };
         self.window_rect.set(Some(window));
-        let request = genfill::Request { model, prompt: self.prompt.text().to_string(), count: self.count.value() as u32, seed: None, image_png, mask_png };
+        let request = genfill::Request { model, prompt: self.prompt.text().to_string(), count: self.count.value() as u32, seed: None, image_png, mask_png, expand };
         let shared = Arc::new(Mutex::new(Shared { status: "Starting…".into(), done: None, cancel: false }));
         *self.running.borrow_mut() = Some(shared.clone());
         self.generate.set_sensitive(false);

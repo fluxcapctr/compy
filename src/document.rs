@@ -54,6 +54,9 @@ pub struct Document {
     pub effects_preview: Option<(Uuid, Option<serde_json::Value>)>,
     /// View > Show Grid: (spacing of the major lines, subdivisions per spacing), or None when hidden.
     pub grid: Option<(f64, u32)>,
+    /// The last Generative Expand: the grown canvas's size and where the old picture sits in it, so the
+    /// fill can go to a model made for outpainting.
+    pub expand_source: Option<((i32, i32), (i32, i32, i32, i32))>,
 }
 
 /// Selected pixels lifted off their layer while they are dragged (`PixelMove`): everything in the layer's own
@@ -117,7 +120,7 @@ impl Document {
         let (guides_v, guides_h) = project.manifest.guides.as_ref().map(|g| (g.vertical.clone(), g.horizontal.clone())).unwrap_or_default();
         let renderer = Renderer::new(project)?;
         let selected = active.into_iter().collect();
-        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v, guides_h, show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None })
+        Ok(Document { renderer, selection: None, active, history: History::new(100, 256 * 1024 * 1024), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id, path, dirty: None, selected, pixel_move: None, matte_cache: None, guides_v, guides_h, show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None, expand_source: None })
     }
 
     pub fn width(&self) -> i32 { self.renderer.width() }
@@ -595,17 +598,27 @@ impl Document {
         let scale = (crate::genfill::MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
         let (sw, sh) = (((w as f64 * scale).round() as i32).max(1), ((h as f64 * scale).round() as i32).max(1));
         // The pixels, over an opaque neutral so transparency does not read as black to the model.
-        let image = new_argb(sw, sh)?;
+        let mut image = new_argb(sw, sh)?;
         {
             let cr = Context::new(&image)?;
-            cr.set_source_rgb(0.5, 0.5, 0.5);
-            cr.paint()?;
             cr.scale(sw as f64 / w as f64, sh as f64 / h as f64);
             cr.translate(-(gx0 as f64), -(gy0 as f64));
             cr.rectangle(gx0 as f64, gy0 as f64, w as f64, h as f64);
             cr.clip();
             if composite { self.renderer.draw(&cr)?; }
             else if let Some(id) = self.active { if !self.renderer.layer(id).is_group() { self.renderer.draw_layer_plain(id, &cr)?; } }
+        }
+        Self::fill_transparent(&mut image)?;
+        {
+            // Whatever is still see-through (an empty window) goes over neutral grey, not black.
+            let under = new_argb(sw, sh)?;
+            let cr = Context::new(&under)?;
+            cr.set_source_rgb(0.5, 0.5, 0.5);
+            cr.paint()?;
+            cr.set_source_surface(&image, 0.0, 0.0)?;
+            cr.paint()?;
+            drop(cr);
+            image = under;
         }
         let mask = new_argb(sw, sh)?;
         {
@@ -617,7 +630,47 @@ impl Document {
             cr.set_source_rgb(1.0, 1.0, 1.0);
             if let Some(sel) = &self.selection { cr.mask_surface(&sel.mask, 0.0, 0.0)?; }
         }
-        Ok((crate::png_io::png_bytes(&image)?, crate::png_io::png_bytes(&mask)?, window, scale))
+        // Models read a grey mask as "half keep", and paint a framed inset into a feathered hole. They get
+        // everything the selection touches as solid white; the feathered edge applies when the result lands.
+        {
+            let mut mask = mask;
+            let stride = mask.stride() as usize;
+            {
+                let mut data = mask.data()?;
+                for y in 0..sh as usize {
+                    for px in data[y * stride..y * stride + sw as usize * 4].chunks_exact_mut(4) {
+                        let v = if px[0].max(px[1]).max(px[2]) > 8 { 255 } else { 0 };
+                        px[0] = v; px[1] = v; px[2] = v; px[3] = 255;
+                    }
+                }
+            }
+            return Ok((crate::png_io::png_bytes(&image)?, crate::png_io::png_bytes(&mask)?, window, scale));
+        }
+    }
+
+    /// For a Generative Expand still waiting to be filled: the old picture (as it composites now), the
+    /// grown canvas's size and the picture's place in it, all scaled so the canvas's long side is at most
+    /// `max_side`. None when the canvas or selection no longer match the expand.
+    pub fn expand_inputs(&mut self, max_side: i32) -> Result<Option<crate::genfill::Expand>> {
+        let Some(((cw, ch), (l, t, ow, oh))) = self.expand_source else { return Ok(None) };
+        if (cw, ch) != (self.width(), self.height()) { return Ok(None); }
+        let Some(sel) = &self.selection else { return Ok(None) };
+        if sel.contains((l + ow / 2) as f64, (t + oh / 2) as f64) { return Ok(None); }
+        let k = (max_side as f64 / cw.max(ch) as f64).min(1.0);
+        let sc = |v: i32| ((v as f64 * k).round() as i32).max(1);
+        let (sw, sh) = (sc(ow), sc(oh));
+        let image = new_argb(sw, sh)?;
+        {
+            let cr = Context::new(&image)?;
+            cr.set_source_rgb(0.5, 0.5, 0.5);
+            cr.paint()?;
+            cr.scale(sw as f64 / ow as f64, sh as f64 / oh as f64);
+            cr.translate(-(l as f64), -(t as f64));
+            cr.rectangle(l as f64, t as f64, ow as f64, oh as f64);
+            cr.clip();
+            self.renderer.draw(&cr)?;
+        }
+        Ok(Some(crate::genfill::Expand { image_png: crate::png_io::png_bytes(&image)?, canvas: (sc(cw), sc(ch)), place: (sc(l), sc(t), sw, sh) }))
     }
 
     /// A generated image laid over `window` as a new layer above the active one, shown only through the
@@ -638,6 +691,7 @@ impl Document {
         }
         let transform = Transform { origin: crate::format::Point(gx0 as f64, gy0 as f64), size: crate::format::Size(w as f64, h as f64), rotation: 0.0, flip_x: false, flip_y: false, sampling: Default::default() };
         let mask = match &self.selection { Some(sel) => Some(sel.coverage_on_layer(&transform, w, h)?), None => None };
+        let placed = self.match_tone(placed, window, mask.as_ref(), None)?;
         let (index, parent) = self.insertion();
         let mut record = self.blank_record(self.unique_name(name), parent);
         record.transform = transform;
@@ -649,6 +703,111 @@ impl Document {
         self.select_layer(Some(id));
         self.end_edit();
         Ok(id)
+    }
+
+    /// Generation models hand back the whole context window, and the part they were told to keep often comes
+    /// back a little lighter, darker or tinted. Inside the mask that drift shows as a box however soft the
+    /// edge. This measures the drift where the result should equal the picture (outside the mask), smooths it
+    /// into a slowly varying field, carries it across the masked area, and takes it out of the result. A
+    /// result that differs from the picture everywhere is a different picture, not drift, and is left alone.
+    fn match_tone(&mut self, placed: ImageSurface, window: (i32, i32, i32, i32), mask: Option<&ImageSurface>, hide: Option<Uuid>) -> Result<ImageSurface> {
+        let (gx0, gy0, gx1, gy1) = window;
+        let (w, h) = (gx1 - gx0, gy1 - gy0);
+        let Some(mask) = mask else { return Ok(placed) };
+        if placed.width() != w || placed.height() != h || mask.width() != w || mask.height() != h { return Ok(placed); }
+        // What is under the result now.
+        let under = new_argb(w, h)?;
+        {
+            let was = hide.map(|id| (id, self.renderer.is_visible(id)));
+            if let Some((id, _)) = was { self.renderer.set_visible(id, false); }
+            let cr = Context::new(&under)?;
+            cr.translate(-(gx0 as f64), -(gy0 as f64));
+            let drawn = self.renderer.draw(&cr);
+            drop(cr);
+            if let Some((id, v)) = was { self.renderer.set_visible(id, v); }
+            drawn?;
+        }
+        let mut placed = placed;
+        let mut under = under;
+        // A private copy: the mask surface is shared, and reading pixels needs sole ownership.
+        let mut mask = {
+            let copy = crate::raster::a8_filled(w, h, 0)?;
+            let cr = Context::new(&copy)?;
+            cr.set_source_surface(mask, 0.0, 0.0)?;
+            cr.set_operator(cairo::Operator::Source);
+            cr.paint()?;
+            drop(cr);
+            copy
+        };
+        let (ps, us, ms) = (placed.stride() as usize, under.stride() as usize, mask.stride() as usize);
+        // A coarse grid of the drift, weighted by how surely each pixel is outside the mask and opaque.
+        let cells = 40usize;
+        let cell = ((w.max(h) as usize + cells - 1) / cells).max(1);
+        let (gw, gh) = ((w as usize + cell - 1) / cell, (h as usize + cell - 1) / cell);
+        let mut num = vec![[0f64; 3]; gw * gh];
+        let mut wt = vec![0f64; gw * gh];
+        let (mut total, mut total_w) = (0f64, 0f64);
+        {
+            let pd = placed.data()?; let ud = under.data()?; let md = mask.data()?;
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let m = md[y * ms + x] as f64 / 255.0;
+                    let (p, u) = (&pd[y * ps + x * 4..y * ps + x * 4 + 4], &ud[y * us + x * 4..y * us + x * 4 + 4]);
+                    let a = (p[3] as f64 / 255.0) * (u[3] as f64 / 255.0) * (1.0 - m);
+                    if a < 0.5 { continue; }
+                    let c = (y / cell) * gw + x / cell;
+                    for k in 0..3 { let d = (u[k] as f64 - p[k] as f64) / 255.0; num[c][k] += a * d; total += a * d.abs(); }
+                    wt[c] += a; total_w += a;
+                }
+            }
+        }
+        if total_w < 64.0 || total / (3.0 * total_w) > 0.15 { return Ok(placed); }
+        // Normalized convolution with one radius sized to the hole, so the field has no steps; cells it
+        // cannot reach take the overall drift.
+        let blur = |src: &[f64], r: usize| -> Vec<f64> {
+            let mut tmp = vec![0f64; gw * gh];
+            let mut out = vec![0f64; gw * gh];
+            let sigma = (r as f64 / 2.0).max(0.5);
+            let k: Vec<f64> = (0..=2 * r).map(|i| { let t = i as f64 - r as f64; (-(t * t) / (2.0 * sigma * sigma)).exp() }).collect();
+            for y in 0..gh { for x in 0..gw { let mut s = 0.0; for (i, kv) in k.iter().enumerate() { let xx = x as i64 + i as i64 - r as i64; if xx >= 0 && (xx as usize) < gw { s += kv * src[y * gw + xx as usize]; } } tmp[y * gw + x] = s; } }
+            for y in 0..gh { for x in 0..gw { let mut s = 0.0; for (i, kv) in k.iter().enumerate() { let yy = y as i64 + i as i64 - r as i64; if yy >= 0 && (yy as usize) < gh { s += kv * tmp[yy as usize * gw + x]; } } out[y * gw + x] = s; } }
+            out
+        };
+        let full = (cell * cell) as f64;
+        let hole = wt.iter().filter(|&&v| v < 0.5 * full).count();
+        let r = ((hole as f64).sqrt().ceil() as usize).clamp(2, cells);
+        let global: Vec<f64> = (0..3).map(|k| num.iter().map(|n| n[k]).sum::<f64>() / total_w).collect();
+        let bw = blur(&wt, r);
+        let bn: Vec<Vec<f64>> = (0..3).map(|k| blur(&num.iter().map(|n| n[k]).collect::<Vec<_>>(), r)).collect();
+        let mut field = vec![[0f64; 3]; gw * gh];
+        for c in 0..gw * gh {
+            // Blend toward the overall drift where the local estimate has little support.
+            let t = (bw[c] / (0.25 * full)).min(1.0);
+            for k in 0..3 { let local = if bw[c] > 1e-9 { bn[k][c] / bw[c] } else { global[k] }; field[c][k] = (local * t + global[k] * (1.0 - t)).clamp(-0.2, 0.2); }
+        }
+        // Applied bilinearly over the result, premultiplied (the drift scales with coverage).
+        {
+            let mut pd = placed.data()?;
+            let at = |gx: f64, gy: f64, k: usize| -> f64 {
+                let (fx, fy) = ((gx - 0.5).clamp(0.0, (gw - 1) as f64), (gy - 0.5).clamp(0.0, (gh - 1) as f64));
+                let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                let (x1, y1) = ((x0 + 1).min(gw - 1), (y0 + 1).min(gh - 1));
+                let (tx, ty) = (fx - x0 as f64, fy - y0 as f64);
+                let v = |x: usize, y: usize| field[y * gw + x][k];
+                (v(x0, y0) * (1.0 - tx) + v(x1, y0) * tx) * (1.0 - ty) + (v(x0, y1) * (1.0 - tx) + v(x1, y1) * tx) * ty
+            };
+            for y in 0..h as usize {
+                let gy = (y as f64 + 0.5) / cell as f64;
+                for x in 0..w as usize {
+                    let gx = (x as f64 + 0.5) / cell as f64;
+                    let px = &mut pd[y * ps + x * 4..y * ps + x * 4 + 4];
+                    let a = px[3] as f64;
+                    for k in 0..3 { px[k] = (px[k] as f64 + at(gx, gy, k) * a).round().clamp(0.0, a) as u8; }
+                }
+            }
+        }
+        placed.mark_dirty();
+        Ok(placed)
     }
 
     /// Another variation into the layer a generation made: its pixels swapped, as one undo step.
@@ -664,6 +823,8 @@ impl Document {
             cr.source().set_filter(cairo::Filter::Good);
             cr.paint()?;
         }
+        let mask = self.renderer.mask(id).cloned();
+        let placed = self.match_tone(placed, window, mask.as_ref(), Some(id))?;
         self.begin_edit("Generative Fill Variation");
         self.renderer.set_image(id, placed);
         self.end_edit();
@@ -681,10 +842,84 @@ impl Document {
             d.canvas_size(width, height, anchor, None, None, "Generative Expand")?;
             let dx = (((width - ow) as f64) * (anchor % 3) as f64 / 2.0).floor();
             let dy = (((height - oh) as f64) * (anchor / 3) as f64 / 2.0).floor();
-            let inside = Selection::from_shape(width, height, false, |cr| { cr.rectangle(dx, dy, ow as f64, oh as f64); cr.fill()?; Ok(()) })?;
-            d.selection = Some(inside.inverted()?);
+            d.selection = Some(Self::expand_margin(width, height, (dx as i32, dy as i32, ow, oh))?);
+            d.expand_source = Some(((width, height), (dx as i32, dy as i32, ow, oh)));
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// The selection Generative Expand fills: everything outside the old picture at `rect`, reaching a
+    /// little way into it with a soft edge so the new margin blends into the picture instead of butting
+    /// against it along a line.
+    pub fn expand_margin(width: i32, height: i32, rect: (i32, i32, i32, i32)) -> Result<Selection> {
+        let (l, t, ow, oh) = rect;
+        let o = ((ow.min(oh) as f64) * 0.015).clamp(6.0, 48.0);
+        let (w, h) = (width as usize, height as usize);
+        let mut packed = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+                // How far inside the old picture this pixel is (negative outside it).
+                let d = (fx - l as f64).min((l + ow) as f64 - fx).min(fy - t as f64).min((t + oh) as f64 - fy);
+                // The old picture's edges that meet the canvas edge need no seam.
+                let d = {
+                    let mut e = f64::INFINITY;
+                    if l > 0 { e = e.min(fx - l as f64); }
+                    if l + ow < width { e = e.min((l + ow) as f64 - fx); }
+                    if t > 0 { e = e.min(fy - t as f64); }
+                    if t + oh < height { e = e.min((t + oh) as f64 - fy); }
+                    if d < 0.0 { d } else { e }
+                };
+                packed[y * w + x] = ((1.0 - d / o).clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+        Selection::from_packed(&packed, width, height)
+    }
+
+    /// Transparent parts of a context window filled by carrying the picture's edge pixels straight out,
+    /// along rows and then along columns, so a model outpainting a new margin sees the horizon and the
+    /// ground carry on instead of a flat grey wall, which it tends to copy as a border or a haze.
+    fn fill_transparent(image: &mut ImageSurface) -> Result<()> {
+        let (w, h, stride) = (image.width() as usize, image.height() as usize, image.stride() as usize);
+        let mut d = image.data()?;
+        let solid = |d: &[u8], x: usize, y: usize| d[y * stride + x * 4 + 3] >= 250;
+        let mut any_hole = false;
+        let mut row_done = vec![false; h];
+        for y in 0..h {
+            let firsts: Vec<usize> = (0..w).filter(|&x| solid(&d, x, y)).collect();
+            if firsts.is_empty() { any_hole = true; continue; }
+            if firsts.len() < w { any_hole = true; }
+            // Each see-through pixel takes the nearest solid pixel in its row.
+            let mut last: Option<usize> = None;
+            let mut nearest = vec![0usize; w];
+            for x in 0..w { if solid(&d, x, y) { last = Some(x); } nearest[x] = last.unwrap_or(usize::MAX); }
+            let mut next: Option<usize> = None;
+            for x in (0..w).rev() {
+                if solid(&d, x, y) { next = Some(x); }
+                let l = nearest[x];
+                nearest[x] = match (l, next) { (usize::MAX, Some(n)) => n, (l, Some(n)) if n.abs_diff(x) < l.abs_diff(x) => n, (l, _) => l };
+            }
+            for x in 0..w {
+                let n = nearest[x];
+                if n != x && n != usize::MAX { let (src, dst) = (y * stride + n * 4, y * stride + x * 4); for k in 0..4 { d[dst + k] = d[src + k]; } d[dst + 3] = 255; }
+            }
+            row_done[y] = true;
+        }
+        if !any_hole { return Ok(()); }
+        if row_done.iter().all(|r| !r) { return Ok(()); }
+        // Rows with no picture at all take the nearest row that had some.
+        for y in 0..h {
+            if row_done[y] { continue; }
+            let up = (0..y).rev().find(|&r| row_done[r]);
+            let down = (y + 1..h).find(|&r| row_done[r]);
+            let src = match (up, down) { (Some(u), Some(dn)) => if y - u <= dn - y { u } else { dn }, (Some(u), None) => u, (None, Some(dn)) => dn, _ => continue };
+            let (a, b) = (src * stride, y * stride);
+            let row: Vec<u8> = d[a..a + w * 4].to_vec();
+            d[b..b + w * 4].copy_from_slice(&row);
+        }
+        drop(d);
+        image.mark_dirty();
         Ok(())
     }
 
@@ -3107,7 +3342,7 @@ impl Document {
 
     /// Ctrl-drag within one document: the dragged layers duplicated at `place`.
     pub fn copy_layers_within(&mut self, ids: &[Uuid], place: Place) -> Result<Vec<Uuid>> {
-        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None };
+        let snapshot = Document { renderer: Renderer::new(Project { path: std::path::PathBuf::new(), manifest: self.manifest(), images: self.renderer.images().clone(), masks: self.renderer.masks().clone() })?, selection: None, active: None, history: History::new(1, 1), stroke: None, stroke_layer: None, warp: None, stroke_mask: false, mask_target: false, document_id: self.document_id, path: None, dirty: None, selected: Default::default(), pixel_move: None, matte_cache: None, guides_v: Vec::new(), guides_h: Vec::new(), show_guides: true, snap: true, grid: None, last_selection: None, floating: None, last_filter: None, edit_serial: 0, effects_preview: None, expand_source: None };
         self.copy_layers(&snapshot, ids, place)
     }
 

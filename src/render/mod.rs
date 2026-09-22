@@ -643,6 +643,7 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn is_visible(&self, id: Uuid) -> bool { self.layers[self.index[&id]].is_visible }
     pub fn set_visible(&mut self, id: Uuid, visible: bool) { self.touch(); let i = self.index[&id]; self.layers[i].is_visible = visible; }
     pub fn set_opacity(&mut self, id: Uuid, opacity: f64) { self.touch(); let i = self.index[&id]; self.layers[i].opacity = Some(opacity.clamp(0.0, 1.0)); }
     pub fn set_blend_mode(&mut self, id: Uuid, mode: BlendMode) { self.touch(); let i = self.index[&id]; self.layers[i].blend_mode = Some(mode); }

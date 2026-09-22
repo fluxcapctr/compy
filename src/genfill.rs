@@ -239,6 +239,34 @@ pub struct Request {
     /// PNG bytes of the context window and of its mask (white where the model paints).
     pub image_png: Vec<u8>,
     pub mask_png: Vec<u8>,
+    /// Set for Generative Expand: fal's outpainting model gets the old picture and its place instead of
+    /// a masked window (inpainting models tend to repaint wide margins as bands or panels).
+    pub expand: Option<Expand>,
+}
+
+/// The inputs for outpainting: the old picture, the size of the grown canvas and the picture's place in
+/// it (x, y, width, height), in the same scaled pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expand {
+    pub image_png: Vec<u8>,
+    pub canvas: (i32, i32),
+    pub place: (i32, i32, i32, i32),
+}
+
+/// fal's outpainting model, used for Generative Expand whatever fill model is picked.
+pub const EXPAND_MODEL: &str = "fal-ai/bria/expand";
+/// The long side, in pixels, of the canvas sent to the outpainting model.
+pub const EXPAND_MAX_SIDE: i32 = 2560;
+
+/// The request body for `EXPAND_MODEL`.
+pub fn expand_body(prompt: &str, e: &Expand) -> serde_json::Value {
+    serde_json::json!({
+        "image_url": data_uri(&e.image_png),
+        "canvas_size": [e.canvas.0, e.canvas.1],
+        "original_image_size": [e.place.2, e.place.3],
+        "original_image_location": [e.place.0, e.place.1],
+        "prompt": prompt.trim(),
+    })
 }
 
 pub fn data_uri(png: &[u8]) -> String { format!("data:image/png;base64,{}", base64_encode(png)) }
@@ -285,7 +313,19 @@ impl Backend for Fal {
 
 impl Fal {
     fn generate_once(&self, request: &Request, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Vec<Vec<u8>>> {
-        self.run(&request.model.id, body(request), progress, cancelled)
+        let out = match &request.expand {
+            Some(e) => self.run(EXPAND_MODEL, expand_body(&request.prompt, e), progress, cancelled)?,
+            None => self.run(&request.model.id, body(request), progress, cancelled)?,
+        };
+        // For diagnosing a model: COMPOSITOR_GENFILL_DUMP=dir keeps what went out and what came back.
+        if let Ok(dir) = std::env::var("COMPOSITOR_GENFILL_DUMP") {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("image.png"), &request.image_png);
+            let _ = std::fs::write(dir.join("mask.png"), &request.mask_png);
+            for (i, png) in out.iter().enumerate() { let _ = std::fs::write(dir.join(format!("result{i}.png")), png); }
+        }
+        Ok(out)
     }
 
     /// Any fal model through the queue: submit `body`, wait, fetch, and download every image in the
@@ -384,7 +424,7 @@ mod tests {
     fn base64_round_trips_and_the_body_has_the_fields() {
         for data in [&b""[..], b"f", b"fo", b"foo", b"\x00\xff\x10\x80"] { assert_eq!(base64_decode(&base64_encode(data)).unwrap(), data); }
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
-        let r = Request { model: default_models()[0].clone(), prompt: "".into(), count: 9, seed: Some(7), image_png: vec![1, 2], mask_png: vec![3] };
+        let r = Request { model: default_models()[0].clone(), prompt: "".into(), count: 9, seed: Some(7), image_png: vec![1, 2], mask_png: vec![3], expand: None };
         let b = body(&r);
         assert!(b["image_url"].as_str().unwrap().starts_with("data:image/png;base64,"));
         assert_eq!(b["num_images"], 4);

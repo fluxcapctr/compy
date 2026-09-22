@@ -679,10 +679,9 @@ impl App {
                             }
                             // Grow the canvas, then select the new margin for the fill.
                             dd.canvas_size(w + l + r, h + t + b, 4, None, Some((l as f64, t as f64)), "Generative Expand")?;
-                            let all = crate::selection::Selection::all(w + l + r, h + t + b)?;
-                            let inner = crate::selection::Selection::from_shape(w + l + r, h + t + b, false, |cr| { cr.rectangle(l as f64, t as f64, w as f64, h as f64); cr.fill()?; Ok(()) })?;
-                            let margin = all.combined(&inner, crate::selection::Mode::Subtract)?;
+                            let margin = crate::document::Document::expand_margin(w + l + r, h + t + b, (l, t, w, h))?;
                             dd.set_selection(Some(margin), "Select Margin");
+                            dd.expand_source = Some(((w + l + r, h + t + b), (l, t, w, h)));
                         }
                         let window = dd.genfill_window()?;
                         let (sw, sh) = crate::genfill::scaled_size(window);
@@ -690,7 +689,8 @@ impl App {
                         let cost = crate::genfill::estimate(&model, sw, sh, count);
                         if flag(args, "estimate_only").unwrap_or(false) { refresh = false; return Ok(json!({"model": model.name, "estimated_cost_usd": cost})); }
                         let (image_png, mask_png, window, _) = dd.genfill_inputs(true)?;
-                        let request = crate::genfill::Request { model: model.clone(), prompt, count, seed: None, image_png, mask_png };
+                        let expand = if tool == "generative_expand" && !crate::genfill::is_local(&model.id) { dd.expand_inputs(crate::genfill::EXPAND_MAX_SIDE)? } else { None };
+                        let request = crate::genfill::Request { model: model.clone(), prompt, count, seed: None, image_png, mask_png, expand };
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
                         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let job = NEXT_JOB.with(|n| { let v = n.get(); n.set(v + 1); v });

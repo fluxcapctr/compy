@@ -125,7 +125,7 @@ fn a_fake_backend_drives_the_flow() {
     d.fill([1.0, 1.0, 1.0]).unwrap();
     d.select_box(16.0, 16.0, 32.0, 32.0, false, Mode::Replace, false).unwrap();
     let (image_png, mask_png, window, _) = d.genfill_inputs(true).unwrap();
-    let request = genfill::Request { model: genfill::default_models()[0].clone(), prompt: "a cat".into(), count: 2, seed: None, image_png, mask_png };
+    let request = genfill::Request { model: genfill::default_models()[0].clone(), prompt: "a cat".into(), count: 2, seed: None, image_png, mask_png, expand: None };
     let results = Fake.generate(&request, &|_| {}, &|| false).unwrap();
     assert_eq!(results.len(), 2);
     d.apply_genfill(&results[0], window, "Generative Fill").unwrap();
@@ -133,4 +133,29 @@ fn a_fake_backend_drives_the_flow() {
     assert_pixel(&px, pw, 32, 32, [255, 0, 255, 255], 0);
     assert_pixel(&px, pw, 2, 2, WHITE, 0);
     assert!(genfill::key().is_none() || !genfill::key().unwrap().is_empty());
+}
+
+#[test]
+fn a_result_that_drifted_in_tone_is_matched_to_the_picture() {
+    // The picture is mid grey; the "model" hands back the window 20 levels warmer, with a dark square
+    // painted in the hole. The drift comes out; what was painted stays darker than the picture.
+    let mut f = Fixture::new("genfill-tone", 200, 200);
+    let id = f.add(Spec { size: (200.0, 200.0), pixels: Some(solid(200, 200, [128, 128, 128, 255])), ..Default::default() });
+    let mut d = Document::new(f.load().unwrap()).unwrap();
+    d.active = Some(id);
+    d.select_box(70.0, 70.0, 60.0, 60.0, false, Mode::Replace, false).unwrap();
+    let (_, _, window, _) = d.genfill_inputs(true).unwrap();
+    let (w, h) = ((window.2 - window.0) as usize, (window.3 - window.1) as usize);
+    let mut px = Vec::with_capacity(w * h * 4);
+    for y in 0..h { for x in 0..w {
+        let (dx, dy) = (x as i32 + window.0, y as i32 + window.1);
+        let inside = (90..110).contains(&dx) && (90..110).contains(&dy);
+        px.extend_from_slice(&if inside { [60u8, 40, 40, 255] } else { [148u8, 138, 128, 255] });
+    } }
+    let png = compositor::png_io::png_bytes(&compositor::png_io::from_straight_rgba(&px, w, h).unwrap()).unwrap();
+    d.apply_genfill(&png, window, "Generative Fill").unwrap();
+    let (flat_px, pw) = flat(&mut d);
+    assert_pixel(&flat_px, pw, 75, 100, [128, 128, 128, 255], 3);
+    assert_pixel(&flat_px, pw, 100, 75, [128, 128, 128, 255], 3);
+    assert_pixel(&flat_px, pw, 100, 100, [40, 30, 40, 255], 4);
 }
