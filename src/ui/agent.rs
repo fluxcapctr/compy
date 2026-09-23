@@ -51,6 +51,21 @@ fn agent_path(arg: &str) -> Result<std::path::PathBuf> {
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) { bail!("paths with .. are not allowed"); }
     if !path.starts_with(&home) { bail!("paths must be inside {}", home.display()); }
     if path.strip_prefix(&home).ok().into_iter().flat_map(|p| p.components()).any(|c| c.as_os_str().to_string_lossy().starts_with('.')) { bail!("hidden folders under {} are off limits to the assistant", home.display()); }
+    // The same rules again on where the path really leads: a symbolic link inside the home folder must
+    // not reach a hidden folder or somewhere else on the disk. The deepest part that exists is resolved
+    // and the rest (a file about to be written) is appended to it.
+    let real_home = std::fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+    let mut existing = path.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|n| n.to_os_string()) else { break };
+        rest.push(name);
+        if !existing.pop() { break; }
+    }
+    let mut real = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for name in rest.iter().rev() { real.push(name); }
+    if !real.starts_with(&real_home) { bail!("{} leads outside {}", path.display(), home.display()); }
+    if real.strip_prefix(&real_home).ok().into_iter().flat_map(|p| p.components()).any(|c| c.as_os_str().to_string_lossy().starts_with('.')) { bail!("{} leads into a hidden folder", path.display()); }
     Ok(path)
 }
 
@@ -690,6 +705,8 @@ impl App {
                         if flag(args, "estimate_only").unwrap_or(false) { refresh = false; return Ok(json!({"model": model.name, "estimated_cost_usd": cost})); }
                         let (image_png, mask_png, window, _) = dd.genfill_inputs(true)?;
                         let expand = if tool == "generative_expand" && !crate::genfill::is_local(&model.id) { dd.expand_inputs(crate::genfill::EXPAND_MAX_SIDE)? } else { None };
+                        // The outpainting model answers with the whole grown canvas, so that is where it lands.
+                        let window = if expand.is_some() { (0, 0, dd.width(), dd.height()) } else { window };
                         let request = crate::genfill::Request { model: model.clone(), prompt, count, seed: None, image_png, mask_png, expand };
                         let status = std::sync::Arc::new(std::sync::Mutex::new((String::from("Starting"), None)));
                         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1345,6 +1362,17 @@ mod path_tests {
         assert!(agent_path(&format!("{home}/Pictures/../../x")).is_err());
         assert!(agent_path(&format!("{home}/.ssh/config")).is_err(), "hidden folders are off limits");
         assert!(agent_path("").is_err());
+        // A link inside the home folder that points into a hidden folder is refused.
+        let dir = std::path::PathBuf::from(&home).join(format!("compy-path-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let link = dir.join("link");
+        let _ = std::fs::remove_file(&link);
+        if std::os::unix::fs::symlink(std::path::PathBuf::from(&home).join(".config"), &link).is_ok() {
+            assert!(agent_path(&link.join("x.png").to_string_lossy()).is_err(), "a link into a hidden folder");
+            let _ = std::fs::remove_file(&link);
+            assert!(agent_path(&dir.join("new.png").to_string_lossy()).is_ok(), "a new file in a real folder");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(num(&json!({"w": "400"}), "w"), Some(400.0), "numbers come as text too");
         assert_eq!(flag(&json!({"t": "true"}), "t"), Some(true));
         assert_eq!(num(&json!({"w": true}), "w"), None);

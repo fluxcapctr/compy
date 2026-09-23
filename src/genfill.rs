@@ -217,9 +217,17 @@ pub fn save_key(key: &str) -> Result<()> {
     if key.is_empty() { bail!("The key is empty."); }
     let path = config_dir().join("fal.key");
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
-    std::fs::write(&path, format!("{key}\n"))?;
+    // Made readable by the user only before the key goes in, so it is never readable by others.
     #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)); }
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(format!("{key}\n").as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, format!("{key}\n"))?;
     Ok(())
 }
 

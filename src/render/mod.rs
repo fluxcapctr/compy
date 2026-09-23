@@ -1196,7 +1196,7 @@ impl Renderer {
     /// What a mask shows beyond its pixels once placed apart from its layer: white or black, whichever most
     /// of its edge is. The reference reads a 96-pixel thumbnail's border; this averages the same band at full size.
     pub fn mask_background(&mut self, id: Uuid) -> Result<u8> {
-        let mask = self.masks.get_mut(&id).unwrap();
+        let mask = self.masks.get_mut(&id).ok_or_else(|| anyhow::anyhow!("the layer has no mask"))?;
         let (w, h) = (mask.width() as usize, mask.height() as usize);
         let band = w.max(h).div_ceil(96);
         let bright = with_bytes(mask, |data, stride| {

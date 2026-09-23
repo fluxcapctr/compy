@@ -173,3 +173,22 @@ fn the_model_sees_what_is_under_the_result_not_type_above_it() {
     let (px, _, _) = png_pixels(&image);
     assert!(px.iter().all(|p| p[0] > 240 && p[1] > 240 && p[2] > 240), "no type in what the model is sent");
 }
+
+#[test]
+fn a_one_sided_expand_goes_to_outpainting_and_a_later_fill_does_not() {
+    // Grown to the right only: the margin is one strip, and the outpainting inputs cover the whole canvas
+    // with the old picture at the left.
+    let mut d = Document::blank(40, 30, 72.0).unwrap();
+    d.fill([1.0, 0.0, 0.0]).unwrap();
+    d.expand_canvas_for_fill(100, 30, 3).unwrap();
+    let e = d.expand_inputs(2560).unwrap().expect("the margin selection is the expand's");
+    assert_eq!(e.canvas, (100, 30));
+    assert_eq!(e.place, (0, 0, 40, 30), "the old picture at the left edge");
+    // A fill selected later in the new area is an ordinary fill.
+    d.select_box(60.0, 5.0, 20.0, 10.0, false, Mode::Replace, false).unwrap();
+    assert!(d.expand_inputs(2560).unwrap().is_none(), "a later selection does not go to outpainting");
+    // Nor after the expand is undone.
+    d.select_all().unwrap();
+    d.undo();
+    assert!(d.expand_inputs(2560).unwrap().is_none());
+}

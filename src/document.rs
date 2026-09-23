@@ -655,7 +655,20 @@ impl Document {
         let Some(((cw, ch), (l, t, ow, oh))) = self.expand_source else { return Ok(None) };
         if (cw, ch) != (self.width(), self.height()) { return Ok(None); }
         let Some(sel) = &self.selection else { return Ok(None) };
-        if sel.contains((l + ow / 2) as f64, (t + oh / 2) as f64) { return Ok(None); }
+        // Only the expand's own margin selection counts: every grown side selected along its length, and
+        // the old picture left out (clear of the soft seam). A fill made later in the same canvas is a fill.
+        let o = ((ow.min(oh) as f64) * 0.015).clamp(6.0, 48.0) * 2.0 + 2.0;
+        let (lf, tf, owf, ohf) = (l as f64, t as f64, ow as f64, oh as f64);
+        let inside = [(lf + owf / 2.0, tf + ohf / 2.0), (lf + o, tf + o), (lf + owf - o, tf + o), (lf + o, tf + ohf - o), (lf + owf - o, tf + ohf - o)];
+        if inside.iter().any(|&(x, y)| sel.contains(x, y)) { return Ok(None); }
+        let mut margin: Vec<(f64, f64)> = Vec::new();
+        for k in [0.1, 0.5, 0.9] {
+            if l > 0 { margin.push((lf / 2.0, ch as f64 * k)); }
+            if l + ow < cw { margin.push(((lf + owf + cw as f64) / 2.0, ch as f64 * k)); }
+            if t > 0 { margin.push((cw as f64 * k, tf / 2.0)); }
+            if t + oh < ch { margin.push((cw as f64 * k, (tf + ohf + ch as f64) / 2.0)); }
+        }
+        if margin.is_empty() || !margin.iter().all(|&(x, y)| sel.contains(x, y)) { return Ok(None); }
         let k = (max_side as f64 / cw.max(ch) as f64).min(1.0);
         let sc = |v: i32| ((v as f64 * k).round() as i32).max(1);
         let (sw, sh) = (sc(ow), sc(oh));
@@ -670,7 +683,8 @@ impl Document {
             cr.clip();
             self.draw_under_insertion(&cr, None)?;
         }
-        Ok(Some(crate::genfill::Expand { image_png: crate::png_io::png_bytes(&image)?, canvas: (sc(cw), sc(ch)), place: (sc(l), sc(t), sw, sh) }))
+        let at = |v: i32| (v as f64 * k).round() as i32;
+        Ok(Some(crate::genfill::Expand { image_png: crate::png_io::png_bytes(&image)?, canvas: (sc(cw), sc(ch)), place: (at(l), at(t), sw, sh) }))
     }
 
     /// A generated image laid over `window` as a new layer above the active one, shown only through the
@@ -764,6 +778,9 @@ impl Document {
             let mut out = vec![0f64; gw * gh];
             let sigma = (r as f64 / 2.0).max(0.5);
             let k: Vec<f64> = (0..=2 * r).map(|i| { let t = i as f64 - r as f64; (-(t * t) / (2.0 * sigma * sigma)).exp() }).collect();
+            // Normalized, so a blurred weight reads as the share of the neighbourhood that has support.
+            let sum: f64 = k.iter().sum();
+            let k: Vec<f64> = k.into_iter().map(|v| v / sum).collect();
             for y in 0..gh { for x in 0..gw { let mut s = 0.0; for (i, kv) in k.iter().enumerate() { let xx = x as i64 + i as i64 - r as i64; if xx >= 0 && (xx as usize) < gw { s += kv * src[y * gw + xx as usize]; } } tmp[y * gw + x] = s; } }
             for y in 0..gh { for x in 0..gw { let mut s = 0.0; for (i, kv) in k.iter().enumerate() { let yy = y as i64 + i as i64 - r as i64; if yy >= 0 && (yy as usize) < gh { s += kv * tmp[yy as usize * gw + x]; } } out[y * gw + x] = s; } }
             out
@@ -848,7 +865,9 @@ impl Document {
     /// it (type, adjustments, anything stacked on top) left out. Generative Fill and Expand read this, so
     /// the model does not bake in type or a grade that will still apply over its result.
     fn draw_under_insertion(&mut self, cr: &Context, also_hide: Option<Uuid>) -> Result<()> {
-        let (index, _) = self.insertion();
+        // A layer being refilled is the landing spot itself: it and everything above it are left out,
+        // whatever layer is active now.
+        let index = match also_hide.and_then(|id| self.renderer.layer_index(id)) { Some(i) => i, None => self.insertion().0 };
         let above: Vec<Uuid> = self.renderer.layers().iter().enumerate()
             .filter(|(i, l)| (*i >= index && !l.is_group()) || Some(l.id) == also_hide)
             .map(|(_, l)| l.id)
@@ -1371,6 +1390,18 @@ impl Document {
         let (rw, rh) = self.renderer.image_size(id).unwrap_or((image.width(), image.height()));
         let (sx, sy) = (layer.transform.size.0 / rw.max(1) as f64, layer.transform.size.1 / rh.max(1) as f64);
         let mut transform = layer.transform;
+        // A paragraph layer cropped to its ink (from a PSD, or saved before paragraphs kept their width)
+        // is moved left by where its ink sat in the paragraph, so centered and right-aligned lines stay put.
+        if old.width.is_some_and(|w| w >= 1.0) && transform.rotation == 0.0 {
+            let (full, _, _) = crate::text::render(&old)?;
+            if rw + 1 < full.width() {
+                let mut full = full;
+                let (fw, fh, stride) = (full.width() as usize, full.height() as usize, full.stride() as usize);
+                let data = full.data()?;
+                let ink = (0..fw).find(|&x| (0..fh).any(|y| data[y * stride + x * 4 + 3] > 0)).unwrap_or(0);
+                transform.origin = crate::format::Point(transform.origin.0 - ink as f64 * sx, transform.origin.1);
+            }
+        }
         transform.size = crate::format::Size((image.width() as f64 * sx).max(1.0), (image.height() as f64 * sy).max(1.0));
         self.begin_edit("Edit Text");
         if self.renderer.mask(id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(id, Some(layer.transform)); }
@@ -3576,8 +3607,31 @@ impl Document {
             // if any, stays where it was painted).
             let spans_canvas = layer.transform.origin.0 <= 0.0 && layer.transform.origin.1 <= 0.0 && layer.transform.origin.0 + layer.transform.size.0 >= ow as f64 && layer.transform.origin.1 + layer.transform.size.1 >= oh as f64;
             if layer.adjustment.is_some() && spans_canvas && layer.transform.rotation == 0.0 {
-                if self.renderer.mask(layer.id).is_some() && layer.mask_placement.is_none() { self.renderer.set_mask_placement(layer.id, Some(t)); }
-                else if let Some(mut p) = layer.mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(layer.id, Some(p)); }
+                // A painted mask is redrawn onto a mask the size of the new canvas: where it was painted it
+                // stays, and the new area shows whatever its edge shows (white reveals, black hides), so the
+                // adjustment does not stop at the old canvas's edge.
+                let placement = layer.mask_placement.unwrap_or(layer.transform);
+                if self.renderer.mask(layer.id).is_some() && placement.rotation == 0.0 {
+                    let background = self.renderer.mask_background(layer.id)?;
+                    let old = self.renderer.mask(layer.id).cloned().ok_or_else(|| anyhow::anyhow!("the mask went away"))?;
+                    let grown = crate::raster::a8_filled(width, height, background)?;
+                    {
+                        let cr = Context::new(&grown)?;
+                        let (px, py) = (placement.origin.0 + dx, placement.origin.1 + dy);
+                        cr.rectangle(px, py, placement.size.0, placement.size.1);
+                        cr.clip();
+                        cr.translate(px, py);
+                        cr.scale(placement.size.0 / old.width().max(1) as f64, placement.size.1 / old.height().max(1) as f64);
+                        cr.set_source_surface(&old, 0.0, 0.0)?;
+                        cr.source().set_filter(cairo::Filter::Good);
+                        // Padded, so a mask stored small (a flat one is a single pixel) keeps its value to its edges.
+                        cr.source().set_extend(cairo::Extend::Pad);
+                        cr.set_operator(cairo::Operator::Source);
+                        cr.paint()?;
+                    }
+                    self.renderer.set_mask(layer.id, Some(grown));
+                    self.renderer.set_mask_placement(layer.id, None);
+                } else if let Some(mut p) = layer.mask_placement { p.origin = crate::format::Point(p.origin.0 + dx, p.origin.1 + dy); self.renderer.set_mask_placement(layer.id, Some(p)); }
                 let whole = Transform { origin: crate::format::Point(0.0, 0.0), size: crate::format::Size(width as f64, height as f64), ..layer.transform };
                 self.renderer.set_layer_transform(layer.id, whole);
                 continue;

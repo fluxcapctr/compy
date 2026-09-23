@@ -1476,3 +1476,18 @@ fn adjustment_layers_cover_a_grown_canvas() {
     assert_eq!(rgb_at(&mut d, 40, 10), [255, 255, 255, 255], "the old picture, thresholded");
     assert_eq!(rgb_at(&mut d, 5, 10), [0, 0, 0, 255], "the new margin is adjusted too");
 }
+
+#[test]
+fn a_masked_adjustment_still_covers_a_grown_canvas() {
+    // Threshold with a revealing mask over a light grey picture; the canvas grows with a dark extension.
+    // The new margin is past the mask's painted pixels and still takes the adjustment.
+    let mut d = Document::blank(40, 20, 72.0).unwrap();
+    d.fill([0.8, 0.8, 0.8]).unwrap();
+    d.add_adjustment("Threshold").unwrap();
+    d.add_mask(true).unwrap();
+    d.canvas_size(80, 20, 4, Some([0.2, 0.2, 0.2]), None, "Canvas Size").unwrap();
+    assert_eq!(rgb_at(&mut d, 40, 10), [255, 255, 255, 255], "the old picture, thresholded");
+    assert_eq!(rgb_at(&mut d, 5, 10), [0, 0, 0, 255], "the new margin is adjusted too");
+    d.undo();
+    assert_eq!((d.width(), d.height()), (40, 20));
+}
