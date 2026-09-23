@@ -658,3 +658,70 @@ throwaway probe programs against the library in a temp dir; do not change projec
 
 Report only; do not refactor or restyle. Write the report to
 /home/estevens/code/compositor-linux/REVIEW_RESULTS_9.md. No em dashes in your output.
+
+---
+
+# Gemini review prompt
+
+Paste everything below the line into Gemini, pointing it at this folder:
+`/home/estevens/code/compositor-linux`.
+
+---
+
+Review the Rust project at /home/estevens/code/compositor-linux. You are a fresh pair of eyes after nine
+review rounds and a whole-project audit, so look for what those missed rather than repeating them.
+
+Context: Compy is a Photoshop-style image editor for Linux, built for Omarchy. It is a Rust rebuild of a
+macOS app: the Swift source in reference/ is the spec and is read-only, and the original C pixel core in
+csrc/ is compiled unchanged (do not suggest editing either). Everything else is Rust on GTK4 and Cairo.
+Read CLAUDE.md, README.md and docs/MANUAL.md first. docs/reviews/ holds every earlier round
+(REVIEW_RESULTS*.md) and the audit (AUDIT_FULL.md, audit/*.md) with status tables of what was fixed; do
+not re-report a fixed finding unless the fix is wrong or incomplete.
+
+Key facts:
+
+- Cairo ARGB32 is premultiplied BGRA in memory. ImageSurface::data() needs the surface unreferenced by
+  any live pattern, context or clone.
+- Undo is a stack of value snapshots that share surfaces by refcount (src/history.rs). Document::edited
+  closes exactly the edit it opened; previews must never become history steps.
+- The assistant (src/ui/agent.rs, src/agent.rs) is driven by Claude Code over a Unix socket and MCP. Its
+  file tools are confined to the home folder outside hidden folders. Generation goes to fal.ai with the
+  user's key (src/genfill.rs), or to a local ComfyUI (src/comfy.rs).
+- PSD, ABR, GBR, PAT, HEIC and .comp files are untrusted input.
+
+Look hardest at code that changed most recently (git log -15), which no earlier round has seen:
+
+1. Generative Fill tone matching and landing (Document::match_tone, apply_genfill, replace_genfill,
+   draw_under_insertion, genfill_inputs in src/document.rs). Check the drift math, the premultiplied
+   arithmetic, visibility being restored on every path including errors, and the solid mask sent to the
+   model.
+2. Generative Expand through Bria (expand_inputs, expand_margin, Document::expand_source, the
+   expand branch in src/genfill.rs and the two callers). Check stale expand_source after undo, a canvas
+   change, or a different selection, and scaling between the sent canvas and the landing window.
+3. canvas_size_body now resizes adjustment layers to the new canvas. Check masks, rotated or clipped
+   adjustments, undo, and crop (a shrinking canvas).
+4. Export Sizes element rule (element_layers in src/export_sizes.rs): masked pixel layers and pixel
+   layers of a quarter canvas or more now stay with the picture. Find documents where that is wrong.
+5. Paragraph text keeping its width (union_extents in src/text.rs): hit testing, the type tool's caret,
+   PSD export of paragraph type, and transforms that assumed the old ink-cropped size.
+
+Then the whole codebase:
+
+6. Bugs with file:line, the input that triggers each, and what goes wrong. Rank by severity.
+7. Panics reachable from user input or from a malformed file (unwrap, expect, indexing, slicing,
+   integer overflow, division by zero, unbounded allocation).
+8. Security: the agent socket and its permissions, path confinement in the file tools, anything that
+   runs a shell command or opens a URL, how the fal.ai key is stored and whether it can leak into logs,
+   requests or saved files, and get.sh and install.sh.
+9. Behavior that differs from Photoshop in a way a Photoshop user would call a bug (shortcuts, blend
+   modes, layer style rendering, selection and transform behavior, PSD round trips).
+10. Tests in tests/ that assert the wrong value, are tautological, or would pass with the feature
+    broken.
+
+Run cargo build --release and cargo test --release (needs the gtk4, cairo and libheif development
+packages; about 205 tests should pass, 2 ignored) and report anything that fails. If you can only read
+files, skip this step and say so.
+
+Report only: do not refactor, restyle or rewrite files. Write your findings to
+docs/reviews/GEMINI_RESULTS.md as a numbered list, each with severity (P1 to P3), file:line, trigger,
+consequence and a suggested fix in a sentence or two. No em dashes in your output.
